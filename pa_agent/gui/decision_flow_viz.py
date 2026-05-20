@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PyQt6.QtCore import pyqtSignal
 
 from pa_agent.ai.decision_tree import (
     _BRANCH_DISPLAY_ZH,
@@ -749,6 +750,8 @@ def _build_playback_path(placed: list[_Placed], *, total_steps: int) -> list[QPo
 class DecisionFlowVizPanel(QWidget):
     """Branched flowchart of the AI walk (yes=右 / no=左)."""
 
+    playback_finished = pyqtSignal()
+
     def __init__(self, parent: QWidget | None = None, *, show_controls: bool = True) -> None:
         super().__init__(parent)
         self._settings: Any = None
@@ -859,6 +862,10 @@ class DecisionFlowVizPanel(QWidget):
         self._start_playback(self._last_placed)
         return True
 
+    def is_playing(self) -> bool:
+        """Whether the camera/path playback is currently running."""
+        return bool(self._play_active)
+
     def _play_duration_seconds(self) -> int:
         if self._settings is None:
             return 50
@@ -916,6 +923,7 @@ class DecisionFlowVizPanel(QWidget):
         if self._play_index >= len(self._play_points):
             self._stop_playback()
             self._play_status.setText("播放完成")
+            self.playback_finished.emit()
 
     def wheelEvent(self, event: Any) -> None:  # noqa: N802
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

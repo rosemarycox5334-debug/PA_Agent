@@ -160,8 +160,11 @@ class MainWindow(QMainWindow):
         self._free_chat_session: Any = None
         self._last_stage1_diagnosis: dict | None = None
         self._demo_mode = False
+        self._demo_mode_kind: str | None = None  # manual | auto
         self._demo_record_path: str | None = None
         self._demo_replayer: Any = None
+        self._demo_auto_next_armed = False
+        self._demo_waiting_flow_playback = False
         # RefreshLoop runs in its own QThread
         self._refresh_loop: Any = None
         self._refresh_thread: QThread | None = None
@@ -194,6 +197,15 @@ class MainWindow(QMainWindow):
         self._decision_panel = self._ai_sidebar.decision
         self._decision_tree_panel = self._ai_sidebar.decision_tree
         self._decision_flow_viz_panel = self._ai_sidebar.decision_flow_viz
+
+        # Auto demo: when flow playback ends, return to stream tab.
+        try:
+            self._decision_flow_viz_panel.playback_finished.connect(
+                self._on_demo_flow_playback_finished,
+                Qt.ConnectionType.UniqueConnection,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
         self._central = self._build_workbench()
         self.setCentralWidget(self._central)
@@ -789,6 +801,9 @@ class MainWindow(QMainWindow):
         from pa_agent.config.paths import RECORDS_PENDING_DIR
         from pa_agent.demo.record_loader import load_analysis_record, pick_random_record_path
 
+        self._demo_mode_kind = str(mode)
+        self._demo_auto_next_armed = False
+
         if mode == "manual":
             start_dir = str(RECORDS_PENDING_DIR)
             path_str, _ = QFileDialog.getOpenFileName(
@@ -828,6 +843,81 @@ class MainWindow(QMainWindow):
 
         self._enter_demo_mode(path, record)
 
+    def _try_load_random_demo_record(self) -> tuple[Any, Any] | tuple[None, None]:
+        """Return (path, record) for a random pending record, or (None, None)."""
+        from pa_agent.demo.record_loader import load_analysis_record, list_pending_record_paths
+
+        paths = list_pending_record_paths()
+        if not paths:
+            return None, None
+
+        def _has_flow_viz_payload(rec: Any) -> bool:
+            s2 = getattr(rec, "stage2_decision", None)
+            if not isinstance(s2, dict):
+                return False
+            return bool(s2.get("decision_trace") or s2.get("terminal"))
+
+        # Try a few times to avoid repeating the same record when possible.
+        last = self._demo_record_path or ""
+        # Pass 1: prefer records that can render decision-flow visualization
+        for _ in range(10):
+            import random
+
+            path = random.choice(paths)
+            if len(paths) > 1 and str(path) == last:
+                continue
+            try:
+                record = load_analysis_record(path)
+            except Exception:  # noqa: BLE001
+                continue
+            if _has_flow_viz_payload(record):
+                return path, record
+        # Pass 2 fallback: any record with stage1/stage2 payload (may not have flow viz)
+        for _ in range(10):
+            import random
+
+            path = random.choice(paths)
+            if len(paths) > 1 and str(path) == last:
+                continue
+            try:
+                record = load_analysis_record(path)
+            except Exception:  # noqa: BLE001
+                continue
+            if getattr(record, "stage2_decision", None) or getattr(record, "stage1_diagnosis", None):
+                return path, record
+        # Fallback: just take the newest valid one
+        for path in paths:
+            try:
+                record = load_analysis_record(path)
+            except Exception:  # noqa: BLE001
+                continue
+            if _has_flow_viz_payload(record) or getattr(record, "stage2_decision", None) or getattr(record, "stage1_diagnosis", None):
+                return path, record
+        return None, None
+
+    def _schedule_next_auto_demo(self, *, delay_ms: int = 650) -> None:
+        """In auto demo mode, schedule the next random record replay."""
+        from PyQt6.QtCore import QTimer
+
+        if not self._demo_mode or self._demo_mode_kind != "auto":
+            return
+        if self._demo_auto_next_armed:
+            return
+        self._demo_auto_next_armed = True
+
+        def _go() -> None:
+            self._demo_auto_next_armed = False
+            if not self._demo_mode or self._demo_mode_kind != "auto":
+                return
+            path, record = self._try_load_random_demo_record()
+            if path is None or record is None:
+                self._status_bar.showMessage("自动演示：未找到可用记录，已停止")
+                self._exit_demo_mode()
+                return
+            self._enter_demo_mode(path, record)
+
+        QTimer.singleShot(max(60, int(delay_ms)), _go)
+
     def _enter_demo_mode(self, path: Any, record: Any) -> None:
         """Switch UI into demo state and start timed replay."""
         from pathlib import Path
@@ -841,7 +931,10 @@ class MainWindow(QMainWindow):
             self._worker.wait(_WORKER_JOIN_TIMEOUT_MS)
             self._worker = None
 
+        # When auto-chaining records, we reuse the same demo "kind".
+        prev_kind = self._demo_mode_kind
         self._exit_demo_mode(silent=True)
+        self._demo_mode_kind = prev_kind
 
         self._demo_mode = True
         self._demo_record_path = str(Path(path))
@@ -904,6 +997,7 @@ class MainWindow(QMainWindow):
     def _on_demo_replay_done(self) -> None:
         """End demo analysis-in-progress state after replay completes."""
         from pathlib import Path
+        from PyQt6.QtCore import QTimer
 
         self._analysis_in_progress = False
         self._update_submit_button_state()
@@ -913,11 +1007,46 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_stream_panel", None)
         if panel is not None:
             panel.set_input_enabled(False)
+        if self._demo_mode and self._demo_mode_kind == "auto":
+            # Wait for decision-flow playback to complete before switching records.
+            self._demo_waiting_flow_playback = True
+
+            def _fallback_if_no_flow_started() -> None:
+                if not self._demo_mode or self._demo_mode_kind != "auto":
+                    return
+                if not self._demo_waiting_flow_playback:
+                    return
+                flow = getattr(self, "_decision_flow_viz_panel", None)
+                if flow is not None and getattr(flow, "is_playing", None) and flow.is_playing():
+                    return
+                # No playback started (no path), proceed to next record.
+                self._demo_waiting_flow_playback = False
+                self._status_bar.showMessage("自动演示：准备下一条…")
+                self._schedule_next_auto_demo()
+
+            # Give _present_decision_flow_playback() a moment to start play_path().
+            QTimer.singleShot(450, _fallback_if_no_flow_started)
+
+    def _on_demo_flow_playback_finished(self) -> None:
+        """After flow-viz playback completes, return to stream in auto demo mode."""
+        if not getattr(self, "_demo_mode", False):
+            return
+        if getattr(self, "_demo_mode_kind", None) != "auto":
+            return
+        sidebar = getattr(self, "_ai_sidebar", None)
+        if sidebar is not None:
+            sidebar.focus_stream()
+        if getattr(self, "_demo_waiting_flow_playback", False):
+            self._demo_waiting_flow_playback = False
+            self._status_bar.showMessage("自动演示：准备下一条…")
+            self._schedule_next_auto_demo()
 
     def _exit_demo_mode(self, *, silent: bool = False) -> None:
         """Leave demo mode and restore live controls."""
         from pathlib import Path
 
+        self._demo_auto_next_armed = False
+        self._demo_waiting_flow_playback = False
         if self._demo_replayer is not None:
             self._demo_replayer.stop()
             self._demo_replayer.deleteLater()
@@ -925,6 +1054,7 @@ class MainWindow(QMainWindow):
 
         was_demo = self._demo_mode
         self._demo_mode = False
+        self._demo_mode_kind = None
         self._demo_record_path = None
         self._demo_btn.setText("演示模式")
         self._demo_mode_label.hide()
