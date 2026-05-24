@@ -176,6 +176,10 @@ class MainWindow(QMainWindow):
         self._demo_auto_next_armed = False
         self._demo_waiting_flow_playback = False
         self._startup_api_key_check_done = False
+        # Replay mode state
+        self._replay_mode = False
+        self._replay_source: Any = None
+        self._replay_panel: Any = None
         # RefreshLoop runs in its own QThread
         self._refresh_loop: Any = None
         self._refresh_thread: QThread | None = None
@@ -333,6 +337,11 @@ class MainWindow(QMainWindow):
         self._demo_btn.clicked.connect(self._on_demo_mode_button)
         ctrl_layout.addWidget(self._demo_btn)
 
+        self._replay_btn = QPushButton("逐K回放")
+        self._replay_btn.setToolTip("加载历史K线数据，逐根回放分析")
+        self._replay_btn.clicked.connect(self._on_enter_replay_mode)
+        ctrl_layout.addWidget(self._replay_btn)
+
         self._resume_chart_btn = QPushButton("图表实时更新")
         self._resume_chart_btn.setEnabled(False)
         self._resume_chart_btn.setToolTip("分析进行中会暂停图表刷新；分析开始后点此恢复 K 线实时更新")
@@ -359,6 +368,17 @@ class MainWindow(QMainWindow):
         )
         self._api_key_alert_label.hide()
         outer_layout.addWidget(self._api_key_alert_label)
+
+        # ── Replay panel (hidden by default) ─────────────────────────────────
+        from pa_agent.gui.replay_panel import ReplayPanel
+        self._replay_panel = ReplayPanel()
+        self._replay_panel.load_history_requested.connect(self._on_replay_load_history)
+        self._replay_panel.next_bar_requested.connect(self._on_replay_next_bar)
+        self._replay_panel.exit_replay_requested.connect(self._on_replay_exit)
+        self._replay_panel.submit_analysis_requested.connect(self._on_replay_submit_analysis)
+        self._replay_panel.incremental_analysis_requested.connect(self._on_replay_incremental_analysis)
+        self._replay_panel.hide()
+        outer_layout.addWidget(self._replay_panel)
 
         status_row = QHBoxLayout()
         status_row.addStretch()
@@ -510,6 +530,278 @@ class MainWindow(QMainWindow):
         self._status_bar.showMessage("图表已恢复实时更新")
         self._refresh_chart_once()
 
+    # ── Replay mode ──────────────────────────────────────────────────────────
+
+    def _on_enter_replay_mode(self) -> None:
+        """Enter replay mode: show replay panel, pause live updates."""
+        if self._replay_mode:
+            return
+        if self._analysis_in_progress:
+            self._status_bar.showMessage("请等待当前分析完成后再进入回放模式")
+            return
+
+        self._replay_mode = True
+        self._replay_panel.show()
+        self._replay_panel.set_replay_active(False)
+        self._replay_panel.set_status("请选择时间范围并点击「加载历史数据」")
+        self._replay_btn.setEnabled(False)
+        self._set_chart_refresh_paused(True)
+        self._update_submit_button_state()
+        self._status_bar.showMessage("回放模式：选择时间范围后加载历史数据")
+
+    def _on_replay_load_history(
+        self, start_dt: datetime, end_dt: datetime
+    ) -> None:
+        """Load historical data from MT5 for the given date range."""
+        data_source = getattr(self._ctx, "data_source", None)
+        if data_source is None or not getattr(data_source, "_connected", False):
+            self._replay_panel.set_status("错误：数据源未连接")
+            return
+
+        symbol = self._symbol_combo.currentText().strip()
+        timeframe = self._tf_combo.currentText()
+
+        # ── MT5 expects server time ──────────────────────────────────────
+        # The naive datetime from the panel IS the server time (e.g. UTC+8
+        # for Chinese futures).  Do NOT convert — MT5's copy_rates_range
+        # treats datetime/int arguments as server time.
+        self._replay_panel.set_loading(True)
+        self._replay_panel.set_status(
+            f"正在加载 {symbol} {timeframe} 历史数据…"
+        )
+
+        try:
+            bars = data_source.load_history_range(
+                symbol, timeframe, start_dt, end_dt
+            )
+        except Exception as exc:
+            logger.error("History load failed: %s", exc)
+            self._replay_panel.set_loading(False)
+            self._replay_panel.set_status(f"加载失败：{exc}")
+            return
+
+        if not bars:
+            self._replay_panel.set_loading(False)
+            self._replay_panel.set_status("该时间范围内无数据")
+            return
+
+        # Create ReplaySource
+        from pa_agent.data.replay_source import ReplaySource
+
+        self._replay_source = ReplaySource(bars, symbol, timeframe)
+
+        # Show first bar on chart
+        frame = self._replay_source.current_frame()
+        self._chart_widget.set_frame_now(frame)
+
+        # Enable replay controls
+        self._replay_panel.set_loading(False)
+        self._replay_panel.set_replay_active(True)
+        self._replay_panel.update_progress(
+            self._replay_source.current_index + 1,
+            self._replay_source.total_count,
+        )
+        self._replay_panel.set_status(
+            f"已加载 {len(bars)} 根K线，点击「下一步」逐K推进"
+        )
+        self._status_bar.showMessage(
+            f"回放模式：已加载 {len(bars)} 根K线"
+        )
+
+    def _on_replay_next_bar(self) -> None:
+        """Advance one bar and update the chart."""
+        if self._replay_source is None:
+            return
+
+        if not self._replay_source.advance():
+            self._replay_panel.set_status("已到达最后一根K线")
+            self._replay_panel.set_next_enabled(False)
+            return
+
+        # Build and display the frame
+        frame = self._replay_source.current_frame()
+        self._chart_widget.set_frame_now(frame)
+
+        # Update progress
+        self._replay_panel.update_progress(
+            self._replay_source.current_index + 1,
+            self._replay_source.total_count,
+        )
+
+        # Show bar timestamp info (ts_open is server-time milliseconds)
+        newest = frame.bars[0]
+        from datetime import datetime as dt, timedelta as td
+
+        _EPOCH = dt(1970, 1, 1)
+        ts_server = _EPOCH + td(seconds=newest.ts_open / 1000)
+        ts_str = ts_server.strftime("%m-%d %H:%M")
+
+        logger.debug(
+            "Replay next bar: ts_open=%s ms, ts_server=%s",
+            newest.ts_open,
+            ts_server.isoformat(),
+        )
+
+        self._replay_panel.set_status(
+            f"已推进至 {ts_str}，共 {self._replay_source.current_index + 1} 根K线"
+        )
+
+    def _on_replay_submit_analysis(self) -> None:
+        """Run AI analysis on the current replay frame (auto-detect incremental)."""
+        if self._replay_source is None:
+            return
+
+        # Build analysis frame (use all bars up to current position)
+        frame = self._replay_source.analysis_frame()
+
+        orchestrator = self._build_orchestrator()
+        if orchestrator is None:
+            self._replay_panel.set_status("编排器未就绪，请检查设置")
+            return
+
+        # Try to find a prior record for incremental analysis
+        symbol = self._replay_source.symbol
+        timeframe = self._replay_source.timeframe
+        previous_record, incremental_new_bar_count, incremental_detail = (
+            self._find_incremental_base_record(
+                frame,
+                symbol,
+                timeframe,
+                force_incremental=False,
+            )
+        )
+
+        from pa_agent.util.threading import CancelToken
+
+        self._cancel_token = CancelToken()
+
+        self._worker = _AnalysisWorker(
+            orchestrator=orchestrator,
+            frame=frame,
+            cancel_token=self._cancel_token,
+            previous_record=previous_record,
+            incremental_new_bar_count=incremental_new_bar_count,
+            parent=None,
+        )
+        self._worker.finished.connect(self._on_analysis_finished)
+        self._worker.record_ready.connect(self._on_record_ready)
+        self._worker.error_occurred.connect(self._on_analysis_error)
+        self._worker.status_update.connect(self._on_status_update)
+        self._worker.finished.connect(lambda _: self._on_worker_done())
+
+        panel = getattr(self, "_stream_panel", None)
+        if panel is not None:
+            self._worker.stage_prompt_ready.connect(panel.on_stage_prompt_ready)
+            self._worker.reasoning_token.connect(panel.on_reasoning_token)
+            self._worker.content_token.connect(panel.on_content_token)
+
+        self._analysis_in_progress = True
+        self._update_submit_button_state()
+        self._replay_panel.set_next_enabled(False)
+        self._replay_panel.set_submit_enabled(False)
+        self._replay_panel.set_incremental_enabled(False)
+        self._ai_sidebar.focus_stream()
+        if panel is not None:
+            panel.clear()
+            panel.on_analysis_started()
+
+        if incremental_new_bar_count is not None:
+            detail = incremental_detail or f"新增{incremental_new_bar_count}根K线"
+            self._replay_panel.set_status(f"增量分析中…（{detail}）")
+        else:
+            self._replay_panel.set_status("AI 分析中…")
+
+        self._worker.start()
+
+    def _on_replay_incremental_analysis(self) -> None:
+        """Run forced incremental analysis on the current replay frame."""
+        if self._replay_source is None:
+            return
+
+        frame = self._replay_source.analysis_frame()
+
+        orchestrator = self._build_orchestrator()
+        if orchestrator is None:
+            self._replay_panel.set_status("编排器未就绪，请检查设置")
+            return
+
+        symbol = self._replay_source.symbol
+        timeframe = self._replay_source.timeframe
+        previous_record, incremental_new_bar_count, incremental_detail = (
+            self._find_incremental_base_record(
+                frame,
+                symbol,
+                timeframe,
+                force_incremental=True,
+            )
+        )
+
+        if previous_record is None:
+            reason = self._incremental_unavailable_reason(frame, symbol, timeframe)
+            self._replay_panel.set_status(reason)
+            return
+
+        from pa_agent.util.threading import CancelToken
+
+        self._cancel_token = CancelToken()
+
+        self._worker = _AnalysisWorker(
+            orchestrator=orchestrator,
+            frame=frame,
+            cancel_token=self._cancel_token,
+            previous_record=previous_record,
+            incremental_new_bar_count=incremental_new_bar_count,
+            parent=None,
+        )
+        self._worker.finished.connect(self._on_analysis_finished)
+        self._worker.record_ready.connect(self._on_record_ready)
+        self._worker.error_occurred.connect(self._on_analysis_error)
+        self._worker.status_update.connect(self._on_status_update)
+        self._worker.finished.connect(lambda _: self._on_worker_done())
+
+        panel = getattr(self, "_stream_panel", None)
+        if panel is not None:
+            self._worker.stage_prompt_ready.connect(panel.on_stage_prompt_ready)
+            self._worker.reasoning_token.connect(panel.on_reasoning_token)
+            self._worker.content_token.connect(panel.on_content_token)
+
+        self._analysis_in_progress = True
+        self._update_submit_button_state()
+        self._replay_panel.set_next_enabled(False)
+        self._replay_panel.set_submit_enabled(False)
+        self._replay_panel.set_incremental_enabled(False)
+        self._ai_sidebar.focus_stream()
+        if panel is not None:
+            panel.clear()
+            panel.on_analysis_started()
+
+        detail = incremental_detail or f"新增{incremental_new_bar_count}根K线"
+        self._replay_panel.set_status(f"强制增量分析中…（{detail}）")
+
+        self._worker.start()
+
+    def _on_replay_exit(self) -> None:
+        """Exit replay mode and restore live mode."""
+        if not self._replay_mode:
+            return
+
+        # Cancel any running analysis
+        if self._worker is not None and self._worker.isRunning():
+            if self._cancel_token is not None:
+                self._cancel_token.set()
+            self._worker.wait(_WORKER_JOIN_TIMEOUT_MS)
+            self._worker = None
+
+        self._replay_mode = False
+        self._replay_source = None
+        self._replay_panel.hide()
+        self._replay_panel.set_replay_active(False)
+        self._replay_btn.setEnabled(True)
+        self._set_chart_refresh_paused(False)
+        self._chart_widget.reset()
+        self._update_submit_button_state()
+        self._status_bar.showMessage("已退出回放模式，恢复实时更新")
+
     def _refresh_chart_once(self) -> None:
         """Apply one immediate chart refresh (e.g. after resuming)."""
         self._pull_chart_frame_from_source()
@@ -534,6 +826,20 @@ class MainWindow(QMainWindow):
         import time as _time
 
         from pa_agent.ai.prompt_assembler import PromptAssembler
+
+        # In replay mode, use the current replay frame instead of live data
+        if self._replay_mode and self._replay_source is not None:
+            frame = self._replay_source.current_frame()
+            chart = getattr(self, "_chart_widget", None)
+            if chart is not None:
+                chart.set_frame_now(frame)
+            self._set_chart_refresh_paused(True)
+            self._update_refresh_elapsed()
+            if getattr(self, "_status_bar", None) is not None:
+                self._status_bar.showMessage("追问：已刷新并冻结图表（回放模式）")
+            if frame is None:
+                return ""
+            return PromptAssembler._render_kline_table(frame)
 
         frame = self._pull_chart_frame_from_source()
         chart = getattr(self, "_chart_widget", None)
@@ -657,6 +963,10 @@ class MainWindow(QMainWindow):
         """
         if self._switching:
             return  # Prevent re-entrant calls
+
+        # Auto-exit replay mode on symbol/timeframe switch
+        if self._replay_mode:
+            self._on_replay_exit()
 
         self._clear_pending_bar_close_wait()
 
@@ -1790,6 +2100,12 @@ class MainWindow(QMainWindow):
         self._analysis_in_progress = False
         self._worker = None
         self._update_submit_button_state()
+        # Re-enable replay controls if in replay mode
+        if self._replay_mode and self._replay_source is not None:
+            self._replay_panel.set_next_enabled(self._replay_source.has_next)
+            self._replay_panel.set_submit_enabled(True)
+            self._replay_panel.set_incremental_enabled(True)
+            self._replay_panel.set_status("分析完成，可继续「下一步」或再次「提交分析」")
         if self._last_analysis_had_error:
             self._status_bar.showMessage("分析结束（存在错误，请查看「原始」页调试信息）")
         else:
@@ -1929,6 +2245,8 @@ class MainWindow(QMainWindow):
             return "未配置 API Key，请点击左上角「设置」填写后才能分析"
         if self._demo_mode:
             return "演示模式中，请退出演示后再提交真实分析"
+        if self._replay_mode:
+            return "回放模式中，请使用回放面板的「提交分析」按钮"
         if self._analysis_in_progress:
             return "分析进行中"
         if self._pending_submit_after_close:

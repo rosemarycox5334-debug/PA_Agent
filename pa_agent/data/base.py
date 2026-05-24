@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Sequence
 
 
@@ -93,4 +94,19 @@ class DataSource(ABC):
         """Return the *n* most recent bars (index 0 = newest, including forming bar).
 
         Raises DataSourceTransientError on recoverable network issues.
+        """
+
+    @abstractmethod
+    def load_history_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[KlineBar]:
+        """Load historical K-line data for the given symbol/timeframe/date range.
+
+        Returns bars in **ascending** (oldest-first) time order.
+        All bars have ``closed=True``.
+        Raises DataSourceTransientError on recoverable failures.
         """

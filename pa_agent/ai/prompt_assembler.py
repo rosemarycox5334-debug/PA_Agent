@@ -456,8 +456,9 @@ class PromptAssembler:
             ema_str = f"{ema:.4f}" if not math.isnan(ema) else "N/A"
             atr_str = f"{atr:.4f}" if not math.isnan(atr) else "N/A"
             yang_yin = bar_candle_direction_label(bar)
-            # ts_open is in milliseconds (MT5 source); convert to seconds for fromtimestamp()
-            dt = datetime.datetime.fromtimestamp(bar.ts_open / 1000).strftime("%Y-%m-%d %H:%M")
+            # ts_open is in milliseconds (server time); convert to datetime
+            _EPOCH = datetime.datetime(1970, 1, 1)
+            dt = (_EPOCH + datetime.timedelta(seconds=bar.ts_open / 1000)).strftime("%Y-%m-%d %H:%M")
             lines.append(
                 f"{bar.seq:<4} | {dt:<19} | {bar.open:<9.4f} | {bar.high:<9.4f} | "
                 f"{bar.low:<9.4f} | {bar.close:<9.4f} | {yang_yin:<4} | {bar.volume:<9.0f} | "

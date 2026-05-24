@@ -9,8 +9,8 @@ Note: yfinance data has ~15 min delay for futures. Intraday data
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timezone
+import time as _time
+from datetime import datetime, timedelta, timezone
 
 from pa_agent.data.base import (
     DataSource,
@@ -167,6 +167,64 @@ class YFinanceSource(DataSource):
             ))
             if len(bars) >= n:
                 break
+
+        return bars
+
+    def load_history_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[KlineBar]:
+        """Load historical K-line data for the given range via Yahoo Finance."""
+        if not self._connected:
+            raise DataSourceTransientError("Not connected — call connect() first")
+        if timeframe not in _TF_MAP:
+            raise ValueError(f"Unsupported timeframe: {timeframe!r}")
+
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise DataSourceTransientError("yfinance not installed") from exc
+
+        yf_interval = _TF_MAP[timeframe]
+        is_4h = timeframe == "4h"
+
+        # Convert local naive datetimes to UTC for yfinance (expects UTC)
+        if start_dt.tzinfo is None:
+            local_offset = timedelta(seconds=-_time.timezone)
+            start_dt = start_dt.replace(tzinfo=timezone(local_offset)).astimezone(timezone.utc)
+        if end_dt.tzinfo is None:
+            local_offset = timedelta(seconds=-_time.timezone)
+            end_dt = end_dt.replace(tzinfo=timezone(local_offset)).astimezone(timezone.utc)
+
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(start=start_dt, end=end_dt, interval=yf_interval)
+        except Exception as exc:
+            raise DataSourceTransientError(f"yfinance history fetch failed: {exc}") from exc
+
+        if df is None or df.empty:
+            raise DataSourceTransientError(f"yfinance returned no data for {symbol} {yf_interval}")
+
+        if is_4h:
+            df = _resample_4h(df)
+
+        # df is oldest-first
+        bars: list[KlineBar] = []
+        for i, (idx, row) in enumerate(df.iterrows()):
+            ts = int(idx.timestamp() * 1000) if hasattr(idx, "timestamp") else int(time.time() * 1000)
+            bars.append(KlineBar(
+                seq=i + 1,
+                ts_open=ts,
+                open=float(row["Open"]),
+                high=float(row["High"]),
+                low=float(row["Low"]),
+                close=float(row["Close"]),
+                volume=float(row.get("Volume", 0.0)),
+                closed=True,
+            ))
 
         return bars
 

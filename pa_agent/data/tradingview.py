@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timezone
+import time as _time
+from datetime import datetime, timedelta, timezone
 
 from pa_agent.data.base import (
     DataSource,
@@ -125,6 +125,63 @@ class TradingViewSource(DataSource):
             ))
             if len(bars) >= n:
                 break
+
+        return bars
+
+    def load_history_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[KlineBar]:
+        """Load historical K-line data for the given range via TradingView."""
+        if self._tv is None:
+            raise DataSourceTransientError("Not connected — call connect() first")
+        if timeframe not in _TF_MAP:
+            raise ValueError(f"Unsupported timeframe: {timeframe!r}")
+
+        try:
+            from tvDatafeed import Interval
+            interval = getattr(Interval, _TF_MAP[timeframe])
+            df = self._tv.get_hist(
+                symbol=symbol,
+                exchange="",
+                interval=interval,
+                n_bars=5000,  # max bars
+                extended_period=False,
+            )
+        except Exception as exc:
+            raise DataSourceTransientError(f"TradingView history fetch failed: {exc}") from exc
+
+        if df is None or df.empty:
+            raise DataSourceTransientError("TradingView returned empty data")
+
+        # Convert local naive datetimes to UTC for DataFrame index filtering
+        if start_dt.tzinfo is None:
+            local_offset = timedelta(seconds=-_time.timezone)
+            start_dt = start_dt.replace(tzinfo=timezone(local_offset)).astimezone(timezone.utc)
+        if end_dt.tzinfo is None:
+            local_offset = timedelta(seconds=-_time.timezone)
+            end_dt = end_dt.replace(tzinfo=timezone(local_offset)).astimezone(timezone.utc)
+
+        # Filter by date range (DataFrame index is UTC)
+        df = df.sort_index()  # oldest-first
+        df = df.loc[start_dt:end_dt]
+
+        bars: list[KlineBar] = []
+        for i, (idx, row) in enumerate(df.iterrows()):
+            ts = int(idx.timestamp() * 1000) if hasattr(idx, "timestamp") else int(time.time() * 1000)
+            bars.append(KlineBar(
+                seq=i + 1,
+                ts_open=ts,
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row.get("volume", 0.0)),
+                closed=True,
+            ))
 
         return bars
 
