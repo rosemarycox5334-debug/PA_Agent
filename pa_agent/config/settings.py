@@ -32,6 +32,8 @@ class GeneralSettings(BaseModel):
     decision_flow_auto_play: bool = True
     decision_flow_play_seconds: int = 50
     incremental_max_new_bars: int = Field(default=10, ge=0, le=500)
+    #: 增量分析时发送的历史 K 线数量上限；0 = 发送全部（默认，分析最全面）
+    incremental_recent_bar_limit: int = Field(default=0, ge=0, le=500)
     #: 阶段二交易倾向：balanced=默认；conservative/aggressive 逐级调整下单意愿
     decision_stance: DecisionStance = "balanced"
     #: 决策树可视化：在「整图适配」基础上的缩放百分比（100=与适配一致；可任意放大，仅下限 10%）

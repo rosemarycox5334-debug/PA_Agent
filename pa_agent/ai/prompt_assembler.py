@@ -402,11 +402,21 @@ def stage1_prompt_txt_files() -> list[str]:
 
 
 def stage2_user_task_txt_files(strategy_files: list[str] | None = None) -> list[str]:
-    """Return .txt filenames loaded into the Stage 2 user turn only."""
+    """Return .txt filenames loaded into the Stage 2 user turn only.
+
+    .. important::
+        ``STAGE2_FULL_STRATEGY_PROMPT_TXT_FILES`` is placed **first** so the
+        concatenated text is *byte-for-byte identical* across analysis cycles
+        regardless of ``cycle_position`` / routing.  The routed subset
+        (``strategy_files``) is appended last; ``dict.fromkeys`` deduplicates
+        it away automatically since every routed file is already in the full
+        list — this ensures the file *order* never shifts and the prefix cache
+        stays intact.
+    """
     files = [
-        *(f for f in (strategy_files or []) if f),
         *STAGE2_FULL_STRATEGY_PROMPT_TXT_FILES,
         *STAGE2_BASE_PROMPT_TXT_FILES,
+        *(f for f in (strategy_files or []) if f),
     ]
     return list(dict.fromkeys(files))
 
@@ -510,13 +520,23 @@ class PromptAssembler:
         frame: KlineFrame,
         previous_record: AnalysisRecord,
         new_bar_count: int,
+        *,
+        recent_bar_limit: int = 0,
     ) -> list[dict]:
-        """Build Stage 1 as an incremental update from a previous record."""
+        """Build Stage 1 as an incremental update from a previous record.
+
+        Parameters
+        ----------
+        recent_bar_limit:
+            Max number of *recent* historical bars to include for structural
+            review.  0 (default) sends **all** bars; a positive value clips.
+        """
         system_content = self._build_common_system_prompt()
         user_content = self._build_incremental_stage1_user_prompt(
             frame,
             previous_record,
             new_bar_count,
+            recent_bar_limit=recent_bar_limit,
         )
         return [
             {"role": "system", "content": system_content},
@@ -562,6 +582,8 @@ class PromptAssembler:
         frame: KlineFrame,
         previous_record: AnalysisRecord,
         new_bar_count: int,
+        *,
+        recent_bar_limit: int = 0,
     ) -> str:
         """Build a Stage 1 update turn using the last completed analysis."""
         stage1_parts = [
@@ -573,8 +595,10 @@ class PromptAssembler:
         new_count = max(0, min(new_bar_count, n_bars))
         new_kline_table = self._render_kline_table(frame, limit=new_count)
         new_feature_table = self._render_kline_feature_table(frame, limit=new_count)
-        full_kline_table = self._render_kline_table(frame)
-        full_feature_table = self._render_kline_feature_table(frame)
+        # recent_bar_limit > 0 clips the full historical table for token savings
+        recent_limit = recent_bar_limit if recent_bar_limit > 0 else n_bars
+        full_kline_table = self._render_kline_table(frame, limit=recent_limit)
+        full_feature_table = self._render_kline_feature_table(frame, limit=recent_limit)
         previous_summary = {
             "meta": previous_record.meta.model_dump(),
             "stage1_diagnosis": previous_record.stage1_diagnosis or {},
@@ -602,7 +626,7 @@ class PromptAssembler:
             f"{new_kline_table}\n\n"
             f"## 新增 K线几何特征(共{new_count}根)\n\n"
             f"{new_feature_table}\n\n"
-            f"## 当前完整 K线数据(共{n_bars}根，用于必要时复核整体结构；含阳阴列)\n\n"
+            f"## 当前完整 K线数据(共{recent_limit}根，用于必要时复核整体结构；含阳阴列)\n\n"
             f"{full_kline_table}\n\n"
             f"## 当前完整 K线几何特征(用于逐棒辅助，不替代周期判断)\n\n"
             f"{full_feature_table}\n\n"
@@ -647,10 +671,10 @@ class PromptAssembler:
         experience_entries: list[Any],
         decision_stance: str = "conservative",
     ) -> list[dict]:
-        """Build Stage 2 continuation without duplicating the Stage 1 user prompt.
-
-        Stage 1 user turn is huge (framework + 100 bars). Re-sending it for Stage 2
-        balloons prompt tokens and often exhausts thinking before any content JSON.
+        """Build Stage 2 as an independent request (no assistant break).
+        The stage-1 diagnosis is embedded inside the user message so that
+        the *prefix* (system + static strategy files) can be re-cached across
+        repeated analysis cycles — the ``assistant`` role was the #1 cache killer.
         """
         system_content = next(
             (m.get("content", "") for m in stage1_messages if m.get("role") == "system"),
@@ -658,7 +682,6 @@ class PromptAssembler:
         )
         return [
             {"role": "system", "content": system_content},
-            {"role": "assistant", "content": stage1_reply_content},
             {
                 "role": "user",
                 "content": self._build_stage2_user_prompt(
@@ -685,13 +708,12 @@ class PromptAssembler:
         """Build the Stage 2 task turn for standalone or continuation mode."""
         stance_block = build_decision_stance_guidance(normalize_stance(decision_stance))
         transition_block = self._render_transition_guidance(stage1_json)
+
+        # ── Cache-friendly: strategy files (static, ~70KB) come FIRST ────────
+        #     So they form a stable prefix across analysis cycles.
         stage2_parts = [
-            stance_block,
-            transition_block,
             *(self._load(name) for name in stage2_user_task_txt_files(strategy_files)),
         ]
-        if experience_entries:
-            stage2_parts.append(self._render_experience(experience_entries))
         stage2_parts.append(_STAGE2_OUTPUT_CONTRACT)
         stage2_context = "\n\n---\n\n".join(p for p in stage2_parts if p)
 
@@ -715,19 +737,37 @@ class PromptAssembler:
             if include_kline_table
             else f"## K线数据\n\n沿用上一轮阶段一用户消息中的同一份 K线数据，共 {n_bars} 根；各节点 bar_range 由你据实填写。\n\n"
         )
-        return (
-            "## 阶段二任务\n\n"
-            "继续上一轮对话。你已经完成阶段一诊断；现在只执行阶段二：交易决策、风险收益和下单方式评估。\n"
-            "上一轮 assistant 消息是阶段一完整响应，下面的 JSON 是程序校验通过后的阶段一诊断结果，若两者有细微格式差异，以此处 JSON 为准。\n\n"
-            f"{stage2_context}\n\n"
-            "---\n\n"
-            f"## 阶段一诊断结果\n\n```json\n{json.dumps(stage1_json, ensure_ascii=False, indent=2)}\n```\n\n"
-            f"{gate_block}"
-            f"{kline_block}"
+
+        # ── Assemble user body in cache-friendly order ───────────────────────
+        #   [STATIC] strategy files (~70KB)        → always same, high cache hit
+        #   [small] stance + transition (if any)    → small, rarely changes
+        #   [DYNAMIC] diagnosis + gate + kline      → changes every cycle
+        #   [static] tail instructions
+        user_body_parts = [stage2_context]
+        user_body_parts.append(stance_block)
+        if transition_block:
+            user_body_parts.append(transition_block)
+        user_body_parts.append(
+            f"## 阶段一诊断结果\n\n```json\n{json.dumps(stage1_json, ensure_ascii=False, indent=2)}\n```"
+        )
+        if gate_block:
+            user_body_parts.append(gate_block.rstrip())
+        user_body_parts.append(kline_block.strip())
+        if experience_entries:
+            user_body_parts.append(self._render_experience(experience_entries))
+        user_body_parts.append(
             f"请根据以上诊断、闸门路径和K线数据,按《二元决策.txt》§3–§15 输出 JSON 决策结果"
             f"(含 decision_trace 与 terminal)。\n"
             f"注意:如果判断不下单,entry_price、take_profit_price、stop_loss_price、order_direction 必须全部为 null。\n\n"
             f"{_STAGE2_TAIL_REMINDER}"
+        )
+        user_body = "\n\n---\n\n".join(p for p in user_body_parts if p)
+
+        return (
+            "## 阶段二任务\n\n"
+            "你现在独立执行阶段二（基于阶段一诊断结果）：交易决策、风险收益和下单方式评估。\n"
+            "以下 JSON 是程序校验通过后的阶段一诊断结果，请以此为准。\n\n"
+            f"{user_body}"
         )
 
     def stage2_system_prompt_only(

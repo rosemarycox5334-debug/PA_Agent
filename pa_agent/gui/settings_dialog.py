@@ -138,6 +138,17 @@ class SettingsDialog(QDialog):
         )
         general_form.addRow("增量分析最大新增K线:", self._incremental_max_new_bars_spin)
 
+        self._incremental_recent_bar_limit_spin = QSpinBox()
+        self._incremental_recent_bar_limit_spin.setRange(0, 500)
+        self._incremental_recent_bar_limit_spin.setSuffix(" 根")
+        self._incremental_recent_bar_limit_spin.setSpecialValueText("全部 (0)")
+        self._incremental_recent_bar_limit_spin.setToolTip(
+            "增量分析模式下最近历史K线的发送数量上限；"
+            "设为 0 表示发送全部（默认，分析最全面）；"
+            "设为 30-50 可降低 token 开支（对分析精度有轻微影响）。"
+        )
+        general_form.addRow("增量分析历史K线数量:", self._incremental_recent_bar_limit_spin)
+
         self._decision_stance_combo = QComboBox()
         self._decision_stance_combo.addItem("保守", "conservative")
         self._decision_stance_combo.addItem("均衡（默认，比保守更愿意下单）", "balanced")
@@ -217,6 +228,9 @@ class SettingsDialog(QDialog):
         self._incremental_max_new_bars_spin.setValue(
             int(getattr(g, "incremental_max_new_bars", 10))
         )
+        self._incremental_recent_bar_limit_spin.setValue(
+            int(getattr(g, "incremental_recent_bar_limit", 0))
+        )
         stance = getattr(g, "decision_stance", "conservative")
         stance_idx = self._decision_stance_combo.findData(stance)
         if stance_idx >= 0:
@@ -278,6 +292,7 @@ class SettingsDialog(QDialog):
         g.stream_pane_font_pt = self._stream_font_spin.value()
         g.chart_seq_label_font_pt = self._chart_seq_font_spin.value()
         g.incremental_max_new_bars = self._incremental_max_new_bars_spin.value()
+        g.incremental_recent_bar_limit = self._incremental_recent_bar_limit_spin.value()
         g.decision_stance = self._decision_stance_combo.currentData()  # type: ignore[assignment]
         g.last_symbol = self._last_symbol_edit.text().strip()
         g.last_timeframe = self._last_timeframe_edit.text().strip()

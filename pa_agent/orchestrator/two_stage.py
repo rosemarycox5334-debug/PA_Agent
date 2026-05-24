@@ -336,10 +336,14 @@ class TwoStageOrchestrator:
 
         # ── Step 4: Build Stage 1 messages ───────────────────────────────────
         if previous_record is not None and incremental_new_bar_count is not None:
+            recent_bar_limit = int(
+                getattr(getattr(self._settings, "general", None), "incremental_recent_bar_limit", 0)
+            )
             messages_s1 = self._assembler.build_incremental_stage1(
                 frame,
                 previous_record,
                 incremental_new_bar_count,
+                recent_bar_limit=recent_bar_limit,
             )
         else:
             messages_s1 = self._assembler.build_stage1(frame)
@@ -430,6 +434,8 @@ class TwoStageOrchestrator:
             print(f"\n--- [思考过程] ---\n{reply_s1.reasoning_content}")
         print(
             f"\n--- [Token 用量] prompt={reply_s1.usage.prompt_tokens} "
+            f"cached={reply_s1.usage.cached_prompt_tokens} "
+            f"({reply_s1.usage.cached_prompt_tokens/max(reply_s1.usage.prompt_tokens,1)*100:.0f}%) "
             f"completion={reply_s1.usage.completion_tokens} "
             f"latency={_latency_ms_label(reply_s1.latency_ms)} ---"
         )
@@ -659,6 +665,8 @@ class TwoStageOrchestrator:
             print(f"\n--- [思考过程] ---\n{reply_s2.reasoning_content}")
         print(
             f"\n--- [Token 用量] prompt={reply_s2.usage.prompt_tokens} "
+            f"cached={reply_s2.usage.cached_prompt_tokens} "
+            f"({reply_s2.usage.cached_prompt_tokens/max(reply_s2.usage.prompt_tokens,1)*100:.0f}%) "
             f"completion={reply_s2.usage.completion_tokens} "
             f"latency={_latency_ms_label(reply_s2.latency_ms)} ---"
         )
