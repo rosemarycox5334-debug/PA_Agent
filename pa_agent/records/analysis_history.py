@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pa_agent.config.paths import RECORDS_PENDING_DIR
@@ -30,7 +30,8 @@ def _normalize_ts(value: object) -> float:
 def format_bar_ts(ts_open: float) -> str:
     """Format bar open time for logs/UI (local time)."""
     sec = _normalize_ts(ts_open)
-    return datetime.fromtimestamp(sec).strftime("%Y-%m-%d %H:%M:%S")
+    _EPOCH = datetime(1970, 1, 1)
+    return (_EPOCH + timedelta(seconds=sec)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def list_record_paths(directory: Path | None = None) -> list[Path]:

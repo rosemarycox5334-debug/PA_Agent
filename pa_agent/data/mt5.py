@@ -11,8 +11,10 @@ Usage:
 """
 from __future__ import annotations
 
+import calendar
 import logging
-from datetime import datetime, timezone
+import time as _time
+from datetime import datetime, timedelta, timezone
 
 from pa_agent.data.base import (
     DataSource,
@@ -229,7 +231,7 @@ class MT5Source(DataSource):
         bars: list[KlineBar] = []
         for i, rate in enumerate(reversed(rates)):
             # rate fields: time, open, high, low, close, tick_volume, spread, real_volume
-            ts_ms = int(rate["time"]) * 1000  # MT5 gives UTC seconds
+            ts_ms = int(rate["time"]) * 1000  # MT5 gives server-time seconds
             try:
                 vol = float(rate["tick_volume"])
             except (ValueError, KeyError):
@@ -250,4 +252,125 @@ class MT5Source(DataSource):
             if len(bars) >= n:
                 break
 
+        return bars
+
+    # ── History fetch ─────────────────────────────────────────────────────────
+
+    def load_history_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[KlineBar]:
+        """Load historical K-line data for the given symbol/timeframe/date range.
+
+        Uses ``mt5.copy_rates_range()`` to fetch all bars in [start_dt, end_dt).
+        Returns bars in **ascending** (oldest-first) time order.
+        All bars have ``closed=True``.
+        """
+        if not self._connected:
+            raise DataSourceTransientError("Not connected — call connect() first")
+        if timeframe not in _TF_MAP:
+            raise ValueError(
+                f"Unsupported timeframe: {timeframe!r}. "
+                f"Use one of {list(_TF_MAP)}"
+            )
+
+        try:
+            import MetaTrader5 as mt5  # type: ignore[import]
+        except ImportError as exc:
+            raise DataSourceTransientError("MetaTrader5 not installed") from exc
+
+        tf_name = _TF_MAP[timeframe]
+        try:
+            tf_const = getattr(mt5, tf_name)
+        except AttributeError as exc:
+            raise DataSourceTransientError(
+                f"MT5 timeframe constant {tf_name!r} not found"
+            ) from exc
+
+        # Ensure the symbol is selected in MT5
+        try:
+            mt5.symbol_select(symbol, True)
+        except Exception:  # noqa: BLE001
+            pass  # Non-fatal; proceed with fetch
+
+        # MT5's copy_rates_range(int) treats the int as server-time seconds
+        # (seconds since 1970-01-01 00:00:00 in server time, NOT Unix epoch).
+        # The naive datetime from the caller represents server time directly.
+        # Use calendar.timegm() to convert naive datetime to the correct int
+        # (treating naive datetime as UTC gives the correct server-time count).
+        start_dt = start_dt.replace(second=0, microsecond=0)
+        end_dt = end_dt.replace(second=0, microsecond=0)
+        start_ts = calendar.timegm(start_dt.timetuple())
+        end_ts = calendar.timegm(end_dt.timetuple())
+
+        # copy_rates_range is exclusive on the start boundary — it excludes
+        # the bar whose open time exactly equals date_from.  Subtract 1 second
+        # so the bar at the exact start time is included.
+        start_ts -= 1
+
+        rates = mt5.copy_rates_range(symbol, tf_const, start_ts, end_ts)
+
+        logger.info(
+            "MT5 load_history_range: symbol=%s tf=%s start=%s end=%s "
+            "start_ts=%s end_ts=%s rates=%s",
+            symbol,
+            timeframe,
+            start_dt.isoformat(),
+            end_dt.isoformat(),
+            start_ts,
+            end_ts,
+            len(rates) if rates is not None else 0,
+        )
+
+        if rates is None or len(rates) == 0:
+            error = mt5.last_error()
+            raise DataSourceTransientError(
+                f"MT5 copy_rates_range failed for {symbol} {timeframe}: "
+                f"{error}"
+            )
+
+        # copy_rates_range returns oldest-first — keep that order
+        bars: list[KlineBar] = []
+        for i, rate in enumerate(rates):
+            ts_ms = int(rate["time"]) * 1000  # MT5 gives server-time seconds
+            try:
+                vol = float(rate["tick_volume"])
+            except (ValueError, KeyError):
+                try:
+                    vol = float(rate["real_volume"])
+                except (ValueError, KeyError):
+                    vol = 0.0
+            bars.append(KlineBar(
+                seq=i + 1,
+                ts_open=ts_ms,
+                open=float(rate["open"]),
+                high=float(rate["high"]),
+                low=float(rate["low"]),
+                close=float(rate["close"]),
+                volume=vol,
+                closed=True,  # Historical data is always closed
+            ))
+
+        logger.info(
+            "Loaded %d historical bars for %s %s [%s → %s]",
+            len(bars),
+            symbol,
+            timeframe,
+            start_dt.isoformat(),
+            end_dt.isoformat(),
+        )
+        # Debug: log first and last bar timestamps (server time)
+        if bars:
+            _EPOCH = datetime(1970, 1, 1)
+            first_dt = _EPOCH + timedelta(seconds=bars[0].ts_open / 1000)
+            last_dt = _EPOCH + timedelta(seconds=bars[-1].ts_open / 1000)
+            logger.info(
+                "First bar ts_open=%s ms -> %s, last bar -> %s",
+                int(bars[0].ts_open),
+                first_dt.isoformat(),
+                last_dt.isoformat(),
+            )
         return bars
