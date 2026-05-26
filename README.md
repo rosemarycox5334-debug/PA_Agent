@@ -1,5 +1,7 @@
 # PA Agent — AI K线分析辅助工具（桌面端）
 
+**English version: [README.en.md](README.en.md)**
+
 **交流 QQ 群：488729337**
 
 ---
