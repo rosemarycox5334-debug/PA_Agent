@@ -11,17 +11,19 @@ from pa_agent.data.market_defaults import (
     GOLD_TV_SYMBOL,
 )
 
-DataSourceKind = Literal["mt5", "tradingview", "akshare"]
+DataSourceKind = Literal["mt5", "tradingview", "akshare", "yfinance"]
 
 DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
+    ("yfinance", "Yahoo Finance"),
 )
 
 _DEFAULT_SYMBOLS: dict[DataSourceKind, str] = {
     "mt5": GOLD_MT5_SYMBOL,
     "tradingview": GOLD_TV_SYMBOL,
     "akshare": A_SHARE_DEFAULT_SYMBOL,
+    "yfinance": "GC=F",
 }
 
 
@@ -60,6 +62,10 @@ def create_data_source(kind: str | None) -> DataSource:
         from pa_agent.data.akshare_source import AkShareSource
 
         return AkShareSource()
+    if normalized == "yfinance":
+        from pa_agent.data.yfinance_source import YFinanceSource
+
+        return YFinanceSource()
     from pa_agent.data.mt5 import MT5Source
 
     return MT5Source()
