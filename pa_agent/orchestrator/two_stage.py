@@ -363,14 +363,14 @@ class TwoStageOrchestrator:
             messages_s1 = self._assembler.build_stage1(frame)
 
         # ── Step 5: Call AI for Stage 1 ───────────────────────────────────────
-        print("\n" + "="*80)
-        print("【Stage 1 发送的完整 Prompt】")
-        print("="*80)
+        logger.debug("\n" + "="*80)
+        logger.debug("【Stage 1 发送的完整 Prompt】")
+        logger.debug("="*80)
         for msg in messages_s1:
             role = msg.get("role", "?").upper()
             content = msg.get("content", "")
-            print(f"\n--- [{role}] ---\n{content}")
-        print("="*80 + "\n")
+            logger.debug("\n--- [%s] ---\n%s", role, content)
+        logger.debug("="*80 + "\n")
 
         # Notify conversation tab of the prompt being sent
         if on_stage_prompt is not None:
@@ -440,18 +440,19 @@ class TwoStageOrchestrator:
             return record
 
         # ── Step 7: Validate Stage 1 ──────────────────────────────────────────
-        print("\n" + "="*80)
-        print("【Stage 1 AI 完整响应】")
-        print("="*80)
-        print(reply_s1.content)
+        logger.debug("\n" + "="*80)
+        logger.debug("【Stage 1 AI 完整响应】")
+        logger.debug("="*80)
+        logger.debug(reply_s1.content)
         if reply_s1.reasoning_content:
-            print(f"\n--- [思考过程] ---\n{reply_s1.reasoning_content}")
-        print(
-            f"\n--- [Token 用量] prompt={reply_s1.usage.prompt_tokens} "
-            f"completion={reply_s1.usage.completion_tokens} "
-            f"latency={_latency_ms_label(reply_s1.latency_ms)} ---"
+            logger.debug("\n--- [思考过程] ---\n%s", reply_s1.reasoning_content)
+        logger.debug(
+            "\n--- [Token 用量] prompt=%s completion=%s latency=%s ---",
+            reply_s1.usage.prompt_tokens,
+            reply_s1.usage.completion_tokens,
+            _latency_ms_label(reply_s1.latency_ms),
         )
-        print("="*80 + "\n")
+        logger.debug("="*80 + "\n")
 
         prev_s1: dict[str, Any] | None = None
         if previous_record is not None and int(incremental_new_bar_count or 0) > 0:
@@ -601,14 +602,14 @@ class TwoStageOrchestrator:
         )
 
         # ── Step 15: Call AI for Stage 2 ──────────────────────────────────────
-        print("\n" + "="*80)
-        print("【Stage 2 发送的完整 Prompt】")
-        print("="*80)
+        logger.debug("\n" + "="*80)
+        logger.debug("【Stage 2 发送的完整 Prompt】")
+        logger.debug("="*80)
         for msg in messages_s2:
             role = msg.get("role", "?").upper()
             content = msg.get("content", "")
-            print(f"\n--- [{role}] ---\n{content}")
-        print("="*80 + "\n")
+            logger.debug("\n--- [%s] ---\n%s", role, content)
+        logger.debug("="*80 + "\n")
 
         # Notify conversation tab of the prompt being sent
         if on_stage_prompt is not None:
@@ -697,18 +698,19 @@ class TwoStageOrchestrator:
             return record
 
         # ── Step 17: Validate Stage 2 ─────────────────────────────────────────
-        print("\n" + "="*80)
-        print("【Stage 2 AI 完整响应】")
-        print("="*80)
-        print(reply_s2.content)
+        logger.debug("\n" + "="*80)
+        logger.debug("【Stage 2 AI 完整响应】")
+        logger.debug("="*80)
+        logger.debug(reply_s2.content)
         if reply_s2.reasoning_content:
-            print(f"\n--- [思考过程] ---\n{reply_s2.reasoning_content}")
-        print(
-            f"\n--- [Token 用量] prompt={reply_s2.usage.prompt_tokens} "
-            f"completion={reply_s2.usage.completion_tokens} "
-            f"latency={_latency_ms_label(reply_s2.latency_ms)} ---"
+            logger.debug("\n--- [思考过程] ---\n%s", reply_s2.reasoning_content)
+        logger.debug(
+            "\n--- [Token 用量] prompt=%s completion=%s latency=%s ---",
+            reply_s2.usage.prompt_tokens,
+            reply_s2.usage.completion_tokens,
+            _latency_ms_label(reply_s2.latency_ms),
         )
-        print("="*80 + "\n")
+        logger.debug("="*80 + "\n")
 
         result_s2 = self._validator.validate(
             "stage2",
