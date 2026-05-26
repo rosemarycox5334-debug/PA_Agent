@@ -15,6 +15,7 @@ from pa_agent.data.base import (
     DataSourceTransientError,
     KlineBar,
 )
+from pa_agent.data.datetime_ts import datetime_to_ts_ms
 
 logger = logging.getLogger(__name__)
 
