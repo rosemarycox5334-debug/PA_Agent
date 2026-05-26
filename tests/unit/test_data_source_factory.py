@@ -37,3 +37,7 @@ def test_default_tradingview_exchange_is_oanda():
 def test_general_settings_last_data_source_default():
     g = GeneralSettings()
     assert g.last_data_source == "mt5"
+
+
+def test_normalize_data_source_kind_downgrades_akshare() -> None:
+    assert normalize_data_source_kind("akshare") == "mt5"

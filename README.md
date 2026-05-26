@@ -1,10 +1,10 @@
-# PA Agent — AI K线分析辅助工具
+# PA Agent — AI K线分析辅助工具（桌面端）
 
 **交流 QQ 群：488729337**
 
 ---
 
-> 面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具：从 **MetaTrader 5** 读取 K 线，将**结构化 K 线数据与程序预计算特征**送入大模型做**两阶段分析**（市场诊断 → 交易决策），**不是**截图识图，**不执行任何下单**。
+> 面向主观交易者的 **价格行为（Price Action）** AI 辅助决策工具：从 **MT5 / TradingView / A股数据源**读取 K 线，将**结构化 K 线数据与程序预计算特征**送入大模型做**两阶段分析**（市场诊断 → 交易决策），**不是**截图识图，**不连接券商、不执行下单**。
 
 ---
 
@@ -27,11 +27,11 @@
 
 ## 项目简介
 
-PA Agent 是一款运行在 Windows 上的桌面辅助工具，帮助交易者按 Al Brooks 风格的价格行为框架理解当前图表。
+PA Agent 是一款运行在 Windows 上的桌面辅助工具，帮助交易者按 Al Brooks 风格的价格行为框架理解当前图表，并把“看图”过程结构化成可复核的决策路径与字段。
 
 程序会：
 
-1. 通过 **MT5 终端** 拉取你选定品种、周期的 OHLCV K 线（可含当前未收盘 K，图表实时显示）
+1. 通过 **MT5 / TradingView** 拉取你选定品种、周期的 OHLCV K 线（可含当前未收盘 K，图表实时显示）
 2. 本地计算 **EMA20、ATR14、K 线几何特征**（实体比、内包/外包、ii/iii、突破跟随等）
 3. 将 **K 线文本表 + 特征表 + 提示词工程模块** 发给大模型（支持 DeepSeek、PackyAPI、云雾等 OpenAI 兼容接口）
 4. 经 **阶段一（诊断）** 与 **阶段二（决策）** 输出结构化 JSON，并在界面上绘制入场/止损/止盈参考线
@@ -135,21 +135,13 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
-使用 **A股 (AkShare)** 数据源时额外安装：
-
-```cmd
-pip install -e ".[ashare]"
-```
-
-默认 **仅 AkShare**（东财）；若需 AkShare 失败时回退 Baostock，请设置环境变量 `PA_AGENT_BAOSTOCK_FALLBACK=1` 并安装 `baostock`。
-
-若东财长期不可用，可选用 **TradingView** 拉 K 线：数据来源选 TradingView，支持 **A 股**（6 位 + SSE/SZSE）、**港股**（`HKEX` + 代码）、**股票名称**（如 `小米集团`，内置别名表；**品种框保持你输入的文字**，仅在后台按别名拉取 K 线）。交易所选 **（自动）** 时会依次探测合适市场。自定义名称可编辑 `config/tv_symbol_aliases.json`（参考 `tv_symbol_aliases.example.json`）。
+若东财数据源被关闭：可改用 **TradingView** 拉 K 线。数据来源选 TradingView，支持 **A 股**（6 位 + SSE/SZSE）、**港股**（`HKEX` + 代码）与**股票名称**（如 `小米集团`，内置别名表；**品种框保持你输入的文字**，仅在后台按别名拉取 K 线）。交易所选 **（自动）** 时会依次探测合适市场。自定义名称可编辑 `config/tv_symbol_aliases.json`（参考 `tv_symbol_aliases.example.json`）。
 
 > 国内镜像示例：
 >
 > ```cmd
 > pip install -e ".[dev]" -i https://pypi.tuna.tsinghua.edu.cn/simple
-> pip install -e ".[ashare]" -i https://pypi.tuna.tsinghua.edu.cn/simple
+> # （GUI 已移除 AkShare 选项；如需仍可自行恢复/启用相关代码）
 > ```
 
 ### 6. 配置 API
@@ -351,4 +343,8 @@ pip install -e ".[dev]"
 如果你觉得这个程序对你有帮助的话，可以打赏激励作者继续优化程序，感谢你的支持和鼓励！
 
 （作者会优先解决打赏人的问题，因为人太多了！回复不过来！）
+
+<p align="center">
+  <img src="1d935cac3a4a4575bb3e34beda997633.jpeg" alt="打赏二维码" width="420" />
+</p>
 

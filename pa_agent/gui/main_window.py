@@ -282,7 +282,7 @@ class MainWindow(QMainWindow):
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
             "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）、"
-            "A股 AkShare（东财轮询，1h/4h/1d）"
+            "本地仅支持 MT5 与 TradingView"
         )
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed
