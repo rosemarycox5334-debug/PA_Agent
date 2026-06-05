@@ -16,6 +16,7 @@ from pa_agent.data.base import (
     KlineBar,
     normalize_kline_bar,
 )
+from pa_agent.data.datetime_ts import datetime_to_ts_ms
 
 logger = logging.getLogger(__name__)
 
