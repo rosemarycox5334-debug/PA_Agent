@@ -24,13 +24,27 @@ def chart_widget(qtbot):
 
 
 def _count_infinite_lines(plot_widget) -> int:
-    """Count the number of InfiniteLine items currently in the plot."""
+    """Count the number of InfiniteLine items currently in the plot.
+
+    Excludes crosshair lines (v_crosshair / h_crosshair) which are always
+    present as UI helpers regardless of trading decisions.
+    """
     import pyqtgraph as pg
 
     return sum(
         1
         for item in plot_widget.getPlotItem().items
         if isinstance(item, pg.InfiniteLine)
+        and item not in (plot_widget._v_crosshair, plot_widget._h_crosshair)
+    )
+
+
+def _count_structure_lines(plot_widget) -> int:
+    """Count support/resistance InfiniteLine items managed by ChartWidget."""
+    import pyqtgraph as pg
+
+    return sum(
+        1 for item in plot_widget._structure_items if isinstance(item, pg.InfiniteLine)
     )
 
 
@@ -108,7 +122,7 @@ class TestNoLinesWhenNotTrading:
             timeframe="1h",
             bars=bars,
             snapshot_ts_local_ms=1_700_000_000_000,
-            indicators=IndicatorBundle(ema20=tuple([2000.0] * 5), atr14=tuple([10.0] * 5)),
+            indicators=IndicatorBundle(ema10=tuple([2000.0] * 5), ema20=tuple([2000.0] * 5), ema60=tuple([2000.0] * 5), atr14=tuple([10.0] * 5),),
         )
         chart_widget.set_frame(frame)
         qtbot.wait(100)
@@ -154,3 +168,81 @@ class TestNoLinesWhenNotTrading:
         chart_widget.clear_decision_overlay()
         assert _count_infinite_lines(chart_widget) == 0
         assert chart_widget._pending_decision is None
+
+    def test_support_resistance_levels_render_in_price_plot(self, chart_widget):
+        """Support/resistance structure levels are drawn as price-pane lines."""
+        from pa_agent.gui.support_resistance import StructureLevel
+
+        chart_widget.set_structure_levels(
+            [
+                StructureLevel("support", 4220.0, 4230.0),
+                StructureLevel("resistance", 4306.0, 4306.0),
+            ]
+        )
+
+        assert _count_structure_lines(chart_widget) == 3
+        assert all(
+            item in chart_widget._price_plot.items
+            for item in chart_widget._structure_items
+        )
+        assert not any(
+            item in chart_widget._volume_plot.items
+            for item in chart_widget._structure_items
+        )
+
+    def test_reset_clears_support_resistance_levels(self, chart_widget):
+        """reset() must remove support/resistance overlays."""
+        from pa_agent.gui.support_resistance import StructureLevel
+
+        chart_widget.set_structure_levels(
+            [StructureLevel("support", 4220.0, 4230.0)]
+        )
+        chart_widget.reset()
+
+        assert chart_widget._structure_items == []
+        assert chart_widget._structure_levels == []
+
+    def test_support_resistance_levels_are_filtered_by_current_price(self, chart_widget, qtbot):
+        """Out-of-scale text numbers must not become chart structure lines."""
+        from pa_agent.data.base import KlineBar, KlineFrame, IndicatorBundle
+        from pa_agent.gui.support_resistance import StructureLevel
+
+        bars = tuple(
+            KlineBar(
+                seq=i + 1,
+                ts_open=1_700_000_000_000 - i * 3_600_000,
+                open=1205.0,
+                high=1220.0,
+                low=1198.0,
+                close=1208.0,
+                volume=100.0,
+                closed=True,
+            )
+            for i in range(5)
+        )
+        frame = KlineFrame(
+            symbol="SA2609",
+            timeframe="1h",
+            bars=bars,
+            snapshot_ts_local_ms=1_700_000_000_000,
+            indicators=IndicatorBundle(
+                ema10=tuple([1205.0] * 5),
+                ema20=tuple([1205.0] * 5),
+                ema60=tuple([1205.0] * 5),
+                atr14=tuple([10.0] * 5),
+            ),
+        )
+        chart_widget.set_frame_now(frame)
+
+        chart_widget.set_structure_levels(
+            [
+                StructureLevel("support", 1205.0, 1205.0),
+                StructureLevel("support", 55.0, 60.0),
+                StructureLevel("resistance", 20.0, 20.0),
+            ]
+        )
+
+        assert [
+            (level.kind, level.low, level.high)
+            for level in chart_widget._structure_levels
+        ] == [("support", 1205.0, 1205.0)]

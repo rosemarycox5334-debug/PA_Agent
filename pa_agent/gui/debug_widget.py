@@ -168,14 +168,6 @@ class DebugWidget(QWidget):
         """
         self._turns.append(turn_data)
         label = turn_data.get("label", f"Turn-{len(self._turns)}")
-
-        # Append cache hit rate to the label if available
-        raw = turn_data.get("raw_response") or {}
-        usage = raw.get("usage") or {}
-        hit_pct = usage.get("cache_hit_rate_pct")
-        if hit_pct is not None and hit_pct > 0:
-            label = f"{label}  [{hit_pct:.0f}% 缓存]"
-
         item = QListWidgetItem(label)
         self._list_widget.addItem(item)
         # Auto-select the newly added turn
@@ -268,36 +260,11 @@ class DebugWidget(QWidget):
 
     @staticmethod
     def _format_raw_response(raw: dict) -> str:
-        """Render the raw response dict as a human-readable string.
-
-        Promotes KV-cache hit stats to the top of the output so they're
-        immediately visible without scrolling.
-        """
+        """Render the raw response dict as a human-readable string."""
         if not raw:
             return ""
         try:
-            usage = raw.get("usage") or {}
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            cached_tokens = usage.get("cached_prompt_tokens", 0)
-            miss_tokens = usage.get("cache_miss_tokens", prompt_tokens - cached_tokens)
-            hit_pct = usage.get("cache_hit_rate_pct")
-            completion_tokens = usage.get("completion_tokens", 0)
-
-            if prompt_tokens > 0:
-                if hit_pct is None:
-                    hit_pct = cached_tokens / prompt_tokens * 100.0
-                cache_banner = (
-                    f"═══ KV Cache ═══\n"
-                    f"  命中：{cached_tokens:,} tokens ({hit_pct:.1f}%)  "
-                    f"未命中：{miss_tokens:,} tokens\n"
-                    f"  输入合计：{prompt_tokens:,}  输出：{completion_tokens:,}\n"
-                    "═══════════════\n\n"
-                )
-            else:
-                cache_banner = ""
-
-            body = json.dumps(raw, ensure_ascii=False, indent=2)
-            return f"{cache_banner}{body}"
+            return json.dumps(raw, ensure_ascii=False, indent=2)
         except (TypeError, ValueError):
             return str(raw)
 

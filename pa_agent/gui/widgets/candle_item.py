@@ -10,15 +10,13 @@ from PyQt6.QtGui import QColor, QPainter, QPen, QPicture
 if TYPE_CHECKING:
     from pa_agent.data.base import KlineBar
 
-# Candle colors
-# close >= open → price went UP → green
-# close <  open → price went DOWN → red
-_COLOR_UP = QColor(38, 166, 154)   # #26a69a  teal-green
-_COLOR_DOWN = QColor(239, 83, 80)    # #ef5350  red
+# Candle colors — brighter for better contrast on dark backgrounds
+_COLOR_UP = QColor(0, 208, 132)     # #00d084  vivid green
+_COLOR_DOWN = QColor(255, 71, 87)   # #ff4757  vivid red
 
 # Candle body width as a fraction of the x-spacing (0..1)
-_BODY_WIDTH = 0.6
-_FORMING_BODY_WIDTH = 0.52
+_BODY_WIDTH = 0.68
+_FORMING_BODY_WIDTH = 0.58
 
 
 class CandleItem(pg.GraphicsObject):
@@ -93,12 +91,14 @@ class CandleItem(pg.GraphicsObject):
 
     def _paint_forming(self, p: QPainter, bar: "KlineBar", x: float) -> None:
         base = _COLOR_UP if bar.close >= bar.open else _COLOR_DOWN
-        outline = QColor(base.red(), base.green(), base.blue(), 200)
-        fill = QColor(base.red(), base.green(), base.blue(), 48)
+        outline = QColor(base.red(), base.green(), base.blue(), 255)
+        fill = QColor(base.red(), base.green(), base.blue(), 70)
         wick_pen = QPen(outline, 1)
         wick_pen.setCosmetic(True)
-        border_pen = QPen(outline, 1)
+        # Thicker dashed border for forming bar
+        border_pen = QPen(outline, 2)
         border_pen.setCosmetic(True)
+        border_pen.setStyle(Qt.PenStyle.DashLine)
 
         half = _FORMING_BODY_WIDTH / 2.0
         body_top, body_bottom = self._body_bounds(bar)

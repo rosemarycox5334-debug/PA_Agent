@@ -1,0 +1,37 @@
+/**
+ * Design tokens — ported from pa_agent/web/static/css/app.css so the new
+ * Vue 3 SPA shares the same look-and-feel as the legacy single-page build.
+ * Only the :root variables are duplicated; component-level layout rules
+ * live in scoped styles inside each .vue file.
+ */
+
+:root {
+  --bg:        oklch(14% 0.008 250);
+  --surface-1: oklch(18% 0.01  250);
+  --surface-2: oklch(22% 0.012 250);
+  --surface-3: oklch(26% 0.014 250);
+  --surface-4: oklch(30% 0.016 250);
+  --fg:        oklch(94% 0.006 250);
+  --fg-2:      oklch(72% 0.01  250);
+  --fg-3:      oklch(50% 0.012 250);
+  --border:    oklch(28% 0.01  250);
+  --border-2:  oklch(34% 0.012 250);
+  --accent:    oklch(62% 0.16 145);
+  --accent-2:  oklch(58% 0.18 25);
+  --accent-3:  oklch(65% 0.14 255);
+  --success:   oklch(62% 0.16 145);
+  --danger:    oklch(58% 0.18 25);
+  --warning:   oklch(72% 0.14 85);
+  --info:      oklch(65% 0.14 255);
+  --chart-up:   oklch(62% 0.16 145);
+  --chart-down: oklch(58% 0.18 25);
+  --chart-grid: oklch(22% 0.008 250);
+  --chart-line: oklch(68% 0.12 85);
+  --chart-line-2: oklch(72% 0.10 255);
+  --chart-line-3: oklch(65% 0.14 25);
+  --chart-vol-up:   oklch(62% 0.16 145 / 0.35);
+  --chart-vol-down: oklch(58% 0.18 25 / 0.35);
+  --font-display: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-body:    -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+}

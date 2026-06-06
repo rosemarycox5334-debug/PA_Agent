@@ -31,7 +31,7 @@ def _sample_frame(*, n: int = 5):
         bars=bars,
         snapshot_ts_local_ms=1_700_000_000_000,
         indicators=IndicatorBundle(
-            ema20=tuple(2000.0 + i for i in range(n)),
+            ema10=tuple(2000.0 + i for i in range(n)), ema20=tuple(2000.0 + i for i in range(n)), ema60=tuple(2000.0 + i for i in range(n)),
             atr14=tuple([10.0] * n),
         ),
     )
@@ -48,12 +48,12 @@ def chart_widget(qtbot):
 
 class TestChartFitView:
     def test_view_ranges_show_newest_twenty_when_many_bars(self, chart_widget):
-        from pa_agent.gui.chart_widget import _FIT_VISIBLE_BARS
+        from pa_agent.gui.chart_widget import _FIT_VISIBLE_BARS, _X_MARGIN_BARS
 
         frame = _sample_frame(n=50)
         x_range, _ = chart_widget._view_ranges_for_frame(frame)
-        assert x_range[0] == pytest.approx(50 - _FIT_VISIBLE_BARS - 0.65)
-        assert x_range[1] == pytest.approx(49 + 0.65)
+        assert x_range[0] == pytest.approx(50 - _FIT_VISIBLE_BARS - _X_MARGIN_BARS)
+        assert x_range[1] == pytest.approx(49 + _X_MARGIN_BARS)
 
     def test_view_ranges_include_all_bars_when_fewer_than_twenty(self, chart_widget):
         frame = _sample_frame(n=8)

@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pa-agent"
 version = "0.1.0"
-description = "Price Action AI assistant: MT5 kline data, two-stage LLM analysis (AGPL-3.0)"
+description = "Price Action AI assistant: MT5 kline data, two-stage LLM analysis (MIT)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "AGPL-3.0-or-later" }
+license = { text = "MIT" }
 authors = [{ name = "PA Agent Team" }]
 dependencies = [
     "PyQt6>=6.6",
@@ -26,6 +26,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
+]
 ashare = [
     "akshare>=1.14",
     "baostock>=0.8",
@@ -40,6 +45,7 @@ dev = [
 
 [project.scripts]
 pa-agent = "pa_agent.main:main"
+pa-agent-web = "pa_agent.web.main:main"
 
 [tool.setuptools.packages.find]
 include = ["pa_agent*"]

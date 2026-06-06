@@ -1,4 +1,4 @@
-﻿"""Right-hand sidebar: live stream, raw I/O, prompt files debug, and decision."""
+"""Right-hand sidebar: live stream, raw I/O, prompt files debug, and decision."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
@@ -10,7 +10,6 @@ from pa_agent.gui.debug_widget import DebugWidget
 from pa_agent.gui.decision_panel import DecisionPanel
 from pa_agent.gui.decision_flow_viz import DecisionFlowVizPanel
 from pa_agent.gui.decision_tree_panel import DecisionTreePanel
-from pa_agent.gui.future_trend_panel import FutureTrendPanel
 from pa_agent.gui.prompt_files_panel import PromptFilesPanel
 
 if TYPE_CHECKING:
@@ -35,13 +34,11 @@ class AISidebar(QWidget):
         self.decision = DecisionPanel()
         self.decision_tree = DecisionTreePanel()
         self.decision_flow_viz = DecisionFlowVizPanel()
-        self.future_trend = FutureTrendPanel()
 
         self._tabs.addTab(self.stream, "实时")
         self._tabs.addTab(self.decision_tree, "决策树")
         self._tabs.addTab(self.decision_flow_viz, "决策树可视化")
         self._tabs.addTab(self.decision, "决策")
-        self._tabs.addTab(self.future_trend, "未来走势预期")
         self._tabs.addTab(self.debug, "原始")
         self._tabs.addTab(self.prompt_files, "调试")
 
@@ -56,9 +53,8 @@ class AISidebar(QWidget):
     TAB_DECISION_TREE = 1
     TAB_DECISION_FLOW = 2
     TAB_DECISION = 3
-    TAB_FUTURE_TREND = 4   # new
-    TAB_RAW = 5            # was 4
-    TAB_DEBUG = 6          # was 5
+    TAB_RAW = 4
+    TAB_DEBUG = 5
 
     def focus_stream(self) -> None:
         """Switch to the live AI output tab (index 0)."""
@@ -67,10 +63,6 @@ class AISidebar(QWidget):
     def focus_decision_flow_viz(self) -> None:
         """Switch to the decision flow visualization tab."""
         self._tabs.setCurrentIndex(self.TAB_DECISION_FLOW)
-
-    def focus_future_trend(self) -> None:
-        """Switch to the future trend tab (未来走势预期)."""
-        self._tabs.setCurrentIndex(self.TAB_FUTURE_TREND)
 
     def focus_raw(self) -> None:
         """Switch to the raw I/O tab (原始)."""

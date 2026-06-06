@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PA Agent — 交易分析终端</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+</head>
+<body data-state="idle" data-view="decision">
+  <div id="app">
+    <main class="app">
+      <!-- ====== Header ====== -->
+      <header class="app-header">
+        <div class="brand-wrap" style="display:flex;align-items:center;gap:8px;">
+          <span class="status-dot" :class="statusDotClass"></span>
+          <div class="brand">PA Agent</div>
+        </div>
+        <div class="brand-subtitle">Trading Terminal</div>
+        <span class="pill green" style="cursor:pointer;" @click="showModelDropdown=!showModelDropdown">
+          {{ modelLabel }} ▾
+        </span>
+        <span class="pill" style="cursor:pointer;" @click="showTvDialog=true">📺 数据源</span>
+        <span class="pill" style="cursor:pointer;" @click="showSettingsModal=true">⚙ 设置</span>
+      </header>
+
+      <!-- ====== Flow Bar ====== -->
+      <section class="flow-bar" aria-label="分析流程">
+        <div class="steps">
+          <div class="step" :class="{done: flowStep>=1, active: flowStep===0, error: appState==='error' && flowStep===0}">
+            <div class="step-connector"></div>
+            <span class="dot"></span>
+            <span class="step-name">数据</span>
+            <span class="step-caption">{{ dataSourceStatus }}</span>
+          </div>
+          <div class="step" :class="{done: flowStep>=2, active: flowStep===1, error: appState==='error' && flowStep===1}">
+            <div class="step-connector"></div>
+            <span class="dot"></span>
+            <span class="step-name">快照</span>
+            <span class="step-caption">{{ snapshotStatus }}</span>
+          </div>
+          <div class="step" :class="{done: flowStep>=3, active: flowStep===2, error: appState==='error' && flowStep===2}">
+            <div class="step-connector"></div>
+            <span class="dot"></span>
+            <span class="step-name">诊断</span>
+            <span class="step-caption">{{ stage1Status }}</span>
+          </div>
+          <div class="step" :class="{done: flowStep>=4, active: flowStep===3, error: appState==='error' && flowStep===3}">
+            <div class="step-connector"></div>
+            <span class="dot"></span>
+            <span class="step-name">决策</span>
+            <span class="step-caption">{{ stage2Status }}</span>
+          </div>
+          <div class="step" :class="{done: flowStep>=5, active: flowStep===4}">
+            <span class="dot"></span>
+            <span class="step-name">追问</span>
+            <span class="step-caption">{{ flowStep>=5 ? '可继续分析' : '等待完成' }}</span>
+          </div>
+        </div>
+        <div class="state-switcher">
+          <button type="button" :class="{active: appState==='idle'}" @click="setState('idle')">空闲</button>
+          <button type="button" :class="{active: appState==='analyzing'}" @click="setState('analyzing')">分析中</button>
+          <button type="button" :class="{active: appState==='done'}" @click="setState('done')">决策完成</button>
+          <button type="button" :class="{active: appState==='error'}" @click="setState('error')">异常</button>
+        </div>
+      </section>
+
+      <!-- ====== Toolbar ====== -->
+      <section class="toolbar" aria-label="操作区">
+        <div class="tool-group">
+          <div class="field">
+            <label>数据来源</label>
+            <div class="select-like"><input v-model="settings.last_data_source" placeholder="rqdata" /></div>
+          </div>
+          <div class="field" v-if="settings.last_data_source === 'tradingview'">
+            <label>交易所</label>
+            <div class="select-like" style="min-width:100px;">
+              <select v-model="settings.last_tradingview_exchange" style="background:transparent;border:none;color:var(--fg);font-family:var(--font-mono);font-size:12px;outline:none;width:100%;cursor:pointer;">
+                <option value="">（自动探测）</option>
+                <option value="OANDA">OANDA</option>
+                <option value="SSE">SSE</option>
+                <option value="SZSE">SZSE</option>
+                <option value="HKEX">HKEX</option>
+                <option value="SP">SP</option>
+                <option value="NYSE">NYSE</option>
+                <option value="NASDAQ">NASDAQ</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label>品种</label>
+            <div class="select-like symbol"><input v-model="settings.last_symbol" placeholder="SA2609" /></div>
+          </div>
+          <div class="field">
+            <label>周期</label>
+            <div class="select-like"><input v-model="settings.last_timeframe" placeholder="1h" /></div>
+          </div>
+          <button class="button secondary" type="button" @click="fetchData">获取数据</button>
+        </div>
+        <div class="tool-group">
+          <span class="checkbox" :class="{checked: waitForClose}" @click="waitForClose=!waitForClose"></span>
+          <span style="color:var(--fg-2);font-size:12px;">等待最新K线收盘后提交</span>
+          <span v-if="waitForClose && frame?.bars?.[0] && !frame.bars[0].closed"
+                style="color:var(--accent);font-size:11px;font-family:var(--font-mono);margin-left:6px;">
+            ⏱ {{ formingCountdown }}
+          </span>
+        </div>
+        <div class="tool-group" style="justify-content: flex-end;">
+          <select class="select-like" v-model="speedProfile" @change="applySpeedProfile" style="min-width:100px; cursor:pointer; appearance:auto; -webkit-appearance:auto;">
+            <option value="fast">⚡ 极速</option>
+            <option value="balanced">⚖ 均衡</option>
+            <option value="deep">🔬 深度</option>
+            <option value="custom">🔧 自定义</option>
+          </select>
+          <button class="button primary" type="button" @click="submitAnalysis" :disabled="analyzing">
+            {{ analyzing ? '分析中...' : '提交分析' }}
+          </button>
+          <button class="button secondary" type="button" @click="submitIncremental">增量分析</button>
+          <button class="button secondary" type="button" @click="toggleLive">
+            {{ isLive ? '暂停更新' : '实时更新' }}
+          </button>
+        </div>
+      </section>
+
+      <!-- ====== Workspace ====== -->
+      <section class="workspace">
+        <!-- Chart -->
+        <div class="chart-panel">
+          <div class="panel-titlebar">
+            <span class="panel-title">{{ frame?.symbol || '---' }} · {{ frame?.timeframe || '--' }}</span>
+            <span class="panel-meta">{{ barCount }} 根K线 · EMA20</span>
+            <span class="pill green decision-ready-state" v-if="isLive">实时刷新中</span>
+            <span class="pill amber snapshot-state" v-else>快照冻结</span>
+          </div>
+          <div class="chart-canvas-wrap" ref="chartWrap">
+            <canvas ref="klineCanvas"></canvas>
+            <div class="price-axis" ref="priceAxis"></div>
+            <div class="time-axis" ref="timeAxis"></div>
+            <div class="vol-label">成交量 (VOL)</div>
+            <div class="crosshair" ref="crosshair">
+              <div class="vline" ref="crossV"></div>
+              <div class="hline" ref="crossH"></div>
+            </div>
+            <div class="chart-tooltip" ref="tooltip"></div>
+          </div>
+          <div class="chart-legend">
+            <span class="legend-item"><span class="legend-dot" style="background:var(--chart-line-2)"></span>EMA10</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--chart-line)"></span>EMA20</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--chart-line-3)"></span>EMA60</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--chart-up)"></span>涨</span>
+            <span class="legend-item"><span class="legend-dot" style="background:var(--chart-down)"></span>跌</span>
+          </div>
+          <div class="chart-footer">
+            <span>滚轮缩放 · 拖拽平移 · 当前为分析快照</span>
+            <span>Price {{ lastClose || '--' }} · EMA20 {{ lastEma20 || '--' }}</span>
+          </div>
+        </div>
+
+        <!-- AI Panel -->
+        <aside class="ai-panel">
+          <nav class="tabs" aria-label="AI 侧栏">
+            <button class="tab" :class="{active: aiView==='live'}" @click="aiView='live'"><span class="tab-icon">📡</span>实时</button>
+            <button class="tab" :class="{active: aiView==='tree'}" @click="aiView='tree'"><span class="tab-icon">🌲</span>决策树</button>
+            <button class="tab" :class="{active: aiView==='decision'}" @click="aiView='decision'"><span class="tab-icon">🎯</span>决策</button>
+            <button class="tab" :class="{active: aiView==='raw'}" @click="aiView='raw'"><span class="tab-icon">{}</span>原始</button>
+            <button class="tab" :class="{active: aiView==='debug'}" @click="aiView='debug'"><span class="tab-icon">🐛</span>调试</button>
+            <button class="tab" :class="{active: aiView==='prompts'}" @click="aiView='prompts'"><span class="tab-icon">📝</span>提示词</button>
+            <button class="tab" :class="{active: aiView==='demo'}" @click="aiView='demo'"><span class="tab-icon">▶</span>演示</button>
+            <button class="tab" :class="{active: aiView==='flow'}" @click="aiView='flow'"><span class="tab-icon">🔀</span>决策流</button>
+          </nav>
+
+          <div class="summary-strip" v-if="decision">
+            <div class="metric primary">
+              <span class="label">最终动作</span>
+              <span class="value">
+                <span class="dir-arrow" :class="decision.order_direction?.includes('多') ? 'up' : (decision.order_direction?.includes('空') ? 'down' : '')">
+                  {{ decision.order_direction?.includes('多') ? '↑' : (decision.order_direction?.includes('空') ? '↓' : '') }}
+                </span>
+                {{ summaryMetrics.finalAction }}
+              </span>
+            </div>
+            <div class="metric">
+              <span class="label">方向概率</span>
+              <span class="value">{{ summaryMetrics.directionProb }}</span>
+            </div>
+            <div class="metric">
+              <span class="label">下一根K线</span>
+              <span class="value">{{ summaryMetrics.nextBarProb }}</span>
+            </div>
+            <div class="metric">
+              <span class="label">市场置信度</span>
+              <span class="value">{{ summaryMetrics.marketConf }}</span>
+            </div>
+            <div class="metric">
+              <span class="label">交易置信度</span>
+              <span class="value">{{ summaryMetrics.tradeConf }}</span>
+            </div>
+            <div class="metric">
+              <span class="label">关键上破</span>
+              <span class="value up">{{ summaryMetrics.resistance }}</span>
+            </div>
+            <div class="metric">
+              <span class="label">支撑区</span>
+              <span class="value">{{ summaryMetrics.support }}</span>
+            </div>
+            <div class="metric">
+              <span class="label">耗时</span>
+              <span class="value">{{ summaryMetrics.elapsed }}</span>
+            </div>
+          </div>
+          <div class="summary-strip" v-else-if="analyzing">
+            <div class="metric primary">
+              <span class="label">状态</span>
+              <span class="value">分析中...</span>
+            </div>
+          </div>
+          <div class="summary-strip" v-else>
+            <div class="metric primary">
+              <span class="label">状态</span>
+              <span class="value">等待分析</span>
+            </div>
+          </div>
+
+          <div class="ai-content">
+            <!-- Decision View -->
+            <div class="decision-layout" v-if="aiView==='decision'">
+              <section class="section">
+                <div class="section-title">
+                  <span>🎯 决策摘要</span>
+                  <span class="confidence-badge" :class="decision?.order_direction?.includes('多') ? 'long' : (decision?.order_direction?.includes('空') ? 'short' : 'neutral')" v-if="decision">
+                    <span class="badge-arrow">{{ decision?.order_direction?.includes('多') ? '↑' : (decision?.order_direction?.includes('空') ? '↓' : '–') }}</span>
+                    {{ decision?.order_direction || 'Wait' }}
+                    <span class="badge-pct">{{ decision?.confidence ? decision.confidence + '%' : '' }}</span>
+                  </span>
+                  <span class="pill" :class="decisionPillClass" v-else>{{ decision?.order_direction || 'Wait' }}</span>
+                </div>
+                <div class="decision-list" v-if="decision">
+                  <div class="decision-row"><span class="key">订单类型</span><span class="val">{{ decision.order_type }}</span></div>
+                  <div class="decision-row"><span class="key">交易方向</span><span class="val" :class="decision.order_direction?.includes('多') ? 'up' : (decision.order_direction?.includes('空') ? 'down' : '')">{{ decision.order_direction }}</span></div>
+                  <div class="decision-row"><span class="key">入场价格</span><span class="val">{{ formatPrice(decision.entry_price) }}</span></div>
+                  <div class="decision-row"><span class="key">止盈价格</span><span class="val up">{{ formatPrice(decision.take_profit_price) }}</span></div>
+                  <div class="decision-row"><span class="key">止损价格</span><span class="val down">{{ formatPrice(decision.stop_loss_price) }}</span></div>
+                </div>
+                <div class="decision-list" v-else>
+                  <div class="decision-row"><span class="key">状态</span><span class="val">暂无决策</span></div>
+                </div>
+              </section>
+
+              <section class="section">
+                <div class="section-title">
+                  <span>🧠 分析过程</span>
+                  <span class="pill blue">AI</span>
+                </div>
+                <ul class="reasoning-list" v-if="reasoningText">
+                  <li v-for="(line, i) in reasoningLines" :key="i">{{ line }}</li>
+                </ul>
+                <div v-else style="padding:16px;color:var(--fg-3);font-size:12px;">
+                  点击「提交分析」开始 AI 分析...
+                </div>
+              </section>
+            </div>
+
+            <!-- Live Stream View -->
+            <div class="stream-block" v-if="aiView==='live'">
+              <!-- 实时流式分析文本 -->
+              <div class="stream-live-text" v-if="reasoningText">
+                <div class="stream-live-header">📡 实时分析流</div>
+                <pre class="stream-live-body">{{ reasoningText }}</pre>
+              </div>
+              <!-- 结构化消息卡片 -->
+              <div class="stream-card" v-for="(msg, idx) in streamMessages" :key="idx">
+                <div class="sc-header">
+                  <span class="sc-dot" :class="msg.title?.includes('阶段一') ? 'stage1' : (msg.title?.includes('阶段二') ? 'stage2' : 'followup')"></span>
+                  <span class="sc-title">{{ msg.title }}</span>
+                  <span class="sc-time">{{ msg.time || '' }}</span>
+                </div>
+                <div class="sc-body">{{ msg.text }}</div>
+              </div>
+              <div v-if="!reasoningText && streamMessages.length===0" style="color:var(--fg-3);font-size:12px;padding:16px;">
+                暂无实时消息 · 点击「提交分析」开始 AI 流式分析...
+              </div>
+            </div>
+
+            <!-- Raw JSON View -->
+            <pre class="code-block" v-if="aiView==='raw'">{{ rawJson }}</pre>
+
+            <!-- Tree View -->
+            <div class="tree-layout" v-if="aiView==='tree'">
+              <div class="section">
+                <div class="section-title">🌲 路径回放</div>
+                <table class="trace-table" v-if="mergedTrace.length">
+                  <thead><tr><th>步</th><th>阶段</th><th>节点</th><th>回答</th><th>K线依据</th><th>理由</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(item, i) in mergedTrace" :key="i">
+                      <td>{{ i+1 }}</td>
+                      <td>{{ item.phase==='gate'?'闸门':'策略' }}</td>
+                      <td>{{ item.node_id }}</td>
+                      <td :class="answerClass(item.answer)">{{ item.answer }}</td>
+                      <td>{{ item.bar_range || '—' }}</td>
+                      <td>{{ item.reason || '—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else style="padding:16px;color:var(--fg-3);font-size:12px;">暂无决策树数据 · 完成一次分析后显示</div>
+              </div>
+            </div>
+
+            <!-- Debug View -->
+            <div class="debug-layout" v-if="aiView==='debug'">
+              <div class="debug-split">
+                <div class="debug-sidebar">
+                  <div style="font-weight:700;font-size:12px;padding:8px 10px;color:var(--accent-3);">会话轮次</div>
+                  <div class="debug-turn-list">
+                    <div class="debug-turn-item" 
+                         v-for="(turn, i) in debugTurns" :key="i"
+                         :class="{active: debugTurnIndex===i}"
+                         @click="debugTurnIndex=i">
+                      {{ turn.label }}
+                    </div>
+                  </div>
+                </div>
+                <div class="debug-detail" v-if="currentDebugTurn">
+                  <div class="debug-block"><div class="debug-label">System Prompt</div><pre>{{ currentDebugTurn.system_prompt }}</pre></div>
+                  <div class="debug-block"><div class="debug-label">User Prompt</div><pre>{{ currentDebugTurn.user_prompt }}</pre></div>
+                  <div class="debug-block"><div class="debug-label">Raw Response</div><pre>{{ formatRawResponse(currentDebugTurn.raw_response) }}</pre></div>
+                  <div class="debug-block"><div class="debug-label">Validation / Exception</div><pre>{{ currentDebugTurn.validation_info }}</pre></div>
+                </div>
+                <div v-else class="debug-detail" style="display:grid;place-items:center;color:var(--fg-3);font-size:12px;">
+                  暂无调试数据 · 完成一次分析后显示
+                </div>
+              </div>
+            </div>
+
+            <!-- Prompts View -->
+            <div class="prompts-layout" v-if="aiView==='prompts'">
+              <div class="section" style="min-height:0;">
+                <div class="section-title">📝 提示词文件</div>
+                <div class="prompt-list" v-if="promptFiles.length">
+                  <div class="prompt-item" v-for="(f, i) in promptFiles" :key="i">
+                    <span class="prompt-index">{{ i+1 }}</span>
+                    <span class="prompt-name">{{ f }}</span>
+                  </div>
+                </div>
+                <div v-else style="padding:16px;color:var(--fg-3);font-size:12px;">暂无提示词数据 · 完成一次分析后显示</div>
+              </div>
+            </div>
+
+            <!-- Demo View -->
+            <div class="demo-layout" v-if="aiView==='demo'">
+              <div class="section" style="min-height:0; display:flex; flex-direction:column;">
+                <div class="section-title">▶ 演示模式 · 历史记录回放</div>
+                <div class="demo-toolbar">
+                  <button class="button secondary" @click="loadRecordList" :disabled="demoLoading">
+                    {{ demoLoading ? '加载中...' : '刷新列表' }}
+                  </button>
+                  <button class="button secondary" @click="playNextRecord" :disabled="demoRecords.length===0">
+                    随机播放
+                  </button>
+                </div>
+                <div class="demo-list" v-if="demoRecords.length">
+                  <div class="demo-item"
+                       v-for="(rec, i) in demoRecords" :key="i"
+                       :class="{active: demoCurrent?.filename===rec.filename}"
+                       @click="loadRecord(rec.filename)">
+                    <span class="demo-item-time">{{ rec.timestamp?.slice(0,16)?.replace('T',' ') }}</span>
+                    <span class="demo-item-symbol">{{ rec.symbol }} · {{ rec.timeframe }}</span>
+                    <span class="demo-item-bars">{{ rec.bar_count }} 根K线</span>
+                  </div>
+                </div>
+                <div v-else style="padding:16px;color:var(--fg-3);font-size:12px;">
+                  {{ demoLoading ? '加载中...' : '暂无记录 · 点击「刷新列表」' }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Decision Flow View -->
+          <div class="flow-layout" v-if="aiView==='flow'">
+            <div class="flow-canvas-wrap">
+              <canvas ref="flowCanvas"></canvas>
+              <div class="flow-controls" v-if="mergedTrace.length > 0">
+                <button class="flow-btn" @click="resetFlowView" title="重置视图">⟲</button>
+                <button class="flow-btn" @click="zoomFlow(1.15)" title="放大">＋</button>
+                <button class="flow-btn" @click="zoomFlow(0.87)" title="缩小">－</button>
+                <span class="flow-hint">拖拽平移 · 滚轮缩放 · 双击节点查看详情</span>
+              </div>
+              <div v-else style="position:absolute;inset:0;display:grid;place-items:center;color:var(--fg-3);font-size:12px;padding:16px;text-align:center;">
+                暂无决策流数据 · 完成一次分析后显示<br>
+                <span style="font-size:11px;color:var(--fg-3);margin-top:4px;display:block;">每个节点展示 AI 在决策树中的路径走向</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="followup">
+            <input v-model="followupText" placeholder="追问当前分析..." @keyup.enter="sendFollowup" />
+            <div class="followup-actions">
+              <button class="send" type="button" @click="sendFollowup">发送</button>
+              <button type="button" @click="followupText=''">清空</button>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <!-- ====== Status Bar ====== -->
+      <footer class="statusbar">
+        <span>
+          <span class="status-dot" :class="statusDotClass"></span>
+          {{ statusText }}
+        </span>
+        <span class="status-right">
+          <span class="pill" style="font-size:11px;height:20px;padding:0 8px;">{{ settings.last_data_source || '--' }}</span>
+          <span style="margin-left:12px;">上下文</span>
+          <span class="progress">
+            <span class="progress-track">
+              <span class="progress-fill" :class="progressClass" :style="{width: tokenPct+'%'}"></span>
+            </span>
+            <span>{{ tokenText }}</span>
+          </span>
+        </span>
+      </footer>
+    </main>
+
+    <!-- Settings Modal -->
+    <div v-if="showSettingsModal" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:grid;place-items:center;" @click.self="showSettingsModal=false">
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:20px;width:560px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
+        <h3 style="margin-bottom:16px;font-size:15px;flex-shrink:0;">设置</h3>
+        <div style="overflow:auto;flex:1;min-height:0;display:grid;gap:16px;padding-right:4px;">
+
+          <!-- AI 提供商 -->
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface-1);">
+            <h4 style="font-size:13px;margin-bottom:10px;color:var(--accent-3);">AI 提供商</h4>
+            <div style="display:grid;gap:10px;">
+              <div class="field"><label>模型</label><div class="select-like symbol"><input v-model="settings.provider_model" /></div></div>
+              <div class="field"><label>Base URL</label><div class="select-like symbol"><input v-model="settings.provider_base_url" /></div></div>
+              <div class="field"><label>API Key</label>
+                <div style="display:flex;gap:6px;">
+                  <div class="select-like" style="flex:1;"><input :type="showApiKey?'text':'password'" v-model="settings.provider_api_key" placeholder="*** 表示不修改" /></div>
+                  <button class="button secondary" type="button" style="min-width:52px;padding:0 8px;" @click="showApiKey=!showApiKey">{{ showApiKey?'隐藏':'显示' }}</button>
+                </div>
+              </div>
+              <div class="field" style="align-items:center;"><label style="margin:0;">启用 Thinking</label><span class="checkbox" :class="{checked: settings.provider_thinking}" @click="settings.provider_thinking=!settings.provider_thinking"></span></div>
+              <div class="field"><label>Reasoning Effort</label>
+                <select v-model="settings.provider_reasoning_effort" style="height:34px;padding:0 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:12px;">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="max">max</option>
+                </select>
+              </div>
+              <div class="field"><label>Context Window</label><div class="select-like"><input v-model.number="settings.provider_context_window" type="number" min="1000" max="2000000" step="1000" /></div></div>
+            </div>
+          </div>
+
+          <!-- 通用设置 -->
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface-1);">
+            <h4 style="font-size:13px;margin-bottom:10px;color:var(--accent-3);">通用设置</h4>
+            <div style="display:grid;gap:10px;">
+              <div class="field"><label>分析 K 线数</label><div class="select-like"><input v-model.number="settings.analysis_bar_count" type="number" min="2" max="5000" /></div></div>
+              <div class="field"><label>刷新间隔 (ms)</label><div class="select-like"><input v-model.number="settings.refresh_interval_ms" type="number" min="100" max="10000" /></div></div>
+              <div class="field" style="align-items:center;"><label style="margin:0;">分析后自动恢复图表</label><span class="checkbox" :class="{checked: settings.auto_resume_chart_after_analysis}" @click="settings.auto_resume_chart_after_analysis=!settings.auto_resume_chart_after_analysis"></span></div>
+              <div class="field"><label>上下文警告阈值 (%)</label><div class="select-like"><input v-model.number="settings.context_warning_threshold_pct" type="number" min="1" max="100" /></div></div>
+              <div class="field"><label>流式面板字体 (pt)</label><div class="select-like"><input v-model.number="settings.stream_pane_font_pt" type="number" min="8" max="28" /></div></div>
+              <div class="field"><label>图表序号字体 (pt)</label><div class="select-like"><input v-model.number="settings.chart_seq_label_font_pt" type="number" min="6" max="24" /></div></div>
+              <div class="field"><label>增量最大新 K 线数</label><div class="select-like"><input v-model.number="settings.incremental_max_new_bars" type="number" min="0" max="500" /></div></div>
+              <div class="field"><label>决策立场</label>
+                <select v-model="settings.decision_stance" style="height:34px;padding:0 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:12px;">
+                  <option value="conservative">保守 (conservative)</option>
+                  <option value="balanced">均衡 (balanced)</option>
+                  <option value="aggressive">激进 (aggressive)</option>
+                  <option value="extreme_aggressive">极端激进 (extreme_aggressive)</option>
+                </select>
+              </div>
+              <div class="field"><label>RQData License Key</label>
+                <div style="display:flex;gap:6px;">
+                  <div class="select-like" style="flex:1;"><input :type="showRqKey?'text':'password'" v-model="settings.rqdata_license_key" placeholder="*** 表示不修改" /></div>
+                  <button class="button secondary" type="button" style="min-width:52px;padding:0 8px;" @click="showRqKey=!showRqKey">{{ showRqKey?'隐藏':'显示' }}</button>
+                </div>
+              </div>
+              <div class="field" style="align-items:center;"><label style="margin:0;">决策流自动播放</label><span class="checkbox" :class="{checked: settings.decision_flow_auto_play}" @click="settings.decision_flow_auto_play=!settings.decision_flow_auto_play"></span></div>
+              <div class="field"><label>决策流播放秒数</label><div class="select-like"><input v-model.number="settings.decision_flow_play_seconds" type="number" min="3" max="120" /></div></div>
+              <div class="field"><label>决策流默认缩放 (%)</label><div class="select-like"><input v-model.number="settings.decision_flow_default_zoom_pct" type="number" min="10" /></div></div>
+            </div>
+          </div>
+
+          <!-- 数据源 -->
+          <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--surface-1);">
+            <h4 style="font-size:13px;margin-bottom:10px;color:var(--accent-3);">数据源</h4>
+            <div style="display:grid;gap:10px;">
+              <div class="field"><label>品种</label><div class="select-like symbol"><input v-model="settings.last_symbol" /></div></div>
+              <div class="field"><label>周期</label><div class="select-like"><input v-model="settings.last_timeframe" /></div></div>
+              <div class="field"><label>数据源</label>
+                <select v-model="settings.last_data_source" style="height:34px;padding:0 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:12px;">
+                  <option value="mt5">MT5</option>
+                  <option value="rqdata">RQData</option>
+                  <option value="tradingview">TradingView</option>
+                  <option value="akshare">AKShare</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--border);margin-top:12px;flex-shrink:0;">
+          <button class="button secondary" @click="showSettingsModal=false">取消</button>
+          <button class="button primary" @click="saveAndClose">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- TV Connectivity Dialog -->
+    <div v-if="showTvDialog" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:grid;place-items:center;" @click.self="showTvDialog=false">
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:20px;width:480px;max-width:95vw;max-height:90vh;display:flex;flex-direction:column;">
+        <h3 style="margin-bottom:16px;font-size:15px;flex-shrink:0;">📺 数据源切换</h3>
+        <div style="overflow:auto;flex:1;min-height:0;display:grid;gap:8px;padding-right:4px;">
+          <div v-for="src in dataSources" :key="src.id"
+               @click="switchSource(src.id)"
+               style="display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:border-color .12s,background .12s;"
+               :style="{borderColor: src.is_active ? 'var(--accent-3)' : 'var(--border)', background: src.is_active ? 'rgba(56,189,248,0.08)' : 'var(--surface-1)'}">
+            <div style="width:10px;height:10px;border-radius:50%;flex-shrink:0;"
+                 :style="{background: src.is_active ? 'var(--success)' : 'var(--fg-3)', boxShadow: src.is_active ? '0 0 6px rgba(34,197,94,0.5)' : 'none'}"></div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-weight:700;font-size:13px;color:var(--fg);">{{ src.label }}</div>
+              <div style="font-size:11px;color:var(--fg-3);font-family:var(--font-mono);">默认: {{ src.default_symbol }}</div>
+            </div>
+            <span v-if="src.is_active" class="pill green" style="font-size:10px;height:20px;padding:0 8px;">当前</span>
+            <span v-else-if="!src.ready" class="pill" style="font-size:10px;height:20px;padding:0 8px;color:var(--fg-3);">未就绪</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid var(--border);margin-top:12px;flex-shrink:0;">
+          <button class="button secondary" @click="refreshSources">刷新</button>
+          <button class="button secondary" @click="showTvDialog=false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" :class="[toastType, {show: toastShow}]">{{ toastMsg }}</div>
+  </div>
+
+  <script type="module">
+    import { fetchSnapshot, submitAnalysis as apiSubmitAnalysis, fetchSettings, saveSettings, fetchLedger, submitFollowup, fetchDebugTurns as apiFetchDebugTurns, fetchRecords, fetchRecord } from "/static/js/api.js";
+    import { createStream } from "/static/js/stream.js";
+    import { initDecisionFlow } from "/static/js/decision_flow.js";
+
+    const { createApp, ref, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
+
+    createApp({
+      setup() {
+        // Refs
+        const klineCanvas = ref(null);
+        const flowCanvas = ref(null);
+        const chartWrap = ref(null);
+        const priceAxis = ref(null);
+        const timeAxis = ref(null);
+        const crosshair = ref(null);
+        const crossV = ref(null);
+        const crossH = ref(null);
+        const tooltip = ref(null);
+
+        // State
+        const frame = ref(null);
+        const analyzing = ref(false);
+        const decision = ref(null);
+        const reasoningText = ref("");
+        const appState = ref("idle");
+        const aiView = ref("decision");
+        const isLive = ref(true);
+        const waitForClose = ref(true);
+        const flowStep = ref(0);
+        const streamMessages = ref([]);
+        const analysisStartedAt = ref(null);
+        const analysisElapsedSeconds = ref(null);
+        const followupText = ref("");
+        const showSettingsModal = ref(false);
+        const showTvDialog = ref(false);
+        const showApiKey = ref(false);
+        const showRqKey = ref(false);
+        const showModelDropdown = ref(false);
+        const dataSources = ref([]);
+        const latestRecord = ref(null);
+        const debugTurns = ref([]);
+        const debugTurnIndex = ref(0);
+        const demoRecords = ref([]);
+        const demoLoading = ref(false);
+        const demoCurrent = ref(null);
+        const speedProfile = ref('balanced');
+        const now = ref(Date.now());
+        let nowTimer = null;
+        const settings = ref({
+          // provider
+          provider_model: "",
+          provider_base_url: "",
+          provider_api_key: "",
+          provider_thinking: true,
+          provider_reasoning_effort: "max",
+          provider_context_window: 2_000_000,
+          // general
+          analysis_bar_count: 100,
+          refresh_interval_ms: 1000,
+          auto_resume_chart_after_analysis: false,
+          context_warning_threshold_pct: 80,
+          stream_pane_font_pt: 11,
+          chart_seq_label_font_pt: 7,
+          incremental_max_new_bars: 10,
+          decision_stance: "balanced",
+          rqdata_license_key: "",
+          decision_flow_auto_play: true,
+          decision_flow_play_seconds: 50,
+          decision_flow_default_zoom_pct: 500,
+          // data source
+          last_symbol: "",
+          last_timeframe: "",
+          last_data_source: "mt5",
+          last_tradingview_exchange: "",
+        });
+
+        // Toast
+        const toastMsg = ref("");
+        const toastType = ref("");
+        const toastShow = ref(false);
+        let toastTimer = null;
+        let ledgerInterval = null;
+
+        // Canvas
+        let ctx = null;
+        let cleanupStream = null;
+        let cleanupFlow = null;
+        let canvasDpr = 1;
+
+        const barCount = computed(() => frame.value?.bars?.length || 0);
+        const lastClose = computed(() => frame.value?.bars?.[0]?.close);
+        const lastEma20 = computed(() => {
+          const ema = frame.value?.indicators?.ema20;
+          return ema?.length ? ema[ema.length - 1] : null;
+        });
+
+        const formingCountdown = computed(() => {
+          now.value; // dependency
+          const bar = frame.value?.bars?.[0];
+          if (!bar || bar.closed) return '';
+          const tf = frame.value?.timeframe || '1m';
+          const minutes = { '1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440 };
+          const periodMin = minutes[tf] || 1;
+          const nextClose = bar.ts_open + periodMin * 60 * 1000;
+          const remaining = Math.max(0, nextClose - Date.now());
+          const sec = Math.ceil(remaining / 1000);
+          const m = Math.floor(sec / 60);
+          const s = sec % 60;
+          return `${m}:${String(s).padStart(2, '0')}`;
+        });
+
+        const speedProfiles = {
+          fast: { analysis_bar_count: 60, provider_thinking: false, provider_reasoning_effort: 'low' },
+          balanced: { analysis_bar_count: 100, provider_thinking: false, provider_reasoning_effort: 'medium' },
+          deep: { analysis_bar_count: 150, provider_thinking: true, provider_reasoning_effort: 'high' },
+        };
+
+        function applySpeedProfile() {
+          const p = speedProfiles[speedProfile.value];
+          if (!p) return;
+          settings.value.analysis_bar_count = p.analysis_bar_count;
+          settings.value.provider_thinking = p.provider_thinking;
+          settings.value.provider_reasoning_effort = p.provider_reasoning_effort;
+          showToast(`已切换至 ${speedProfile.value} 模式`, 'ok');
+        }
+
+        const decisionPillClass = computed(() => {
+          const d = decision.value?.order_direction || "";
+          if (d.includes("多")) return "green";
+          if (d.includes("空")) return "red";
+          return "amber";
+        });
+
+        function formatPrice(value) {
+          if (value === null || value === undefined || value === "" || value === "--") return "--";
+          const num = Number(value);
+          if (!Number.isFinite(num)) return String(value);
+          const decimals = Math.abs(num) >= 1000 ? 2 : 4;
+          return num.toFixed(decimals).replace(/\.?0+$/, "");
+        }
+
+        function firstValue(...values) {
+          return values.find((v) => v !== null && v !== undefined && v !== "" && v !== "--");
+        }
+
+        function formatPercent(value) {
+          if (value === null || value === undefined || value === "") return "--";
+          const num = Number(value);
+          if (!Number.isFinite(num)) return String(value);
+          return `${Math.round(num)}%`;
+        }
+
+        function formatDuration(value) {
+          if (value === null || value === undefined || value === "" || value === "--") return "--";
+          const num = Number(value);
+          if (!Number.isFinite(num)) return String(value);
+          return `${num.toFixed(1)}s`;
+        }
+
+        const summaryMetrics = computed(() => {
+          const d = decision.value || {};
+          const pred = d.next_bar_prediction || {};
+          const probs = pred.probabilities || d.probabilities || {};
+          const elapsed = firstValue(d.elapsed_s, d.elapsed_seconds, d.duration_s, analysisElapsedSeconds.value);
+          const diagConf = firstValue(d.diagnosis_confidence, d.confidence);
+          const tradeConf = firstValue(d.trade_confidence);
+          return {
+            finalAction: firstValue(d.order_type, d.order_direction, d.final_action, "等待"),
+            directionProb: `多 ${formatPercent(probs.bullish)} / 空 ${formatPercent(probs.bearish)} / 中 ${formatPercent(probs.neutral)}`,
+            nextBarProb: pred.direction ? `${pred.direction === 'bullish' ? '↑' : pred.direction === 'bearish' ? '↓' : '–'} ${formatPercent(probs.bullish)}/${formatPercent(probs.bearish)}/${formatPercent(probs.neutral)}` : '--',
+            marketConf: diagConf != null ? `${Math.round(diagConf)}%` : '--',
+            tradeConf: tradeConf != null ? `${Math.round(tradeConf)}%` : '--',
+            resistance: formatPrice(firstValue(d.key_breakout, d.resistance, d.resistance_zone, d.take_profit_price)),
+            support: formatPrice(firstValue(d.support_zone, d.support, d.stop_loss_price)),
+            elapsed: formatDuration(elapsed),
+          };
+        });
+
+        const dataSourceStatus = computed(() => settings.value.last_data_source ? `${settings.value.last_data_source} 已连接` : "未连接");
+        const snapshotStatus = computed(() => frame.value ? `${frame.value.bars?.length || 0} 根K线` : "等待数据");
+        const stage1Status = computed(() => analyzing.value ? "诊断中..." : (decision.value ? "已完成" : "等待提交"));
+        const stage2Status = computed(() => analyzing.value ? "决策中..." : (decision.value ? "已完成" : "等待提交"));
+
+        const statusText = computed(() => {
+          if (appState.value === "error") return "数据异常 · 请检查配置";
+          if (appState.value === "analyzing") return `AI 分析中 · ${settings.value.last_symbol} ${settings.value.last_timeframe}`;
+          if (appState.value === "done") return `分析完成 · ${settings.value.last_symbol} ${settings.value.last_timeframe}`;
+          return `等待 · ${settings.value.last_symbol || '--'} ${settings.value.last_timeframe || '--'}`;
+        });
+
+        const modelLabel = computed(() => {
+          const m = settings.value.provider_model;
+          return m ? m : "未配置模型";
+        });
+
+        const tokenPct = ref(0);
+        const tokenText = ref("0% · 0 / 2,000,000");
+
+        const rawJson = computed(() => JSON.stringify(decision.value || { status: "waiting" }, null, 2));
+
+        const reasoningLines = computed(() => {
+          if (!reasoningText.value) return [];
+          return reasoningText.value.split('\n').filter(l => l.trim());
+        });
+
+        const mergedTrace = computed(() => {
+          const gate = (decision.value?.gate_trace || []).map(t => ({...t, phase: 'gate'}));
+          const dec = (decision.value?.decision_trace || []).map(t => ({...t, phase: 'decision'}));
+          return [...gate, ...dec];
+        });
+
+        const promptFiles = computed(() => {
+          const s1 = decision.value?.strategy_files_needed || [];
+          return [...new Set(s1)];
+        });
+
+        const currentDebugTurn = computed(() => debugTurns.value[debugTurnIndex.value] || null);
+
+        const statusDotClass = computed(() => {
+          if (appState.value === 'error') return 'offline';
+          if (frame.value && settings.value.last_data_source) return 'online';
+          return 'unknown';
+        });
+
+        const progressClass = computed(() => {
+          const pct = tokenPct.value;
+          if (pct >= 80) return 'danger';
+          if (pct >= 60) return 'warn';
+          return '';
+        });
+
+        function answerClass(ans) {
+          const a = String(ans).split('（')[0];
+          if (a === '是') return 'trace-answer-yes';
+          if (a === '否') return 'trace-answer-no';
+          return 'trace-answer-neutral';
+        }
+
+        function formatRawResponse(raw) {
+          if (!raw) return '';
+          try { return JSON.stringify(raw, null, 2); } catch { return String(raw); }
+        }
+
+        async function fetchDebugTurns() {
+          try {
+            const data = await apiFetchDebugTurns();
+            debugTurns.value = Array.isArray(data) ? data : (data.turns || []);
+            debugTurnIndex.value = 0;
+          } catch (e) {
+            console.warn("fetchDebugTurns failed:", e);
+            debugTurns.value = [];
+          }
+        }
+
+        async function loadRecordList() {
+          demoLoading.value = true;
+          try {
+            const data = await fetchRecords();
+            demoRecords.value = data.records || [];
+          } catch (e) {
+            showToast("加载记录列表失败", "warn");
+          } finally {
+            demoLoading.value = false;
+          }
+        }
+
+        async function loadRecord(filename) {
+          demoLoading.value = true;
+          try {
+            const data = await fetchRecord(filename);
+            demoCurrent.value = data;
+            if (data.kline_data) {
+              const bars = data.kline_data;
+              const indicators = data.kline_indicators || {};
+              frame.value = {
+                symbol: data.meta?.symbol || '',
+                timeframe: data.meta?.timeframe || '',
+                bars: bars,
+                indicators: {
+                  ema10: indicators.ema10 || [],
+                  ema20: indicators.ema20 || [],
+                  ema60: indicators.ema60 || [],
+                  atr14: indicators.atr14 || [],
+                }
+              };
+              drawKline();
+            }
+            if (data.stage2_decision) {
+              decision.value = data.stage2_decision;
+            }
+            if (data.stage1_diagnosis) {
+              reasoningText.value = data.stage1_diagnosis.htf_context || '';
+            }
+            showToast("记录已加载", "ok");
+          } catch (e) {
+            showToast("加载记录失败", "warn");
+          } finally {
+            demoLoading.value = false;
+          }
+        }
+
+        function playNextRecord() {
+          if (demoRecords.value.length === 0) return;
+          const idx = Math.floor(Math.random() * demoRecords.value.length);
+          loadRecord(demoRecords.value[idx].filename);
+        }
+
+        function resetFlowView() {
+          if (cleanupFlow) { cleanupFlow(); cleanupFlow = null; }
+          cleanupFlow = initDecisionFlow({
+            canvas: flowCanvas.value,
+            trace: mergedTrace.value,
+            container: chartWrap.value,
+          });
+        }
+        function zoomFlow(factor) {
+          if (!flowCanvas.value) return;
+          const rect = flowCanvas.value.getBoundingClientRect();
+          const ev = new WheelEvent("wheel", {
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+            deltaY: factor > 1 ? -100 : 100,
+            bubbles: true,
+            cancelable: true,
+          });
+          flowCanvas.value.dispatchEvent(ev);
+        }
+
+        /* ---- TV connectivity ---- */
+        async function refreshSources() {
+          try {
+            const res = await fetch("/api/data/sources");
+            dataSources.value = (await res.json()).sources || [];
+          } catch (e) {
+            showToast("加载数据源失败", "warn");
+          }
+        }
+        async function switchSource(srcId) {
+          settings.value.last_data_source = srcId;
+          showTvDialog.value = false;
+          showToast(`已切换至 ${srcId}`, "ok");
+          try { await fetchData(); } catch {}
+        }
+
+        /* ---- auto-incremental preflight ---- */
+        async function checkLatestRecord() {
+          try {
+            const res = await fetch(`/api/analysis/latest?symbol=${encodeURIComponent(settings.value.last_symbol)}&timeframe=${encodeURIComponent(settings.value.last_timeframe)}`);
+            if (res.ok) latestRecord.value = await res.json();
+            else latestRecord.value = null;
+          } catch { latestRecord.value = null; }
+        }
+
+        function showToast(msg, type = "ok") {
+          toastMsg.value = msg;
+          toastType.value = type;
+          toastShow.value = true;
+          clearTimeout(toastTimer);
+          toastTimer = setTimeout(() => toastShow.value = false, 2200);
+        }
+
+        function setState(state) {
+          appState.value = state;
+          document.body.dataset.state = state;
+          if (state === "idle") flowStep.value = 0;
+          else if (state === "analyzing") flowStep.value = 2;
+          else if (state === "done") flowStep.value = 4;
+          else if (state === "error") flowStep.value = 3;
+        }
+
+        watch(decision, () => { if (frame.value) drawKline(); });
+        watch(aiView, (v) => {
+          document.body.dataset.view = v;
+          if (v === 'flow') {
+            nextTick(() => {
+              if (cleanupFlow) { cleanupFlow(); cleanupFlow = null; }
+              cleanupFlow = initDecisionFlow({
+                canvas: flowCanvas.value,
+                trace: mergedTrace.value,
+                container: chartWrap.value,
+              });
+            });
+          } else if (cleanupFlow) {
+            cleanupFlow();
+            cleanupFlow = null;
+          }
+        });
+        watch(appState, (s) => { document.body.dataset.state = s; });
+
+        // ==================== Canvas Drawing ====================
+        function resizeCanvas() {
+          const canvas = klineCanvas.value;
+          const wrap = chartWrap.value;
+          if (!canvas || !wrap) return;
+          const dpr = window.devicePixelRatio || 1;
+          canvasDpr = dpr;
+          canvas.width = wrap.clientWidth * dpr;
+          canvas.height = wrap.clientHeight * dpr;
+          canvas.style.width = wrap.clientWidth + "px";
+          canvas.style.height = wrap.clientHeight + "px";
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          drawKline();
+        }
+
+        function getCssVar(name) {
+          return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        }
+
+        function drawKline() {
+          const canvas = klineCanvas.value;
+          const wrap = chartWrap.value;
+          if (!canvas || !wrap || !frame.value) return;
+
+          const w = wrap.clientWidth;
+          const h = wrap.clientHeight;
+          ctx.clearRect(0, 0, w, h);
+
+          const bars = frame.value.bars;
+          const indicators = frame.value.indicators;
+          if (!bars || bars.length === 0) return;
+
+          const marginLeft = 50;
+          const marginRight = 16;
+          const marginTop = 24;
+          const marginBottom = 48;
+          const volHeight = 72;
+          const chartH = h - marginTop - marginBottom - volHeight;
+          const chartW = w - marginLeft - marginRight;
+
+          // Price range (filter out null/NaN indicator values)
+          let minP = Infinity, maxP = -Infinity;
+          bars.forEach(b => { minP = Math.min(minP, b.low); maxP = Math.max(maxP, b.high); });
+          const validNum = (p) => typeof p === 'number' && !isNaN(p);
+          if (indicators?.ema20) indicators.ema20.forEach(p => { if (validNum(p)) { minP = Math.min(minP, p); maxP = Math.max(maxP, p); } });
+          if (indicators?.ema10) indicators.ema10.forEach(p => { if (validNum(p)) { minP = Math.min(minP, p); maxP = Math.max(maxP, p); } });
+          if (indicators?.ema60) indicators.ema60.forEach(p => { if (validNum(p)) { minP = Math.min(minP, p); maxP = Math.max(maxP, p); } });
+          const pad = (maxP - minP) * 0.05 || 1;
+          minP -= pad; maxP += pad;
+          if (minP === maxP || !isFinite(minP) || !isFinite(maxP)) { minP = bars[0].low - 1; maxP = bars[0].high + 1; }
+
+          // Volumes
+          const volumes = bars.map(b => b.volume);
+          const maxVol = Math.max(...volumes) * 1.15 || 1;
+
+          // Grid
+          ctx.strokeStyle = getCssVar("--chart-grid");
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 4]);
+          for (let i = 0; i <= 4; i++) {
+            const y = marginTop + chartH * (i / 4);
+            ctx.beginPath(); ctx.moveTo(marginLeft, y); ctx.lineTo(w - marginRight, y); ctx.stroke();
+          }
+          for (let i = 0; i <= 6; i++) {
+            const x = marginLeft + chartW * (i / 6);
+            ctx.beginPath(); ctx.moveTo(x, marginTop); ctx.lineTo(x, h - marginBottom); ctx.stroke();
+          }
+          ctx.setLineDash([]);
+
+          // Price axis
+          const pa = priceAxis.value;
+          if (pa) {
+            pa.innerHTML = "";
+            for (let i = 0; i <= 4; i++) {
+              const price = maxP - i * (maxP - minP) / 4;
+              const span = document.createElement("span");
+              span.textContent = price.toFixed(1);
+              pa.appendChild(span);
+            }
+          }
+
+          // Time axis
+          const ta = timeAxis.value;
+          if (ta) {
+            ta.innerHTML = "";
+            const step = Math.max(1, Math.floor(bars.length / 6));
+            for (let i = 0; i < bars.length; i += step) {
+              const span = document.createElement("span");
+              const d = new Date(bars[i].ts_open);
+              span.textContent = `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+              ta.appendChild(span);
+            }
+          }
+
+          const gap = chartW / bars.length;
+          const candleW = Math.max(2, gap * 0.55);
+
+          // Candles (oldest first for drawing)
+          const drawBars = [...bars].reverse();
+          drawBars.forEach((b, i) => {
+            const x = marginLeft + gap * i + gap / 2;
+            const yH = marginTop + chartH * (1 - (b.high - minP) / (maxP - minP));
+            const yL = marginTop + chartH * (1 - (b.low - minP) / (maxP - minP));
+            const yO = marginTop + chartH * (1 - (b.open - minP) / (maxP - minP));
+            const yC = marginTop + chartH * (1 - (b.close - minP) / (maxP - minP));
+            const up = b.close >= b.open;
+            const color = up ? getCssVar("--chart-up") : getCssVar("--chart-down");
+
+            ctx.strokeStyle = color;
+            ctx.fillStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.moveTo(x, yH); ctx.lineTo(x, yL); ctx.stroke();
+            const bodyTop = Math.min(yO, yC);
+            const bodyH = Math.max(1, Math.abs(yO - yC));
+            ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
+
+            // Sequence label
+            const showSeqInterval = Math.max(1, Math.floor(drawBars.length / 10));
+            if (i % showSeqInterval === 0) {
+              ctx.fillStyle = getCssVar("--fg-3");
+              ctx.font = "10px var(--font-mono)";
+              ctx.textAlign = "center";
+              ctx.fillText(`K${b.seq}`, x, h - marginBottom + 14);
+            }
+          });
+
+          // EMA lines — draw over full bar width using bars.length for gap
+          function drawEMA(points, colorVar, width) {
+            if (!points || points.length === 0) return;
+            const n = bars.length;          // align with bar count
+            const reversed = points.slice().reverse();
+            // Pad front with NaN so EMA aligns to rightmost bars
+            const pad = n - reversed.length;
+            const padded = Array(pad).fill(NaN).concat(reversed);
+            ctx.strokeStyle = getCssVar(colorVar);
+            ctx.lineWidth = width;
+            ctx.beginPath();
+            let started = false;
+            for (let i = 0; i < n; i++) {
+              const p = padded[i];
+              if (p === null || p === undefined || isNaN(p)) { started = false; continue; }
+              const x = marginLeft + gap * i + gap / 2;
+              const y = marginTop + chartH * (1 - (p - minP) / (maxP - minP));
+              if (!started) { ctx.moveTo(x, y); started = true; }
+              else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+          }
+          if (indicators) {
+            drawEMA(indicators.ema10, "--chart-line-2", 1.5);
+            drawEMA(indicators.ema20, "--chart-line", 2);
+            drawEMA(indicators.ema60, "--chart-line-3", 1.5);
+          }
+
+          // Volume bars
+          const volTop = marginTop + chartH + 14;
+          drawBars.forEach((b, i) => {
+            const x = marginLeft + gap * i + gap / 2;
+            const vh = (b.volume / maxVol) * volHeight;
+            const up = b.close >= b.open;
+            const color = up ? getCssVar("--chart-vol-up") : getCssVar("--chart-vol-down");
+            ctx.fillStyle = color;
+            ctx.fillRect(x - candleW / 2, volTop + volHeight - vh, candleW, vh);
+          });
+
+          // Volume separator
+          ctx.strokeStyle = getCssVar("--border");
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath(); ctx.moveTo(marginLeft, volTop - 4); ctx.lineTo(w - marginRight, volTop - 4); ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Support / resistance / entry lines from decision
+          const levels = [];
+          if (decision.value?.entry_price) levels.push({ price: decision.value.entry_price, label: '入场', color: getCssVar("--accent-3") });
+          if (decision.value?.take_profit_price) levels.push({ price: decision.value.take_profit_price, label: '止盈', color: getCssVar("--chart-up") });
+          if (decision.value?.stop_loss_price) levels.push({ price: decision.value.stop_loss_price, label: '止损', color: getCssVar("--chart-down") });
+
+          levels.forEach(level => {
+            const y = marginTop + chartH * (1 - (level.price - minP) / (maxP - minP));
+            if (y < marginTop || y > marginTop + chartH) return;
+            ctx.strokeStyle = level.color;
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            ctx.moveTo(marginLeft, y);
+            ctx.lineTo(marginLeft + chartW, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            // Label at right edge of chart area
+            ctx.fillStyle = level.color;
+            ctx.font = "bold 11px var(--font-mono)";
+            ctx.textAlign = "right";
+            ctx.fillText(`${level.label} ${level.price}`, marginLeft + chartW - 4, y - 4);
+          });
+
+          // Direction marker on newest bar
+          if (decision.value?.order_direction) {
+            const dir = decision.value.order_direction;
+            const newestBar = drawBars[drawBars.length - 1];
+            const nx = marginLeft + gap * (drawBars.length - 1) + gap / 2;
+            const ny = marginTop + chartH * (1 - (newestBar.high - minP) / (maxP - minP)) - 16;
+            ctx.font = "bold 14px sans-serif";
+            ctx.textAlign = "center";
+            if (dir.includes('多')) {
+              ctx.fillStyle = getCssVar("--chart-up");
+              ctx.fillText('▲', nx, ny);
+            } else if (dir.includes('空')) {
+              ctx.fillStyle = getCssVar("--chart-down");
+              ctx.fillText('▼', nx, ny);
+            }
+          }
+        }
+
+        // Crosshair
+        function onMouseMove(e) {
+          const wrap = chartWrap.value;
+          const canvas = klineCanvas.value;
+          if (!wrap || !canvas || !frame.value) return;
+          const rect = wrap.getBoundingClientRect();
+          const mx = e.clientX - rect.left;
+          const my = e.clientY - rect.top;
+          const w = rect.width;
+          const h = rect.height;
+          const marginLeft = 50;
+          const marginRight = 16;
+          const marginTop = 24;
+          const marginBottom = 48;
+          const volHeight = 72;
+          const chartH = h - marginTop - marginBottom - volHeight;
+          const chartW = w - marginLeft - marginRight;
+
+          if (mx < marginLeft || mx > w - marginRight || my < marginTop || my > h - marginBottom) {
+            crosshair.value?.classList.remove("active");
+            tooltip.value?.classList.remove("active");
+            return;
+          }
+
+          const bars = frame.value.bars;
+          const gap = chartW / bars.length;
+          const idx = Math.min(bars.length - 1, Math.max(0, Math.floor((mx - marginLeft) / gap)));
+          // bars is newest-first; drawBars (oldest-first) is used for rendering.
+          // idx 0 = leftmost (oldest), idx N-1 = rightmost (newest)
+          const c = bars[bars.length - 1 - idx];
+          const x = marginLeft + gap * idx + gap / 2;
+
+          crossV.value.style.left = x + "px";
+          crossH.value.style.top = my + "px";
+          crosshair.value?.classList.add("active");
+
+          const up = c.close >= c.open;
+          const changeColor = up ? "tt-up" : "tt-down";
+          const changeSign = up ? "+" : "";
+          const changeVal = (c.close - c.open).toFixed(1);
+          const changePct = c.open ? ((c.close - c.open) / c.open * 100).toFixed(2) : "0.00";
+
+          tooltip.value.innerHTML =
+            '<div class="tt-row"><span class="tt-label">#' + (idx + 1) + ' / ' + bars.length + '</span></div>' +
+            '<div class="tt-row"><span class="tt-label">O</span><span>' + c.open + '</span><span class="tt-label">H</span><span>' + c.high + '</span></div>' +
+            '<div class="tt-row"><span class="tt-label">L</span><span>' + c.low + '</span><span class="tt-label">C</span><span class="' + changeColor + '">' + c.close + '</span></div>' +
+            '<div class="tt-row"><span class="tt-label">Change</span><span class="' + changeColor + '">' + changeSign + changeVal + ' (' + changeSign + changePct + '%)</span></div>';
+          tooltip.value.style.left = (mx + 14) + "px";
+          tooltip.value.style.top = (my + 14) + "px";
+          tooltip.value?.classList.add("active");
+        }
+        function onMouseLeave() {
+          crosshair.value?.classList.remove("active");
+          tooltip.value?.classList.remove("active");
+        }
+
+        // ==================== API Integration ====================
+        async function fetchData() {
+          showToast("正在获取数据...", "info");
+          try {
+            // Save toolbar settings (symbol/timeframe/data_source) first so the
+            // backend DataService re-subscribes to the new symbol.
+            const s = settings.value;
+            await saveSettings({
+              general: {
+                last_symbol: s.last_symbol,
+                last_timeframe: s.last_timeframe,
+                last_data_source: s.last_data_source,
+              }
+            });
+            const data = await fetchSnapshot();
+            frame.value = data;
+            showToast("数据已更新", "ok");
+            drawKline();
+          } catch (e) {
+            console.error(e);
+            showToast(`获取数据失败：${e.message || e}`, "warn");
+            setState("error");
+          }
+        }
+
+        async function submitAnalysis() {
+          if (analyzing.value) return;
+          analyzing.value = true;
+          decision.value = null;
+          reasoningText.value = "";
+          streamMessages.value = [];
+          analysisStartedAt.value = Date.now();
+          analysisElapsedSeconds.value = null;
+          setState("analyzing");
+
+          try {
+            const res = await apiSubmitAnalysis(settings.value.bar_count || 80, "balanced");
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let rawEvents = [];
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.startsWith("data: ")) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    rawEvents.push(data);
+                    const ev = data.event;
+                    // Flow bar state updates
+                    if (ev === "stage1_started") {
+                      flowStep.value = 2;
+                    } else if (ev === "stage1_done") {
+                      flowStep.value = 2;
+                    } else if (ev === "stage2_started") {
+                      flowStep.value = 3;
+                    } else if (ev === "stage2_done") {
+                      flowStep.value = 3;
+                    } else if (ev === "record_saved") {
+                      flowStep.value = 4;
+                    } else if (ev === "stage1_failed" || ev === "stage2_failed") {
+                      setState("error");
+                      analyzing.value = false;
+                      showToast(data.message || "分析阶段失败", "warn");
+                      aiView.value = 'debug';
+                    } else if (ev === "cancelled") {
+                      setState("idle");
+                      analyzing.value = false;
+                      showToast("分析已取消", "info");
+                    } else if (ev === "error") {
+                      setState("error");
+                      analyzing.value = false;
+                      showToast(data.message || "分析出错", "warn");
+                    } else if (ev === "done") {
+                      if (analysisStartedAt.value) {
+                        analysisElapsedSeconds.value = (Date.now() - analysisStartedAt.value) / 1000;
+                      }
+                      setState("done");
+                      analyzing.value = false;
+                      showToast("分析完成", "ok");
+                      fetchDebugTurns();
+                    }
+                    // Reasoning / content text (accumulate without forced newlines)
+                    if (ev === "stage1_reasoning" || ev === "stage1_content" || ev === "stage2_reasoning" || ev === "stage2_content") {
+                      if (data.text) reasoningText.value += data.text;
+                    } else if (ev === "stage1_result") {
+                      const now = new Date();
+                      streamMessages.value.push({ title: "阶段一 · 市场诊断", text: JSON.stringify(data), time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`, stage: '1' });
+                    } else if (ev === "stage2_decision") {
+                      decision.value = data.decision || data;
+                      const now = new Date();
+                      streamMessages.value.push({ title: "阶段二 · 交易决策", text: JSON.stringify(data), time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`, stage: '2' });
+                      // Redraw chart to show entry/SL/TP lines
+                      drawKline();
+                    }
+                  } catch (err) { console.warn("SSE parse error:", err); }
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Analysis failed:", e);
+            showToast("分析失败", "warn");
+            setState("error");
+            analyzing.value = false;
+          }
+        }
+
+        async function submitIncremental() {
+          if (analyzing.value) return;
+          if (!decision.value) {
+            showToast("请先完成一次完整分析", "warn");
+            return;
+          }
+          analyzing.value = true;
+          analysisStartedAt.value = Date.now();
+          analysisElapsedSeconds.value = null;
+          setState("analyzing");
+
+          try {
+            const newBars = settings.value.incremental_max_new_bars || 10;
+            const res = await apiSubmitAnalysis(settings.value.bar_count || 80, "balanced", true, newBars);
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.startsWith("data: ")) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    const ev = data.event;
+                    if (ev === "stage1_started") { flowStep.value = 2; }
+                    else if (ev === "stage1_done") { flowStep.value = 2; }
+                    else if (ev === "stage2_started") { flowStep.value = 3; }
+                    else if (ev === "stage2_done") { flowStep.value = 3; }
+                    else if (ev === "record_saved") { flowStep.value = 4; }
+                    else if (ev === "stage1_failed" || ev === "stage2_failed") {
+                      setState("error"); analyzing.value = false;
+                      showToast(data.message || "分析阶段失败", "warn");
+                      aiView.value = 'debug';
+                    } else if (ev === "cancelled") {
+                      setState("idle"); analyzing.value = false;
+                      showToast("分析已取消", "info");
+                    } else if (ev === "error") {
+                      setState("error"); analyzing.value = false;
+                      showToast(data.message || "分析出错", "warn");
+                    } else if (ev === "done") {
+                      if (analysisStartedAt.value) {
+                        analysisElapsedSeconds.value = (Date.now() - analysisStartedAt.value) / 1000;
+                      }
+                      setState("done"); analyzing.value = false;
+                      showToast("增量分析完成", "ok");
+                    }
+                    if (ev === "stage1_reasoning" || ev === "stage1_content" || ev === "stage2_reasoning" || ev === "stage2_content") {
+                      if (data.text) reasoningText.value += data.text;
+                    } else if (ev === "stage1_result") {
+                      streamMessages.value.push({ title: "增量 · 市场诊断", text: JSON.stringify(data) });
+                    } else if (ev === "stage2_decision") {
+                      decision.value = data.decision || data;
+                      streamMessages.value.push({ title: "增量 · 交易决策", text: JSON.stringify(data) });
+                    }
+                  } catch (err) { console.warn("SSE parse error:", err); }
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Incremental analysis failed:", e);
+            showToast("增量分析失败", "warn");
+            setState("error");
+            analyzing.value = false;
+          }
+        }
+
+        function toggleLive() {
+          isLive.value = !isLive.value;
+          if (isLive.value) {
+            showToast("实时更新已开启", "ok");
+          } else {
+            if (cleanupStream) { cleanupStream(); cleanupStream = null; }
+            showToast("实时更新已暂停", "info");
+          }
+        }
+
+        async function sendFollowup() {
+          if (!followupText.value.trim()) return;
+          const text = followupText.value.trim();
+          followupText.value = "";
+
+          try {
+            const res = await submitFollowup(text);
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let replyText = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (line.startsWith("data: ")) {
+                  try {
+                    const data = JSON.parse(line.slice(6));
+                    if (data.event === "followup_reasoning") {
+                      reasoningText.value += data.text;
+                    } else if (data.event === "followup_content") {
+                      replyText += data.text;
+                    } else if (data.event === "followup_reply") {
+                      replyText = data.content;
+                    } else if (data.event === "error") {
+                      showToast(data.message || "追问失败", "warn");
+                    } else if (data.event === "done") {
+                      if (replyText) {
+                        streamMessages.value.push({ title: "追问 · " + text.slice(0, 20), text: replyText });
+                      }
+                    }
+                  } catch (err) { console.warn("SSE parse error:", err); }
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Followup failed:", e);
+            showToast("追问失败", "warn");
+          }
+        }
+
+        async function saveAndClose() {
+          try {
+            const s = settings.value;
+            await saveSettings({
+              provider: {
+                model: s.provider_model,
+                base_url: s.provider_base_url,
+                api_key: s.provider_api_key || "***",
+                thinking: s.provider_thinking,
+                reasoning_effort: s.provider_reasoning_effort,
+                context_window: s.provider_context_window,
+              },
+              general: {
+                analysis_bar_count: s.analysis_bar_count,
+                refresh_interval_ms: s.refresh_interval_ms,
+                auto_resume_chart_after_analysis: s.auto_resume_chart_after_analysis,
+                context_warning_threshold_pct: s.context_warning_threshold_pct,
+                stream_pane_font_pt: s.stream_pane_font_pt,
+                chart_seq_label_font_pt: s.chart_seq_label_font_pt,
+                incremental_max_new_bars: s.incremental_max_new_bars,
+                decision_stance: s.decision_stance,
+                rqdata_license_key: s.rqdata_license_key || "***",
+                decision_flow_auto_play: s.decision_flow_auto_play,
+                decision_flow_play_seconds: s.decision_flow_play_seconds,
+                decision_flow_default_zoom_pct: s.decision_flow_default_zoom_pct,
+                last_symbol: s.last_symbol,
+                last_timeframe: s.last_timeframe,
+                last_data_source: s.last_data_source,
+                last_tradingview_exchange: s.last_tradingview_exchange,
+              }
+            });
+            showToast("设置已保存", "ok");
+            showSettingsModal.value = false;
+          } catch (e) {
+            console.error(e);
+            showToast("保存失败", "warn");
+          }
+        }
+
+        // ==================== Lifecycle ====================
+        onMounted(async () => {
+          // Init canvas
+          await nextTick();
+          const canvas = klineCanvas.value;
+          if (canvas) {
+            ctx = canvas.getContext("2d");
+            resizeCanvas();
+            window.addEventListener("resize", resizeCanvas);
+            chartWrap.value?.addEventListener("mousemove", onMouseMove);
+            chartWrap.value?.addEventListener("mouseleave", onMouseLeave);
+          }
+
+          // Load settings
+          try {
+            const s = await fetchSettings();
+            const g = s.general || {};
+            const p = s.provider || {};
+            settings.value.provider_model = p.model || "";
+            settings.value.provider_base_url = p.base_url || "";
+            settings.value.provider_api_key = p.api_key === "***" ? "" : (p.api_key || "");
+            settings.value.provider_thinking = p.thinking ?? true;
+            settings.value.provider_reasoning_effort = p.reasoning_effort || "max";
+            settings.value.provider_context_window = p.context_window || 2_000_000;
+            settings.value.analysis_bar_count = g.analysis_bar_count ?? 100;
+            settings.value.refresh_interval_ms = g.refresh_interval_ms ?? 1000;
+            settings.value.auto_resume_chart_after_analysis = g.auto_resume_chart_after_analysis ?? false;
+            settings.value.context_warning_threshold_pct = g.context_warning_threshold_pct ?? 80;
+            settings.value.stream_pane_font_pt = g.stream_pane_font_pt ?? 11;
+            settings.value.chart_seq_label_font_pt = g.chart_seq_label_font_pt ?? 7;
+            settings.value.incremental_max_new_bars = g.incremental_max_new_bars ?? 10;
+            settings.value.decision_stance = g.decision_stance || "balanced";
+            settings.value.rqdata_license_key = g.rqdata_license_key === "***" ? "" : (g.rqdata_license_key || "");
+            settings.value.decision_flow_auto_play = g.decision_flow_auto_play ?? true;
+            settings.value.decision_flow_play_seconds = g.decision_flow_play_seconds ?? 50;
+            settings.value.decision_flow_default_zoom_pct = g.decision_flow_default_zoom_pct ?? 500;
+            settings.value.last_symbol = g.last_symbol || "";
+            settings.value.last_timeframe = g.last_timeframe || "";
+            settings.value.last_data_source = g.last_data_source || "mt5";
+            settings.value.last_tradingview_exchange = g.last_tradingview_exchange || "";
+          } catch (e) { console.error("Failed to load settings:", e); }
+
+          // Load initial data
+          await fetchData();
+
+          // Load data sources for TV dialog
+          refreshSources();
+
+          // Preflight: check latest record for auto-incremental
+          checkLatestRecord();
+
+          // Start SSE stream
+          if (isLive.value) {
+            cleanupStream = createStream((data) => {
+              frame.value = data;
+              drawKline();
+            });
+          }
+
+          // Start ledger polling (every 2s)
+          async function updateLedger() {
+            try {
+              const data = await fetchLedger();
+              tokenPct.value = data.context_pct || 0;
+              tokenText.value = `${tokenPct.value}% · ${data.context_used || 0} / ${data.context_window || 2000000}`;
+            } catch (e) { /* ignore */ }
+          }
+          updateLedger();
+          ledgerInterval = setInterval(updateLedger, 2000);
+
+          // Start countdown timer for forming bar
+          nowTimer = setInterval(() => { now.value = Date.now(); }, 1000);
+        });
+
+        onUnmounted(() => {
+          window.removeEventListener("resize", resizeCanvas);
+          chartWrap.value?.removeEventListener("mousemove", onMouseMove);
+          chartWrap.value?.removeEventListener("mouseleave", onMouseLeave);
+          if (cleanupStream) cleanupStream();
+          if (cleanupFlow) cleanupFlow();
+          if (ledgerInterval) clearInterval(ledgerInterval);
+          if (nowTimer) clearInterval(nowTimer);
+        });
+
+        return {
+          klineCanvas, flowCanvas, chartWrap, priceAxis, timeAxis, crosshair, crossV, crossH, tooltip,
+          frame, analyzing, decision, reasoningText, appState, aiView, isLive, waitForClose,
+          flowStep, streamMessages, followupText, showSettingsModal, settings,
+          showApiKey, showRqKey, showModelDropdown,
+          debugTurns, debugTurnIndex, currentDebugTurn,
+          toastMsg, toastType, toastShow,
+          barCount, lastClose, lastEma20, decisionPillClass, formingCountdown,
+          summaryMetrics, formatPrice,
+          dataSourceStatus, snapshotStatus, stage1Status, stage2Status,
+          statusText, tokenPct, tokenText, rawJson, modelLabel,
+          reasoningLines, statusDotClass, progressClass,
+          mergedTrace, promptFiles,
+          demoRecords, demoLoading, demoCurrent, speedProfile,
+          showToast, setState, fetchData, submitAnalysis, submitIncremental, toggleLive, sendFollowup, saveAndClose,
+          answerClass, formatRawResponse, fetchDebugTurns, loadRecordList, loadRecord, playNextRecord, applySpeedProfile,
+          resetFlowView, zoomFlow,
+          showTvDialog, dataSources, latestRecord, refreshSources, switchSource, checkLatestRecord,
+        };
+      }
+    }).mount("#app");
+  </script>
+</body>
+</html>
