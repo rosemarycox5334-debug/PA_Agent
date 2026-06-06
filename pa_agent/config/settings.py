@@ -5,8 +5,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
-DataSourceKind = Literal["mt5", "tradingview", "akshare"]
+DataSourceKind = Literal["mt5", "tradingview", "akshare", "rqdata"]
 NormalizationMode = Literal["strict", "lenient"]
+AnalysisMode = Literal["original", "optimized"]
 
 
 class AIProviderSettings(BaseModel):
@@ -50,6 +51,9 @@ class GeneralSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     analysis_bar_count: int = Field(default=100, ge=2, le=5000)
+    #: Analysis process mode. original keeps the full Stage-2 continuation;
+    #: optimized uses a compact Stage-2 request to reduce latency.
+    analysis_mode: AnalysisMode = "original"
     refresh_interval_ms: int = 1000
     context_warning_threshold_pct: float = 80.0
     last_data_source: DataSourceKind = "mt5"
@@ -57,6 +61,7 @@ class GeneralSettings(BaseModel):
     last_tradingview_exchange: str = ""
     last_symbol: str = "XAUUSDm"
     last_timeframe: str = "15m"
+    rqdata_license_key: str = ""
     decision_flow_auto_play: bool = True
     decision_flow_play_seconds: int = 50
     incremental_max_new_bars: int = Field(default=10, ge=0, le=500)
@@ -70,8 +75,6 @@ class GeneralSettings(BaseModel):
     chart_seq_label_font_pt: int = Field(default=7, ge=6, le=24)
     #: 两阶段分析结束后是否自动恢复 K 线图表实时刷新
     auto_resume_chart_after_analysis: bool = False
-    #: 持续跟踪分析：有新K线收盘时自动触发新一轮分析
-    keep_analysis: bool = False
 
     @field_validator("last_data_source", mode="before")
     @classmethod

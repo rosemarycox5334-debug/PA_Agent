@@ -461,7 +461,6 @@ class ConversationWidget(QWidget):
         context_window = data.get("context_window", 1_000_000)
         total_input = data.get("total_input", 0)
         total_output = data.get("total_output", 0)
-        total_cached = data.get("total_cached_input", 0)
 
         pct = (context_used / context_window * 100.0) if context_window > 0 else 0.0
         pct_int = min(100, int(pct))
@@ -484,26 +483,8 @@ class ConversationWidget(QWidget):
             self._progress_bar.setStyleSheet(_STYLE_NORMAL)
 
         total_tokens = total_input + total_output
-
-        # Build cache-hit rate display
-        # DeepSeek KV Cache: cached tokens are billed at 10% of the normal input price.
-        cache_hit_pct = (total_cached / total_input * 100.0) if total_input > 0 else 0.0
-        if total_cached > 0:
-            cache_str = f" · 缓存命中 {total_cached:,} ({cache_hit_pct:.0f}%)"
-        else:
-            cache_str = ""
-
         self._token_label.setText(
-            f"{total_tokens:,} tokens · in {total_input:,} / out {total_output:,}{cache_str}"
-        )
-        # Keep a full tooltip for details
-        self._token_label.setToolTip(
-            f"输入 token：{total_input:,}\n"
-            f"  其中缓存命中：{total_cached:,}（{cache_hit_pct:.1f}%，按 10% 价格计费）\n"
-            f"  未命中缓存：{total_input - total_cached:,}（按原价计费）\n"
-            f"输出 token：{total_output:,}\n"
-            f"合计：{total_tokens:,}\n\n"
-            "DeepSeek KV Cache 缓存命中的 token 按 10% 价格计费，可大幅降低 API 费用。"
+            f"{total_tokens:,} tokens · in {total_input:,} / out {total_output:,}"
         )
 
     def clear(self) -> None:

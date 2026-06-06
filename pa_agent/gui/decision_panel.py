@@ -13,9 +13,11 @@ from pa_agent.util.trade_metrics import (
 
 from PyQt6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -126,7 +128,7 @@ def _format_prediction_probs_line(probs: dict) -> str:
     bull = probs.get("bullish", "?")
     bear = probs.get("bearish", "?")
     neut = probs.get("neutral", "?")
-    return f"阳线的概率为{bull}%  ·  阴线的概率为{bear}%  ·  中性的概率为{neut}%"
+    return f"阳 {bull}%  ·  阴 {bear}%  ·  中 {neut}%"
 
 
 def _dominant_prediction_direction(probs: dict) -> str | None:
@@ -146,204 +148,389 @@ def _dominant_prediction_direction(probs: dict) -> str | None:
 
 
 class DecisionPanel(QWidget):
-    """Renders market diagnosis + Stage-2 trading decision.
-
-    Confidence layout (two bars):
-      市场诊断区 → 市场判断置信度 (Stage 2 diagnosis_confidence)
-      交易决策区 → 交易决策置信度 (Stage 2 trade_confidence, inline on summary row)
-    """
+    """Renders market diagnosis + Stage-2 trading decision in compact card layout."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._setup_ui()
+
+    # ── UI builders ───────────────────────────────────────────────────────
+
+    def _create_card(self) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(
+            "QFrame {"
+            "  background-color: #1c2128;"
+            "  border: 1px solid #30363d;"
+            "  border-radius: 8px;"
+            "}"
+        )
+        return card
+
+    def _create_section_title(self, text: str) -> tuple[QFrame, QLabel, QLabel]:
+        frame = QFrame()
+        frame.setFixedHeight(38)
+        frame.setStyleSheet(
+            "background-color: #21262d;"
+            "border-bottom: 1px solid #30363d;"
+            "border-top-left-radius: 8px;"
+            "border-top-right-radius: 8px;"
+        )
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(12, 0, 12, 0)
+        layout.setSpacing(8)
+
+        lbl = QLabel(text)
+        lbl.setStyleSheet("font-size: 13px; font-weight: bold; color: #e6edf3;")
+        layout.addWidget(lbl)
+        layout.addStretch(1)
+
+        pill = QLabel("")
+        pill.setStyleSheet(
+            "font-size: 11px; font-weight: bold; padding: 2px 8px;"
+            "border-radius: 999px; color: #e6edf3;"
+            "border: 1px solid rgba(48,54,61,0.5);"
+            "background-color: rgba(48,54,61,0.3);"
+        )
+        layout.addWidget(pill)
+
+        return frame, lbl, pill
+
+    def _create_decision_row(
+        self, key: str, val: str = "—"
+    ) -> tuple[QFrame, QLabel, QLabel]:
+        row = QFrame()
+        row.setFrameShape(QFrame.Shape.NoFrame)
+        row.setStyleSheet("background: transparent; border: none;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        key_lbl = QLabel(key)
+        key_lbl.setFixedWidth(110)
+        key_lbl.setStyleSheet("font-size: 12px; color: #8b949e;")
+
+        val_lbl = QLabel(val)
+        val_lbl.setStyleSheet(
+            "font-size: 12px; font-weight: bold; color: #e6edf3;"
+            "font-family: 'Microsoft YaHei UI', 'Segoe UI', monospace;"
+        )
+        val_lbl.setWordWrap(True)
+        val_lbl.setMinimumHeight(0)
+        val_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+        layout.addWidget(key_lbl)
+        layout.addWidget(val_lbl, stretch=1)
+
+        return row, key_lbl, val_lbl
+
+    def _create_price_highlight_card(
+        self, title: str, accent: str
+    ) -> tuple[QFrame, QLabel]:
+        card = QFrame()
+        card.setFrameShape(QFrame.Shape.NoFrame)
+        card.setStyleSheet(
+            "QFrame {"
+            "  background-color: #161b22;"
+            f"  border: 1px solid {accent};"
+            "  border-radius: 8px;"
+            "}"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setSpacing(2)
+
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(
+            f"font-size: 12px; font-weight: bold; color: {accent};"
+        )
+
+        value_lbl = QLabel("—")
+        value_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        value_lbl.setStyleSheet(
+            "font-size: 22px; font-weight: 900; color: #e6edf3;"
+            "font-family: 'Microsoft YaHei UI', 'Segoe UI', monospace;"
+        )
+        value_lbl.setMinimumHeight(28)
+        value_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        layout.addWidget(title_lbl)
+        layout.addWidget(value_lbl)
+        return card, value_lbl
+
+    def _add_decision_row(self, key: str, val: str = "—") -> QLabel:
+        row, _, val_lbl = self._create_decision_row(key, val)
+        self._decision_list.addWidget(row)
+        return val_lbl
+
+    def _create_path_item(self, index: int, text: str, status: str) -> QFrame:
+        row = QFrame()
+        row.setStyleSheet(
+            "background-color: #161b22;"
+            "border: 1px solid #30363d;"
+            "border-radius: 6px;"
+        )
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(10, 9, 10, 9)
+        layout.setSpacing(8)
+
+        idx_lbl = QLabel(str(index))
+        idx_lbl.setFixedSize(22, 22)
+        idx_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        idx_lbl.setStyleSheet(
+            "font-size: 11px; font-weight: bold; color: #2dd4bf;"
+            "background-color: rgba(45,212,191,0.12);"
+            "border-radius: 11px;"
+        )
+
+        text_lbl = QLabel(text)
+        text_lbl.setStyleSheet("font-size: 12px; color: #e6edf3;")
+        text_lbl.setWordWrap(True)
+
+        status_lower = status.lower()
+        if status_lower == "pass":
+            pill_style = (
+                "color: #86efac; border: 1px solid rgba(34,197,94,0.35);"
+                "background-color: rgba(34,197,94,0.10);"
+            )
+        elif status_lower == "wait":
+            pill_style = (
+                "color: #fbbf24; border: 1px solid rgba(245,158,11,0.35);"
+                "background-color: rgba(245,158,11,0.10);"
+            )
+        elif status_lower == "hold":
+            pill_style = (
+                "color: #7dd3fc; border: 1px solid rgba(56,189,248,0.35);"
+                "background-color: rgba(56,189,248,0.10);"
+            )
+        else:
+            pill_style = (
+                "color: #e6edf3; border: 1px solid rgba(48,54,61,0.5);"
+                "background-color: rgba(48,54,61,0.3);"
+            )
+
+        pill = QLabel(status.upper())
+        pill.setStyleSheet(
+            f"font-size: 10px; font-weight: bold; padding: 1px 6px;"
+            f"border-radius: 999px; {pill_style}"
+        )
+
+        layout.addWidget(idx_lbl)
+        layout.addWidget(text_lbl, stretch=1)
+        layout.addWidget(pill)
+
+        return row
+
+    def _set_pill_style(
+        self, label: QLabel, status: str, text: str | None = None
+    ) -> None:
+        status_lower = status.lower()
+        if status_lower in ("pass", "buy", "long", "做多"):
+            style = (
+                "color: #86efac; border: 1px solid rgba(34,197,94,0.35);"
+                "background-color: rgba(34,197,94,0.10);"
+            )
+        elif status_lower in ("sell", "short", "做空"):
+            style = (
+                "color: #f85149; border: 1px solid rgba(248,81,73,0.35);"
+                "background-color: rgba(248,81,73,0.10);"
+            )
+        elif status_lower == "wait":
+            style = (
+                "color: #fbbf24; border: 1px solid rgba(245,158,11,0.35);"
+                "background-color: rgba(245,158,11,0.10);"
+            )
+        elif status_lower == "hold":
+            style = (
+                "color: #7dd3fc; border: 1px solid rgba(56,189,248,0.35);"
+                "background-color: rgba(56,189,248,0.10);"
+            )
+        else:
+            style = (
+                "color: #e6edf3; border: 1px solid rgba(48,54,61,0.5);"
+                "background-color: rgba(48,54,61,0.3);"
+            )
+        label.setStyleSheet(
+            f"font-size: 11px; font-weight: bold; padding: 2px 8px;"
+            f"border-radius: 999px; {style}"
+        )
+        if text is not None:
+            label.setText(text)
+
+    def _clear_path_items(self) -> None:
+        for w in self._path_widgets:
+            self._path_list.removeWidget(w)
+            w.deleteLater()
+        self._path_widgets.clear()
+
+    def _add_path_item(self, index: int, text: str, status: str) -> None:
+        item = self._create_path_item(index, text, status)
+        self._path_list.addWidget(item)
+        self._path_widgets.append(item)
+
+    def _set_reasons(self, text: str) -> None:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            self._reasons_edit.clear()
+            return
+        html = (
+            "<ol style='margin:0;padding-left:16px;"
+            "color:#e6edf3;font-size:12px;line-height:1.7;'>"
+        )
+        for line in lines:
+            clean = line
+            if len(clean) > 2 and clean[0].isdigit() and clean[1] == ".":
+                clean = clean[2:].strip()
+            elif clean.startswith("- ") or clean.startswith("* "):
+                clean = clean[2:].strip()
+            html += f"<li style='margin-bottom:4px;'>{clean}</li>"
+        html += "</ol>"
+        self._reasons_edit.setHtml(html)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        title = QLabel("AI 交易决策")
-        title.setObjectName("toolbarTitle")
-        layout.addWidget(title)
+        self._action_card = self._create_card()
+        self._action_card.setObjectName("actionSummaryCard")
+        action_layout = QGridLayout(self._action_card)
+        action_layout.setContentsMargins(14, 12, 14, 12)
+        action_layout.setHorizontalSpacing(12)
+        action_layout.setVerticalSpacing(7)
 
-        disclaimer = QLabel("分析仅供参考，不构成投资建议")
-        disclaimer.setObjectName("mutedLabel")
-        disclaimer.setWordWrap(True)
-        layout.addWidget(disclaimer)
+        self._action_title = QLabel("等待分析")
+        self._action_title.setStyleSheet(
+            "font-size: 20px; font-weight: 800; color: #e6edf3;"
+        )
+        self._action_title.setWordWrap(True)
+        action_layout.addWidget(self._action_title, 0, 0, 1, 4)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep)
+        (
+            self._action_entry_card,
+            self._action_entry_value,
+        ) = self._create_price_highlight_card("入场价格", "#58a6ff")
+        (
+            self._action_take_profit_card,
+            self._action_take_profit_value,
+        ) = self._create_price_highlight_card("止盈目标", "#3fb950")
+        action_layout.addWidget(self._action_entry_card, 1, 0, 1, 2)
+        action_layout.addWidget(self._action_take_profit_card, 1, 2, 1, 2)
 
-        # ── 市场诊断 ──────────────────────────────────────────────────────
-        diag_title = QLabel("市场诊断")
-        diag_title.setStyleSheet("font-weight: bold; color: #58a6ff;")
-        layout.addWidget(diag_title)
+        self._action_reason = QLabel("提交分析后，这里会优先显示可执行结论。")
+        self._action_reason.setStyleSheet("font-size: 13px; color: #c9d1d9;")
+        self._action_reason.setWordWrap(True)
+        action_layout.addWidget(self._action_reason, 2, 0, 1, 4)
 
-        diag_row = QWidget()
-        diag_row_layout = QHBoxLayout(diag_row)
-        diag_row_layout.setContentsMargins(0, 0, 0, 0)
-        diag_row_layout.setSpacing(8)
-
-        self._trend_label = QLabel("趋势：—")
-        self._cycle_label = QLabel("周期：—")
-        self._phase_label = QLabel("阶段：—")
-        for lbl in (self._trend_label, self._cycle_label, self._phase_label):
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setWordWrap(True)
-            lbl.setSizePolicy(
-                QSizePolicy.Policy.Expanding,
-                QSizePolicy.Policy.Preferred,
+        self._action_trigger = QLabel("等待条件：—")
+        self._action_invalidation = QLabel("失效条件：—")
+        self._action_next_bar = QLabel("下一根：—")
+        for idx, lbl in enumerate(
+            (self._action_trigger, self._action_invalidation, self._action_next_bar)
+        ):
+            lbl.setStyleSheet(
+                "font-size: 12px; color: #8b949e; padding: 4px 8px;"
+                "background-color: #161b22; border: 1px solid #30363d;"
+                "border-radius: 6px;"
             )
-            diag_row_layout.addWidget(lbl, stretch=1)
-        layout.addWidget(diag_row)
+            lbl.setWordWrap(True)
+            action_layout.addWidget(lbl, 3, idx)
+        action_layout.setColumnStretch(0, 1)
+        action_layout.setColumnStretch(1, 1)
+        action_layout.setColumnStretch(2, 1)
+        action_layout.setColumnStretch(3, 0)
+        layout.addWidget(self._action_card)
 
-        # ── 市场判断置信度（来自 Stage 2 diagnosis_confidence）───────────
-        self._diag_conf_title = QLabel("市场判断置信度")
-        self._diag_conf_title.setStyleSheet("font-weight: bold; margin-top: 6px;")
-        layout.addWidget(self._diag_conf_title)
+        # ── Two-column card layout ──────────────────────────────────────
+        self._detail_scroll = QScrollArea()
+        self._detail_scroll.setWidgetResizable(True)
+        self._detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._detail_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        detail_content = QWidget()
+        detail_content.setStyleSheet("background: transparent;")
+        hbox = QHBoxLayout(detail_content)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(12)
 
-        self._diag_conf_bar = QProgressBar()
-        self._diag_conf_bar.setRange(0, 100)
-        self._diag_conf_bar.setTextVisible(True)
-        self._diag_conf_bar.setFormat("%v / 100")
-        self._diag_conf_bar.setMaximumHeight(22)
-        layout.addWidget(self._diag_conf_bar)
+        # Left card: 决策摘要
+        self._left_card = self._create_card()
+        left_layout = QVBoxLayout(self._left_card)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
 
-        self._diag_conf_label = QLabel("—")
-        layout.addWidget(self._diag_conf_label)
+        (
+            self._left_title_frame,
+            self._left_title_lbl,
+            self._left_pill,
+        ) = self._create_section_title("决策摘要")
+        left_layout.addWidget(self._left_title_frame)
 
-        self._diag_reasoning_label = QLabel()
-        self._diag_reasoning_label.setWordWrap(True)
-        self._diag_reasoning_label.setStyleSheet(_REASON_FONT_CSS)
-        layout.addWidget(self._diag_reasoning_label)
+        self._decision_list = QVBoxLayout()
+        self._decision_list.setContentsMargins(8, 8, 8, 8)
+        self._decision_list.setSpacing(4)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep2)
+        self._row_order_type = self._add_decision_row("订单类型", "—")
+        self._row_direction = self._add_decision_row("交易方向", "—")
+        self._row_trigger = self._add_decision_row("触发条件", "—")
+        self._row_invalidation = self._add_decision_row("失效条件", "—")
+        self._row_diag = self._add_decision_row("趋势/周期/阶段", "—")
+        self._row_diag_conf = self._add_decision_row("市场判断置信度", "—")
+        self._row_trade_conf = self._add_decision_row("交易置信度", "—")
+        self._row_prices = self._add_decision_row("入场/止盈/止损", "—")
+        self._row_rr = self._add_decision_row("盈亏比/胜率", "—")
+        self._row_next_bar = self._add_decision_row("下一根预测", "—")
 
-        # ── 交易决策 ──────────────────────────────────────────────────────
-        trade_title = QLabel("交易决策")
-        trade_title.setStyleSheet("font-weight: bold;")
-        layout.addWidget(trade_title)
+        left_layout.addLayout(self._decision_list)
+        left_layout.addStretch(1)
+        hbox.addWidget(self._left_card, stretch=1)
 
-        self._conclusion_bar = QFrame()
-        self._conclusion_bar.setObjectName("conclusionBar")
-        bar_layout = QHBoxLayout(self._conclusion_bar)
-        bar_layout.setContentsMargins(14, 12, 14, 12)
-        bar_layout.setSpacing(8)
+        # Right card: 原因与路径
+        self._right_card = self._create_card()
+        right_layout = QVBoxLayout(self._right_card)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
 
-        self._rr_inline_label = QLabel("—")
-        self._rr_inline_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        (
+            self._right_title_frame,
+            self._right_title_lbl,
+            self._right_pill,
+        ) = self._create_section_title("原因与路径")
+        right_layout.addWidget(self._right_title_frame)
+
+        self._reasons_edit = QTextEdit()
+        self._reasons_edit.setReadOnly(True)
+        self._reasons_edit.setStyleSheet(
+            "font-size: 12px; color: #e6edf3; line-height: 1.7;"
+            "padding: 12px 16px 14px 28px;"
+            "border: none; background: transparent;"
         )
-        self._rr_inline_label.setStyleSheet(
-            "font-size: 13px; font-weight: bold; color: #58a6ff;"
+        self._reasons_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
         )
+        self._reasons_edit.setMinimumHeight(60)
+        self._reasons_edit.setMaximumHeight(160)
+        right_layout.addWidget(self._reasons_edit)
 
-        self._win_rate_inline_label = QLabel("—")
-        self._win_rate_inline_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self._win_rate_inline_label.setStyleSheet(
-            "font-size: 13px; font-weight: bold; color: #a371f7;"
-        )
+        self._path_list = QVBoxLayout()
+        self._path_list.setContentsMargins(8, 8, 8, 8)
+        self._path_list.setSpacing(6)
+        right_layout.addLayout(self._path_list)
+        self._path_widgets: list[QWidget] = []
 
-        bar_layout.addWidget(self._rr_inline_label, stretch=1)
-        bar_layout.addWidget(self._win_rate_inline_label, stretch=1)
-        layout.addWidget(self._conclusion_bar)
-
-        self._trade_summary_row = QWidget()
-        trade_summary_layout = QHBoxLayout(self._trade_summary_row)
-        trade_summary_layout.setContentsMargins(0, 4, 0, 0)
-        trade_summary_layout.setSpacing(12)
-
-        self._conclusion_label = QLabel("—")
-        self._conclusion_label.setStyleSheet(
-            "font-size: 18px; font-weight: bold; color: #8b949e;"
-        )
-
-        self._direction_inline_label = QLabel()
-        self._direction_inline_label.setStyleSheet(
-            "font-size: 14px; font-weight: bold; color: #8b949e;"
-        )
-
-        self._trade_conf_inline_label = QLabel()
-        self._trade_conf_inline_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-
-        trade_summary_layout.addWidget(self._conclusion_label)
-        trade_summary_layout.addWidget(self._direction_inline_label)
-        trade_summary_layout.addStretch(1)
-        trade_summary_layout.addWidget(self._trade_conf_inline_label)
-        layout.addWidget(self._trade_summary_row)
-
-        self._trade_prices_row = QWidget()
-        prices_layout = QHBoxLayout(self._trade_prices_row)
-        prices_layout.setContentsMargins(0, 0, 0, 0)
-        prices_layout.setSpacing(16)
-
-        self._entry_label = QLabel("入场  —")
-        self._tp_label = QLabel("止盈  —")
-        self._sl_label = QLabel("止损  —")
-        for lbl in (self._entry_label, self._tp_label, self._sl_label):
-            lbl.setStyleSheet("font-size: 14px; color: #c9d1d9;")
-            prices_layout.addWidget(lbl, stretch=1)
-
-        layout.addWidget(self._trade_prices_row)
-
-        self._trade_conf_title = QLabel("交易决策置信度")
-        self._trade_conf_title.setStyleSheet("font-weight: bold; margin-top: 4px;")
-        self._trade_conf_title.setVisible(False)
-
-        self._trade_conf_bar = QProgressBar()
-        self._trade_conf_bar.setRange(0, 100)
-        self._trade_conf_bar.setTextVisible(True)
-        self._trade_conf_bar.setFormat("%v / 100")
-        self._trade_conf_bar.setMaximumHeight(22)
-        self._trade_conf_bar.setVisible(False)
-
-        self._trade_conf_label = QLabel()
-        self._trade_conf_label.setVisible(False)
-
-        self._trade_reasoning_label = QLabel()
-        self._trade_reasoning_label.setWordWrap(True)
-        self._trade_reasoning_label.setStyleSheet(_REASON_FONT_CSS)
-        layout.addWidget(self._trade_reasoning_label)
-
-        reasoning_title = QLabel("分析理由")
-        reasoning_title.setStyleSheet("font-weight: bold; color: #a371f7; margin-top: 6px;")
-        layout.addWidget(reasoning_title)
-
-        self._reasoning_edit = QTextEdit()
-        self._reasoning_edit.setReadOnly(True)
-        self._reasoning_edit.setObjectName("answerPane")
-        self._reasoning_edit.setStyleSheet(_REASON_EDIT_CSS)
-        self._reasoning_edit.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        self._reasoning_edit.setMinimumHeight(120)
-        layout.addWidget(self._reasoning_edit, stretch=1)
+        hbox.addWidget(self._right_card, stretch=1)
+        self._detail_scroll.setWidget(detail_content)
+        layout.addWidget(self._detail_scroll, stretch=1)
 
         self.clear()
 
-    def _apply_diag_chip_style(self, label: QLabel, *, color: str) -> None:
-        label.setStyleSheet(
-            f"font-size: 14px; font-weight: bold; padding: 8px 10px;"
-            f"color: {color}; background-color: #21262d; border-radius: 8px;"
-        )
-
-    # ── Data binding helpers ──────────────────────────────────────────────
+    # ── Data binding helpers (retained logic, adapted to new layout) ─────
 
     def _apply_market_diagnosis(
         self,
         diagnosis_summary: dict | None,
         stage1_diagnosis: dict | None = None,
-    ) -> None:
-        """Fill trend / cycle / phase from stage2 summary, fallback to stage1."""
+    ) -> str:
+        """Extract trend / cycle / phase and return a compact string."""
         src: dict = {}
         if diagnosis_summary:
             src.update(diagnosis_summary)
@@ -357,61 +544,89 @@ class DecisionPanel(QWidget):
         market_phase = str(src.get("market_phase", "") or "")
 
         trend = _infer_trend_label(direction, cycle_position)
-        trend_color = _trend_color(trend)
-        self._trend_label.setText(f"趋势：{trend}")
-        self._apply_diag_chip_style(self._trend_label, color=trend_color)
-
         cycle_zh = _format_cycle_position(cycle_position)
-        cycle_text = f"周期：{cycle_zh}"
         if alt_cycle:
-            cycle_text += f"（备选 {_format_cycle_position(str(alt_cycle))}）"
-        self._cycle_label.setText(cycle_text)
-        self._apply_diag_chip_style(self._cycle_label, color="#c9d1d9")
+            cycle_zh += f"（备选 {_format_cycle_position(str(alt_cycle))}）"
 
-        if market_phase:
-            phase_zh = _format_market_phase(market_phase)
-            extra = ""
+        phase_zh = _format_market_phase(market_phase)
+        if market_phase == "transitioning":
             risk = src.get("transition_risk")
-            if market_phase == "transitioning" and risk:
-                extra = f" · 风险 {risk}"
-            self._phase_label.setText(f"阶段：{phase_zh}{extra}")
-            self._phase_label.setVisible(True)
-            phase_color = "#e6b800" if market_phase == "transitioning" else "#58a6ff"
-            self._apply_diag_chip_style(self._phase_label, color=phase_color)
+            if risk:
+                phase_zh += f" · 风险{risk}"
+
+        return f"{trend} / {cycle_zh} / {phase_zh}"
+
+    def _short_text(self, value: object, *, max_chars: int = 120) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "—"
+        return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
+
+    def _format_price_value(self, value: object) -> str:
+        if value is None or value == "":
+            return "—"
+        try:
+            return f"{float(value):.5g}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _set_action_price_highlights(
+        self, entry: object, take_profit: object, *, visible: bool
+    ) -> None:
+        self._action_entry_value.setText(self._format_price_value(entry))
+        self._action_take_profit_value.setText(self._format_price_value(take_profit))
+        self._action_entry_card.setVisible(visible)
+        self._action_take_profit_card.setVisible(visible)
+
+    def _set_action_summary(
+        self,
+        *,
+        order_type: object,
+        direction: object,
+        reasoning: object,
+        trigger: object,
+        invalidation: object,
+        next_bar_text: str,
+    ) -> None:
+        order = str(order_type or _NO_ORDER)
+        dir_text = str(direction or "")
+        reason = self._short_text(reasoning, max_chars=150)
+        trigger_text = self._short_text(trigger)
+        invalidation_text = self._short_text(invalidation)
+        next_text = self._short_text(next_bar_text, max_chars=90)
+
+        if order == _NO_ORDER:
+            self._action_title.setText("不下单 · 等待确认")
+            self._action_title.setStyleSheet(
+                "font-size: 20px; font-weight: 800; color: #86efac;"
+            )
+            self._action_reason.setText(f"原因：{reason}")
+            self._action_trigger.setText(f"等待条件：{trigger_text}")
         else:
-            self._phase_label.setText("阶段：—")
-            self._apply_diag_chip_style(self._phase_label, color="#6e7681")
-            self._phase_label.setVisible(True)
+            action = dir_text or order
+            self._action_title.setText(f"{action} · {order}")
+            color = "#86efac"
+            if "空" in action or "卖" in action or "short" in action.lower():
+                color = "#f85149"
+            self._action_title.setStyleSheet(
+                f"font-size: 20px; font-weight: 800; color: {color};"
+            )
+            self._action_reason.setText(f"交易理由：{reason}")
+            self._action_trigger.setText(f"触发条件：{trigger_text}")
+
+        self._action_invalidation.setText(f"失效条件：{invalidation_text}")
+        self._action_next_bar.setText(f"下一根：{next_text}")
 
     def _apply_diagnosis_confidence(
         self,
         diagnosis_confidence: object,
         diagnosis_confidence_reasoning: str | None,
-    ) -> None:
-        """Render market-judgment confidence bar (Stage 2 diagnosis_confidence)."""
+    ) -> str | None:
+        """Return formatted market-judgment confidence text."""
         score = _parse_score_100(diagnosis_confidence)
         if score is not None:
-            c_color = _score_color(score)
-            self._diag_conf_bar.setValue(score)
-            self._diag_conf_bar.setStyleSheet(
-                f"QProgressBar::chunk {{ background-color: {c_color}; }}"
-            )
-            self._diag_conf_label.setText(f"评分 {score} / 100")
-            self._diag_conf_label.setStyleSheet(f"color: {c_color}; font-weight: bold;")
-            reason_text = str(diagnosis_confidence_reasoning or "").strip()
-            self._diag_reasoning_label.setText(
-                f"理由：{reason_text}" if reason_text else ""
-            )
-            self._diag_conf_title.setVisible(True)
-            self._diag_conf_bar.setVisible(True)
-            self._diag_conf_label.setVisible(True)
-            self._diag_reasoning_label.setVisible(bool(reason_text))
-        else:
-            self._diag_conf_bar.setValue(0)
-            self._diag_conf_title.setVisible(False)
-            self._diag_conf_bar.setVisible(False)
-            self._diag_conf_label.setVisible(False)
-            self._diag_reasoning_label.setVisible(False)
+            return f"{score} / 100"
+        return None
 
     def _apply_trade_confidence_inline(
         self,
@@ -419,42 +634,36 @@ class DecisionPanel(QWidget):
         trade_confidence_reasoning: str | None,
         *,
         no_order: bool = False,
-    ) -> None:
-        """Show trade confidence on the summary row; optional reasoning below."""
+    ) -> str | None:
+        """Return formatted trade confidence text."""
         score = _parse_score_100(trade_confidence)
         if score is not None:
-            c_color = _score_color(score)
             hint = "观望" if no_order else "入场"
-            self._trade_conf_inline_label.setText(
-                f"置信度 {score} / 100 · {hint}"
-            )
-            self._trade_conf_inline_label.setStyleSheet(
-                f"font-size: 15px; font-weight: bold; color: {c_color};"
-            )
-            self._trade_conf_inline_label.setVisible(True)
-            reason_text = str(trade_confidence_reasoning or "").strip()
-            self._trade_reasoning_label.setText(
-                f"置信度理由：{reason_text}" if reason_text else ""
-            )
-            self._trade_reasoning_label.setVisible(bool(reason_text))
-        else:
-            self._trade_conf_inline_label.setText("")
-            self._trade_conf_inline_label.setVisible(False)
-            self._trade_reasoning_label.setVisible(False)
+            return f"{score} / 100 · {hint}"
+        return None
+
+    def _format_next_bar_prediction(self, decision: dict) -> str:
+        """Return formatted next-bar prediction string."""
+        pred = decision.get("next_bar_prediction")
+        if not isinstance(pred, dict):
+            return "—"
+
+        unpredictable = bool(pred.get("unpredictable", False))
+        if unpredictable:
+            return _PREDICTION_UNPREDICTABLE_LABEL
+
+        probs = pred.get("probabilities")
+        if isinstance(probs, dict):
+            return _format_prediction_probs_line(probs)
+        return "—"
 
     def _set_conclusion_bar_style(self) -> None:
-        self._conclusion_bar.setStyleSheet(
-            "QFrame#conclusionBar {"
-            "  background-color: #21262d;"
-            "  border-radius: 8px;"
-            "}"
-        )
+        """No-op in new layout; kept for backward compatibility."""
+        pass
 
     def _reset_conclusion_bar_side_labels(self) -> None:
-        self._rr_inline_label.setText("—")
-        self._win_rate_inline_label.setText("—")
-        self._rr_inline_label.setVisible(False)
-        self._win_rate_inline_label.setVisible(False)
+        """No-op in new layout; kept for backward compatibility."""
+        pass
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -466,58 +675,86 @@ class DecisionPanel(QWidget):
         stage1_diagnosis: dict | None = None,
         decision_stance: str | None = None,
     ) -> None:
-        self._apply_market_diagnosis(diagnosis_summary, stage1_diagnosis)
-
         order_type = decision.get("order_type", _NO_ORDER)
+        direction = decision.get("order_direction", "—")
         reasoning = decision.get("reasoning", decision.get("brief_reasoning", ""))
+        trigger = decision.get("trigger_condition", "—")
+        invalidation = decision.get("invalidation_condition", "—")
         diag_conf = decision.get("diagnosis_confidence", None)
         diag_conf_reasoning = decision.get("diagnosis_confidence_reasoning", None)
         trade_conf = decision.get("trade_confidence", None)
         trade_conf_reasoning = decision.get("trade_confidence_reasoning", None)
 
-        self._apply_diagnosis_confidence(diag_conf, diag_conf_reasoning)
+        # ── Left card: diagnosis & confidence ──
+        diag_text = self._apply_market_diagnosis(diagnosis_summary, stage1_diagnosis)
+        self._row_diag.setText(diag_text)
+
+        diag_conf_text = self._apply_diagnosis_confidence(
+            diag_conf, diag_conf_reasoning
+        )
+        if diag_conf_text:
+            self._row_diag_conf.setText(diag_conf_text)
+            self._row_diag_conf.parent().setVisible(True)
+        else:
+            self._row_diag_conf.parent().setVisible(False)
+
+        trade_conf_text = self._apply_trade_confidence_inline(
+            trade_conf, trade_conf_reasoning, no_order=(order_type == _NO_ORDER)
+        )
+        if trade_conf_text:
+            self._row_trade_conf.setText(trade_conf_text)
+            self._row_trade_conf.parent().setVisible(True)
+        else:
+            self._row_trade_conf.parent().setVisible(False)
+
+        # ── Left card: order & direction ──
+        self._row_order_type.setText(str(order_type))
 
         if order_type == _NO_ORDER:
-            self._reset_conclusion_bar_side_labels()
-            self._conclusion_label.setText(_NO_ORDER)
-            self._conclusion_label.setStyleSheet(
-                "font-size: 18px; font-weight: bold; color: #8b949e;"
+            self._set_action_price_highlights(None, None, visible=False)
+            self._row_direction.setText("等待")
+            self._set_pill_style(self._left_pill, "wait", "WAIT")
+            self._row_trigger.setText(str(trigger) if trigger != "—" else "无")
+            self._row_invalidation.setText(
+                str(invalidation) if invalidation != "—" else "无"
             )
-            self._direction_inline_label.setText("")
-            self._direction_inline_label.setVisible(False)
-            self._trade_prices_row.setVisible(False)
-            self._conclusion_bar.setVisible(False)
-            self._set_conclusion_bar_style()
-            self._apply_trade_confidence_inline(
-                trade_conf, trade_conf_reasoning,
-                no_order=True,
-            )
+            self._right_title_lbl.setText("为什么等待")
+            self._row_prices.parent().setVisible(False)
+            self._row_rr.parent().setVisible(False)
         else:
-            direction = decision.get("order_direction", "—")
+            dir_text = str(direction)
+            self._row_direction.setText(dir_text)
+            if "多" in dir_text or "买" in dir_text or "long" in dir_text.lower():
+                self._set_pill_style(self._left_pill, "pass", "BUY")
+                self._right_title_lbl.setText("为什么做多")
+            elif "空" in dir_text or "卖" in dir_text or "short" in dir_text.lower():
+                self._set_pill_style(self._left_pill, "sell", "SELL")
+                self._right_title_lbl.setText("为什么做空")
+            else:
+                self._set_pill_style(self._left_pill, "hold", "ACTIVE")
+                self._right_title_lbl.setText("交易分析")
+            self._row_trigger.setText(
+                str(trigger) if trigger != "—" else "即时"
+            )
+            self._row_invalidation.setText(
+                str(invalidation) if invalidation != "—" else "无"
+            )
+            self._row_prices.parent().setVisible(True)
+            self._row_rr.parent().setVisible(True)
+
             entry = decision.get("entry_price")
             tp = decision.get("take_profit_price")
             sl = decision.get("stop_loss_price")
+            self._set_action_price_highlights(entry, tp, visible=True)
 
-            self._conclusion_label.setText(str(order_type))
-            color = "#3fb950" if "多" in str(direction) else "#f85149"
-            self._conclusion_label.setStyleSheet(
-                f"font-size: 18px; font-weight: bold; color: {color};"
+            price_text = (
+                (f"入场 {self._format_price_value(entry)}" if entry is not None else "入场 —")
+                + " / "
+                + (f"止盈 {self._format_price_value(tp)}" if tp is not None else "止盈 —")
+                + " / "
+                + (f"止损 {self._format_price_value(sl)}" if sl is not None else "止损 —")
             )
-            self._direction_inline_label.setText(f"方向 {direction}")
-            self._direction_inline_label.setStyleSheet(
-                f"font-size: 14px; font-weight: bold; color: {color};"
-            )
-            self._direction_inline_label.setVisible(True)
-
-            self._entry_label.setText(
-                f"入场  {entry:.5g}" if entry is not None else "入场  —"
-            )
-            self._tp_label.setText(f"止盈  {tp:.5g}" if tp is not None else "止盈  —")
-            self._sl_label.setText(f"止损  {sl:.5g}" if sl is not None else "止损  —")
-            self._trade_prices_row.setVisible(True)
-
-            self._conclusion_bar.setVisible(True)
-            self._set_conclusion_bar_style()
+            self._row_prices.setText(price_text)
 
             rr = compute_risk_reward(entry, tp, sl, direction)
             if rr is not None:
@@ -530,64 +767,121 @@ class DecisionPanel(QWidget):
                     and passes_trader_equation(win_pct, risk, reward)
                 )
                 min_rr = min_risk_reward_ratio(decision_stance)
-                metrics_ok = ratio >= min_rr and (eq_ok if win_pct is not None else True)
-                eq_note = ""
-                if win_pct is not None:
-                    eq_note = " · 方程通过" if eq_ok else " · 方程不通过"
-                self._rr_inline_label.setText(
-                    f"盈亏比  {rr['ratio_text']}（风险 {risk:.4g} / 回报 {reward:.4g}）{eq_note}"
+                metrics_ok = ratio >= min_rr and (
+                    eq_ok if win_pct is not None else True
+                )
+                eq_note = " · 方程通过" if eq_ok else " · 方程不通过"
+                rr_text = (
+                    f"{rr['ratio_text']}（风险 {risk:.4g} / 回报 {reward:.4g}）"
+                    f"{eq_note}"
                 )
                 rr_color = "#3fb950" if metrics_ok else "#f85149"
-                self._rr_inline_label.setStyleSheet(
-                    f"color: {rr_color}; font-size: 15px; font-weight: bold;"
-                )
-                self._rr_inline_label.setVisible(True)
             else:
-                self._rr_inline_label.setText("盈亏比  —（三价无效）")
-                self._rr_inline_label.setStyleSheet(
-                    "color: #f85149; font-size: 15px; font-weight: bold;"
-                )
-                self._rr_inline_label.setVisible(True)
+                rr_text = "—（三价无效）"
+                rr_color = "#f85149"
 
             win_rate = format_estimated_win_rate(decision)
-            if win_rate:
-                self._win_rate_inline_label.setText(f"预估胜率  {win_rate}")
-            else:
-                self._win_rate_inline_label.setText("预估胜率  —")
-            self._win_rate_inline_label.setVisible(True)
+            win_rate_text = f"预估胜率 {win_rate}" if win_rate else "预估胜率 —"
 
-            self._apply_trade_confidence_inline(
-                trade_conf, trade_conf_reasoning,
-                no_order=False,
+            self._row_rr.setText(f"{rr_text} / {win_rate_text}")
+            self._row_rr.setStyleSheet(
+                f"font-size: 12px; font-weight: bold; color: {rr_color};"
+                f"font-family: 'Microsoft YaHei UI', 'Segoe UI', monospace;"
             )
 
-        self._reasoning_edit.setPlainText(str(reasoning) if reasoning else "")
+        # ── Left card: next bar prediction ──
+        next_bar_text = self._format_next_bar_prediction(decision)
+        self._row_next_bar.setText(next_bar_text)
+        self._set_action_summary(
+            order_type=order_type,
+            direction=direction,
+            reasoning=reasoning,
+            trigger=trigger,
+            invalidation=invalidation,
+            next_bar_text=next_bar_text,
+        )
+
+        # ── Right card: reasons ──
+        self._set_reasons(str(reasoning) if reasoning else "")
+
+        # ── Right card: path items ──
+        self._clear_path_items()
+        paths = (
+            decision.get("execution_path")
+            or decision.get("path_checks")
+            or []
+        )
+        if paths:
+            for i, p in enumerate(paths, 1):
+                if isinstance(p, dict):
+                    text = str(p.get("description", p.get("text", str(p))))
+                    status = str(p.get("status", "hold"))
+                else:
+                    text = str(p)
+                    status = "hold"
+                self._add_path_item(i, text, status)
+        else:
+            if order_type == _NO_ORDER:
+                self._add_path_item(1, "禁止行为检查：未触发禁止条款", "pass")
+                self._add_path_item(2, "信号质量：无有效入场信号", "wait")
+                reason_snippet = (
+                    str(reasoning)[:30] if reasoning else "等待合适时机"
+                )
+                self._add_path_item(
+                    3, f"执行结论：{reason_snippet}", "hold"
+                )
+            else:
+                self._add_path_item(1, "禁止行为检查：未触发禁止条款", "pass")
+                self._add_path_item(2, "信号质量：发现有效入场信号", "pass")
+                self._add_path_item(
+                    3, f"执行结论：{order_type} {direction}", "pass"
+                )
+
+        # ── Right card: pill — always show completion status in blue ──
+        self._right_pill.setText("完成")
+        self._set_pill_style(self._right_pill, "hold")
 
     def clear(self) -> None:
-        self._trend_label.setText("趋势：—")
-        self._apply_diag_chip_style(self._trend_label, color="#6e7681")
-        self._cycle_label.setText("周期：—")
-        self._apply_diag_chip_style(self._cycle_label, color="#6e7681")
-        self._phase_label.setText("阶段：—")
-        self._apply_diag_chip_style(self._phase_label, color="#6e7681")
-        self._phase_label.setVisible(True)
-
-        self._diag_conf_bar.setValue(0)
-        self._diag_conf_title.setVisible(False)
-        self._diag_conf_bar.setVisible(False)
-        self._diag_conf_label.setVisible(False)
-        self._diag_reasoning_label.setVisible(False)
-
-        self._reset_conclusion_bar_side_labels()
-        self._conclusion_bar.setVisible(False)
-        self._conclusion_label.setText("等待分析")
-        self._conclusion_label.setStyleSheet(
-            "font-size: 16px; font-weight: bold; color: #6e7681;"
+        self._action_title.setText("等待分析")
+        self._action_title.setStyleSheet(
+            "font-size: 20px; font-weight: 800; color: #e6edf3;"
         )
-        self._direction_inline_label.setText("")
-        self._direction_inline_label.setVisible(False)
-        self._trade_prices_row.setVisible(False)
-        self._trade_conf_inline_label.setVisible(False)
-        self._trade_reasoning_label.setVisible(False)
+        self._action_reason.setText("提交分析后，这里会优先显示可执行结论。")
+        self._action_trigger.setText("等待条件：—")
+        self._action_invalidation.setText("失效条件：—")
+        self._action_next_bar.setText("下一根：—")
+        self._set_action_price_highlights(None, None, visible=False)
 
-        self._reasoning_edit.clear()
+        self._row_order_type.setText("—")
+        self._row_direction.setText("—")
+        self._row_trigger.setText("—")
+        self._row_invalidation.setText("—")
+        self._row_diag.setText("—")
+
+        self._row_diag_conf.setText("—")
+        self._row_diag_conf.parent().setVisible(False)
+
+        self._row_trade_conf.setText("—")
+        self._row_trade_conf.parent().setVisible(False)
+
+        self._row_prices.setText("—")
+        self._row_prices.parent().setVisible(False)
+
+        self._row_rr.setText("—")
+        self._row_rr.setStyleSheet(
+            "font-size: 12px; font-weight: bold; color: #e6edf3;"
+            "font-family: 'Microsoft YaHei UI', 'Segoe UI', monospace;"
+        )
+        self._row_rr.parent().setVisible(False)
+
+        self._row_next_bar.setText("—")
+
+        self._set_pill_style(self._left_pill, "wait", "WAIT")
+        self._left_title_lbl.setText("决策摘要")
+
+        self._reasons_edit.clear()
+        self._clear_path_items()
+
+        self._right_title_lbl.setText("原因与路径")
+        self._right_pill.setText("STAGE 2")
+        self._set_pill_style(self._right_pill, "hold")

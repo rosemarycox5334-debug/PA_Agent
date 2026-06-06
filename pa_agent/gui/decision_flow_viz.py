@@ -339,21 +339,11 @@ class _DecisionNode(QGraphicsObject):
         self._skipped = bool(item.get("skipped"))
         self._section = str(item.get("section", "") or "")
         self._bar_range = str(item.get("bar_range", "") or "")
-        self._overridden = bool(item.get("overridden_by_ai"))
-        self._program_answer = str(item.get("program_answer", "") or "")
-        self._program_branch = str(item.get("program_branch", "") or "")
-        self._override_reason = str(item.get("override_reason", "") or "")
         tip = [self._question]
         if item.get("bar_range"):
             tip.append(f"K线：{item.get('bar_range')}")
         if item.get("reason"):
             tip.append(str(item.get("reason")))
-        if self._overridden:
-            tip.append(f"【AI覆盖】程序原判定：{self._program_answer}")
-            if self._program_branch:
-                tip.append(f"程序原分支：{self._program_branch}")
-            if self._override_reason:
-                tip.append(f"AI覆盖理由：{self._override_reason}")
         self.setToolTip("\n".join(tip))
 
     def boundingRect(self) -> QRectF:  # noqa: N802
@@ -487,23 +477,6 @@ class _DecisionNode(QGraphicsObject):
             int(Qt.AlignmentFlag.AlignCenter),
             "AI NODE",
         )
-        # Show override badge if AI overrode the program decision
-        if self._overridden:
-            badge_rect = QRectF(w / 2 - pad_x - 108, 12, 96, 22)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(QColor(_NEON_AMBER)))
-            painter.drawRoundedRect(badge_rect, 6, 6)
-            painter.setFont(_font_ui(9, bold=True))
-            painter.setPen(QPen(QColor("#000000")))
-            painter.drawText(
-                badge_rect,
-                int(Qt.AlignmentFlag.AlignCenter),
-                "AI覆盖",
-            )
-            # Also draw amber border on top of the normal border
-            painter.setPen(QPen(QColor(_NEON_AMBER), 2))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(rect, 18, 18)
 
     def port_bottom(self) -> QPointF:
         return self.scenePos() + QPointF(0, _NODE_H)
@@ -1038,37 +1011,6 @@ class DecisionFlowVizPanel(QWidget):
         rect = QRectF(-400, 0, 800, 200)
         self._scene.setSceneRect(rect)
         self._fit_scene(rect)
-
-    def show_insufficient_data(self, record: Any) -> None:
-        """Show 数据不足 error when record has exception.type=='insufficient_data'."""
-        self._stop_playback()
-        self._last_trace_kw = None
-        self._last_placed = []
-        self._scene.clear()
-
-        exc = getattr(record, "exception", None) or {}
-        failed_check = exc.get("failed_check", "") if isinstance(exc, dict) else ""
-        message = exc.get("message", "") if isinstance(exc, dict) else ""
-
-        check_label_map = {
-            "bars_empty_or_bad_ohlc": "K线数据为空或OHLC异常",
-            "bar_count_lt_20": "已收盘K线不足20根",
-            "indicators_all_nan": "EMA20/ATR14全为NaN（指标预热不足）",
-        }
-        check_zh = check_label_map.get(failed_check, failed_check or "数据不足")
-        text = f"数据不足，无法分析\n\n原因：{check_zh}"
-        if message:
-            text += f"\n\n详情：{message[:120]}"
-
-        hint = _EmptyHint(text)
-        hint.setPos(-200, 60)
-        self._scene.addItem(hint)
-        rect = QRectF(-400, 0, 800, 280)
-        self._scene.setSceneRect(rect)
-        self._fit_scene(rect)
-        self._hud_label.setText(
-            f"<span style='color:#ffcf33'>⚠ 数据不足：{check_zh}</span>"
-        )
 
     def set_trace(
         self,

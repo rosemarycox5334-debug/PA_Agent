@@ -32,7 +32,7 @@ def _frame(*, forming: bool = False, close: float = 10.0) -> KlineFrame:
         timeframe="15m",
         bars=bars,
         indicators=IndicatorBundle(
-            ema20=tuple(1.5 for _ in range(n)),
+            ema10=tuple(1.5 for _ in range(n)), ema20=tuple(1.5 for _ in range(n)), ema60=tuple(1.5 for _ in range(n)),
             atr14=tuple(0.5 for _ in range(n)),
         ),
         snapshot_ts_local_ms=1,

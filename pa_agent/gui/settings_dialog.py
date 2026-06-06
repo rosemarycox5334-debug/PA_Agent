@@ -122,12 +122,6 @@ class SettingsDialog(QDialog):
         )
         general_form.addRow("图表:", self._auto_resume_chart_check)
 
-        self._keep_analysis_check = QCheckBox("有新K线收盘时自动开始新一轮分析")
-        self._keep_analysis_check.setToolTip(
-            "勾选后，每当有新的K线收盘时自动触发分析（与主界面「持续跟踪分析」勾选框同步）"
-        )
-        general_form.addRow("持续跟踪分析:", self._keep_analysis_check)
-
         self._context_warning_spin = QSpinBox()
         self._context_warning_spin.setRange(1, 100)
         self._context_warning_spin.setSuffix(" %")
@@ -170,6 +164,19 @@ class SettingsDialog(QDialog):
             "必须给出具体做多/做空及限价/突破/市价方案。"
         )
         general_form.addRow("交易倾向:", self._decision_stance_combo)
+
+        # RQData License Key
+        rqdata_key_row = QHBoxLayout()
+        self._rqdata_key_edit = QLineEdit()
+        self._rqdata_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._rqdata_key_edit.setPlaceholderText("输入 RQData License Key")
+        rqdata_key_row.addWidget(self._rqdata_key_edit)
+        self._show_rqdata_key_btn = QPushButton("显示")
+        self._show_rqdata_key_btn.setCheckable(True)
+        self._show_rqdata_key_btn.setFixedWidth(52)
+        self._show_rqdata_key_btn.toggled.connect(self._toggle_rqdata_key_visibility)
+        rqdata_key_row.addWidget(self._show_rqdata_key_btn)
+        general_form.addRow("RQData License Key:", rqdata_key_row)
 
         self._last_symbol_edit = QLineEdit()
         general_form.addRow("上次品种:", self._last_symbol_edit)
@@ -232,9 +239,6 @@ class SettingsDialog(QDialog):
         self._auto_resume_chart_check.setChecked(
             bool(getattr(g, "auto_resume_chart_after_analysis", False))
         )
-        self._keep_analysis_check.setChecked(
-            bool(getattr(g, "keep_analysis", False))
-        )
         self._context_warning_spin.setValue(int(g.context_warning_threshold_pct))
         self._stream_font_spin.setValue(int(getattr(g, "stream_pane_font_pt", 11)))
         self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 7)))
@@ -245,6 +249,7 @@ class SettingsDialog(QDialog):
         stance_idx = self._decision_stance_combo.findData(stance)
         if stance_idx >= 0:
             self._decision_stance_combo.setCurrentIndex(stance_idx)
+        self._rqdata_key_edit.setText(getattr(g, "rqdata_license_key", ""))
         self._last_symbol_edit.setText(g.last_symbol)
         self._last_timeframe_edit.setText(g.last_timeframe)
         self._flow_auto_play_check.setChecked(
@@ -299,12 +304,12 @@ class SettingsDialog(QDialog):
         g.analysis_bar_count = self._analysis_bar_count_spin.value()
         g.refresh_interval_ms = self._refresh_interval_spin.value()
         g.auto_resume_chart_after_analysis = self._auto_resume_chart_check.isChecked()
-        g.keep_analysis = self._keep_analysis_check.isChecked()
         g.context_warning_threshold_pct = float(self._context_warning_spin.value())
         g.stream_pane_font_pt = self._stream_font_spin.value()
         g.chart_seq_label_font_pt = self._chart_seq_font_spin.value()
         g.incremental_max_new_bars = self._incremental_max_new_bars_spin.value()
         g.decision_stance = self._decision_stance_combo.currentData()  # type: ignore[assignment]
+        g.rqdata_license_key = self._rqdata_key_edit.text().strip()
         g.last_symbol = self._last_symbol_edit.text().strip()
         g.last_timeframe = self._last_timeframe_edit.text().strip()
         g.decision_flow_auto_play = self._flow_auto_play_check.isChecked()
@@ -347,3 +352,11 @@ class SettingsDialog(QDialog):
         else:
             self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self._show_key_btn.setText("显示")
+
+    def _toggle_rqdata_key_visibility(self, checked: bool) -> None:
+        if checked:
+            self._rqdata_key_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            self._show_rqdata_key_btn.setText("隐藏")
+        else:
+            self._rqdata_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._show_rqdata_key_btn.setText("显示")

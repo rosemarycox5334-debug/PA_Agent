@@ -1,11 +1,11 @@
-﻿"""Main application window for PA Agent."""
+"""Main application window for PA Agent."""
 from __future__ import annotations
 
 import logging
 from typing import Any
 
 from PyQt6.QtCore import QThread, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QAction, QShowEvent
+from PyQt6.QtGui import QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
-    QMenuBar,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -26,6 +25,18 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from pa_agent.gui.widgets.flow_bar import FlowBar
+from pa_agent.gui.widgets.summary_strip import SummaryStrip
+from pa_agent.gui.widgets.toast import ToastOverlay
+from pa_agent.gui.widgets.chart_panel import ChartPanel
+from pa_agent.gui.widgets.model_selector import ModelSelector
+from pa_agent.gui.widgets.status_bar import EnhancedStatusBar
+from pa_agent.gui.support_resistance import (
+    extract_structure_levels,
+    filter_levels_near_price,
+    format_level,
+)
+
 from pa_agent.app_context import AppContext
 from pa_agent.gui.validation_debug_dialog import show_validation_debug_dialog
 
@@ -33,6 +44,43 @@ logger = logging.getLogger(__name__)
 
 # Zombie timeout in milliseconds (5 seconds)
 _WORKER_JOIN_TIMEOUT_MS = 5000
+
+
+def _ensure_data_source_connected(
+    data_source: Any,
+    *,
+    symbol: str,
+    timeframe: str,
+    settings: Any = None,
+    tv_exchange: str | None = None,
+) -> None:
+    """Connect and subscribe the current GUI data source if startup left it disconnected."""
+    if data_source is None or getattr(data_source, "_connected", False):
+        return
+
+    from pa_agent.data.factory import configure_data_source
+
+    kind = getattr(getattr(settings, "general", None), "last_data_source", None)
+    configure_data_source(data_source, kind, settings, tv_exchange=tv_exchange)
+
+    data_source.connect()
+    data_source.subscribe(symbol, timeframe)
+
+
+def _format_data_source_error(exc: Exception) -> str:
+    """Return a user-facing data-source error message for GUI status/toast."""
+    raw = str(exc)
+    lowered = raw.lower()
+    if "rqdata" in lowered and (
+        "license" in lowered or "auth failed" in lowered or "404" in lowered
+    ):
+        return (
+            "RQData License Key 无效或未绑定。"
+            "请在设置中更新有效 License，或切换到 TradingView/MT5 数据源。"
+        )
+    if "not connected" in lowered:
+        return "数据源未连接，请检查数据源配置后重新获取数据。"
+    return f"数据源连接失败：{raw}"
 
 
 # ── AI Worker ─────────────────────────────────────────────────────────────────
@@ -82,9 +130,16 @@ class _AnalysisWorker(QThread):
         self._cancel_token = cancel_token
         self._previous_record = previous_record
         self._incremental_new_bar_count = incremental_new_bar_count
+        self.start_time: float | None = None
+        self.elapsed_s: float | None = None
+        self.stage1_tokens: int = 0
+        self.stage2_tokens: int = 0
 
     def run(self) -> None:
+        import time as _time
         from pa_agent.util.threading import OrchestratorEvent
+
+        self.start_time = _time.monotonic()
 
         _EVENT_LABELS = {
             OrchestratorEvent.Stage1Started: "阶段一分析中…",
@@ -93,6 +148,7 @@ class _AnalysisWorker(QThread):
             OrchestratorEvent.Stage2Done: "阶段二完成",
             OrchestratorEvent.RecordSaved: "记录已保存",
             OrchestratorEvent.Cancelled: "已取消",
+            OrchestratorEvent.InsufficientData: "数据不足",
             OrchestratorEvent.Stage1Failed: "阶段一失败",
             OrchestratorEvent.Stage2Failed: "阶段二失败",
         }
@@ -102,15 +158,19 @@ class _AnalysisWorker(QThread):
             self.status_update.emit(label)
 
         def on_stage1_reasoning(chunk: str) -> None:
+            self.stage1_tokens += len(chunk)
             self.reasoning_token.emit("stage1", chunk)
 
         def on_stage1_content(chunk: str) -> None:
+            self.stage1_tokens += len(chunk)
             self.content_token.emit("stage1", chunk)
 
         def on_stage2_reasoning(chunk: str) -> None:
+            self.stage2_tokens += len(chunk)
             self.reasoning_token.emit("stage2", chunk)
 
         def on_stage2_content(chunk: str) -> None:
+            self.stage2_tokens += len(chunk)
             self.content_token.emit("stage2", chunk)
 
         def on_stage_prompt(stage: str, system: str, user: str) -> None:
@@ -139,6 +199,8 @@ class _AnalysisWorker(QThread):
             decision = {}
             record = None  # type: ignore[assignment]
             self.error_occurred.emit(str(exc))
+
+        self.elapsed_s = _time.monotonic() - self.start_time
 
         if record is not None:
             self.record_ready.emit(record)
@@ -172,9 +234,6 @@ class MainWindow(QMainWindow):
         self._last_forming_ts_open: int | None = None
         self._last_frame_ready_bars: list[Any] | None = None
         self._auto_incremental_pending: bool = False
-        self._incremental_available: bool = False  # drives submit button label
-        self._keep_analysis_last_closed_ts: int | None = None  # tracks last closed bar for keep-analysis
-        self._keep_analysis_submit_closed_ts: int | None = None  # closed bar ts at analysis submit time
         self._free_chat_session: Any = None
         self._last_stage1_diagnosis: dict | None = None
         self._demo_mode = False
@@ -190,10 +249,6 @@ class MainWindow(QMainWindow):
         # RefreshLoop runs in its own QThread
         self._refresh_loop: Any = None
         self._refresh_thread: QThread | None = None
-        # Pre-create status bar so any early callbacks don't hit AttributeError.
-        # _setup_ui() will replace this with the real QStatusBar instance.
-        self._status_bar: QStatusBar = QStatusBar()
-        self.setStatusBar(self._status_bar)
         self._setup_ui()
         self._connect_event_bus()
         self._update_ai_mode_label()
@@ -217,7 +272,6 @@ class MainWindow(QMainWindow):
         self._debug_widget = self._ai_sidebar.debug
         self._prompt_files_panel = self._ai_sidebar.prompt_files
         self._decision_panel = self._ai_sidebar.decision
-        self._future_trend_panel = self._ai_sidebar.future_trend
         self._decision_tree_panel = self._ai_sidebar.decision_tree
         self._decision_flow_viz_panel = self._ai_sidebar.decision_flow_viz
 
@@ -230,58 +284,93 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
 
-        self._central = self._build_workbench()
+        self._toast = ToastOverlay(self)
+
+        self._central = self._build_central_widget()
         self.setCentralWidget(self._central)
 
-        # ── Status bar ────────────────────────────────────────────────────────
-        self._status_bar = QStatusBar()
-        self.setStatusBar(self._status_bar)
+        # Legacy demo mode label (not attached to layout in new design)
         self._demo_mode_label = QLabel("")
         self._demo_mode_label.setStyleSheet(
             "color: #e6b800; font-weight: 600; padding-left: 4px;"
         )
         self._demo_mode_label.hide()
-        self._status_bar.addWidget(self._demo_mode_label, 1)
+
         self._status_bar.showMessage("就绪")
         self._refresh_api_key_ui_state()
 
-        # ── Menu bar ──────────────────────────────────────────────────────────
-        menu_bar: QMenuBar = self.menuBar()  # type: ignore[assignment]
-        settings_menu = menu_bar.addMenu("设置")
+    def _build_central_widget(self) -> QWidget:
+        """Build the new 5-row central widget layout."""
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        open_settings_action = QAction("打开设置…", self)
-        open_settings_action.triggered.connect(self._open_settings_dialog)
-        settings_menu.addAction(open_settings_action)
+        # ── Row 1: Header ────────────────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(44)
+        header.setStyleSheet(
+            "background-color: #161b22; border-bottom: 1px solid #30363d;"
+        )
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(14, 0, 14, 0)
+        h_layout.setSpacing(10)
 
-        settings_menu.addSeparator()
+        title = QLabel("PA Agent")
+        title.setStyleSheet("font-size: 16px; font-weight: 700; color: #e6edf3;")
+        h_layout.addWidget(title)
 
-        # 演示模式子菜单
-        demo_menu = QMenu("演示模式", self)
-        self._demo_manual_action = QAction("手动选择记录…", self)
-        self._demo_manual_action.triggered.connect(lambda: self._on_demo_menu_action("manual"))
-        demo_menu.addAction(self._demo_manual_action)
-        self._demo_auto_action = QAction("自动随机记录", self)
-        self._demo_auto_action.triggered.connect(lambda: self._on_demo_menu_action("auto"))
-        demo_menu.addAction(self._demo_auto_action)
-        demo_menu.addSeparator()
-        self._demo_exit_action = QAction("退出演示模式", self)
-        self._demo_exit_action.triggered.connect(self._exit_demo_mode)
-        self._demo_exit_action.setEnabled(False)
-        demo_menu.addAction(self._demo_exit_action)
-        settings_menu.addMenu(demo_menu)
+        subtitle = QLabel(
+            "Trading Terminal · 分析仅供参考，不构成投资建议"
+        )
+        subtitle.setStyleSheet("font-size: 12px; color: #8b949e;")
+        h_layout.addWidget(subtitle)
+        h_layout.addStretch()
 
-    def _build_workbench(self) -> QWidget:
-        """Build chart + AI sidebar workbench."""
-        from pa_agent.gui.chart_widget import ChartWidget
+        self._model_selector = ModelSelector()
+        self._model_selector.clicked.connect(self._on_model_selector_clicked)
+        h_layout.addWidget(self._model_selector)
 
-        tab = QWidget()
-        outer_layout = QVBoxLayout(tab)
-        outer_layout.setContentsMargins(8, 8, 8, 8)
-        outer_layout.setSpacing(6)
+        self._header_api_pill = QLabel("API 未配置")
+        self._header_api_pill.setStyleSheet(
+            "background-color: #3d2a00; color: #ffb86c; padding: 2px 10px; "
+            "border-radius: 999px; font-size: 11px;"
+        )
+        h_layout.addWidget(self._header_api_pill)
 
-        # ── Control bar ───────────────────────────────────────────────────────
-        ctrl_layout = QHBoxLayout()
-        ctrl_layout.setSpacing(8)
+        self._settings_btn = QPushButton("设置")
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_btn.setToolTip("打开设置")
+        self._settings_btn.setStyleSheet(
+            "QPushButton {"
+            "  height: 24px;"
+            "  padding: 0 10px;"
+            "  border: 1px solid #30363d;"
+            "  border-radius: 6px;"
+            "  background-color: #21262d;"
+            "  color: #c9d1d9;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover {"
+            "  background-color: #30363d;"
+            "}"
+        )
+        self._settings_btn.clicked.connect(lambda _checked=False: self._open_settings_dialog())
+        h_layout.addWidget(self._settings_btn)
+
+        layout.addWidget(header)
+
+        # ── Row 2: FlowBar ───────────────────────────────────────────────────
+        self._flow_bar = FlowBar()
+        self._flow_bar.reset_all()
+        layout.addWidget(self._flow_bar)
+
+        # ── Row 3: Toolbar ───────────────────────────────────────────────────
+        toolbar = QWidget()
+        toolbar.setStyleSheet("background-color: #0d1117;")
+        t_layout = QHBoxLayout(toolbar)
+        t_layout.setContentsMargins(8, 6, 8, 6)
+        t_layout.setSpacing(8)
 
         _settings = getattr(self._ctx, "settings", None)
         _last_symbol = "XAUUSDm"
@@ -300,7 +389,16 @@ class MainWindow(QMainWindow):
             )
         self._active_data_source_kind = _last_ds
 
-        ctrl_layout.addWidget(QLabel("数据来源:"))
+        # Left group
+        left_group = QWidget()
+        left_group.setStyleSheet(
+            "background-color: #161b22; border-radius: 6px;"
+        )
+        lg_layout = QHBoxLayout(left_group)
+        lg_layout.setContentsMargins(8, 4, 8, 4)
+        lg_layout.setSpacing(6)
+
+        lg_layout.addWidget(QLabel("数据来源:"))
         self._data_source_combo = QComboBox()
         for kind, label in DATA_SOURCE_CHOICES:
             self._data_source_combo.addItem(label, kind)
@@ -309,16 +407,12 @@ class MainWindow(QMainWindow):
             self._data_source_combo.setCurrentIndex(ds_index)
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
-            "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）、"
-            "本地仅支持 MT5 与 TradingView"
+            "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）、RQData（米筐）"
         )
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed
         )
-        ctrl_layout.addWidget(self._data_source_combo)
-
-        # TradingView exchange is forced to «auto» whenever the data source is TV.
-        # We still keep the field visible for clarity, but it is not user-editable.
+        lg_layout.addWidget(self._data_source_combo)
 
         self._tv_exchange_label = QLabel("交易所:")
         self._tv_exchange_combo = QComboBox()
@@ -336,7 +430,6 @@ class MainWindow(QMainWindow):
         )
         from pa_agent.data.tradingview import TV_EXCHANGE_PRESETS
 
-        # Display labels with category hints (crypto exchanges get no suffix)
         _EXCHANGE_LABELS: dict[str, str] = {
             "SSE":       "SSE（A股）",
             "SZSE":      "SZSE（A股）",
@@ -358,7 +451,6 @@ class MainWindow(QMainWindow):
         for ex in TV_EXCHANGE_PRESETS:
             label = _EXCHANGE_LABELS.get(ex, ex)
             self._tv_exchange_combo.addItem(label, ex)
-        # Restore saved exchange from settings, default to auto.
         saved_ex = ""
         try:
             from pa_agent.config.settings import load_settings
@@ -375,43 +467,52 @@ class MainWindow(QMainWindow):
         self._tv_exchange_combo.currentIndexChanged.connect(
             self._on_tv_exchange_changed
         )
-        ctrl_layout.addWidget(self._tv_exchange_label)
-        ctrl_layout.addWidget(self._tv_exchange_combo)
+        lg_layout.addWidget(self._tv_exchange_label)
+        lg_layout.addWidget(self._tv_exchange_combo)
 
-        # Symbol — editable combo (user can type any MT5 symbol)
-        ctrl_layout.addWidget(QLabel("品种:"))
+        lg_layout.addWidget(QLabel("品种:"))
         self._symbol_combo = QComboBox()
         self._symbol_combo.setEditable(True)
         self._symbol_combo.setCurrentText(_last_symbol)
         self._symbol_combo.setMinimumWidth(110)
         self._apply_data_source_symbol_placeholder()
-        ctrl_layout.addWidget(self._symbol_combo)
+        lg_layout.addWidget(self._symbol_combo)
         self._populate_symbol_combo_for_source()
 
         self._symbol_alert_label = QLabel("")
         self._symbol_alert_label.setStyleSheet("color: #f85149; font-size: 11px;")
         self._symbol_alert_label.setWordWrap(True)
         self._symbol_alert_label.hide()
-        ctrl_layout.addWidget(self._symbol_alert_label)
+        lg_layout.addWidget(self._symbol_alert_label)
 
-        # Timeframe
-        ctrl_layout.addWidget(QLabel("周期:"))
+        lg_layout.addWidget(QLabel("周期:"))
         self._tf_combo = QComboBox()
         self._tf_combo.addItems(["1m", "5m", "15m", "1h", "4h", "1d"])
         self._tf_combo.setCurrentText(_last_tf)
         self._tf_combo.setMinimumWidth(60)
-        ctrl_layout.addWidget(self._tf_combo)
+        lg_layout.addWidget(self._tf_combo)
         self._populate_timeframe_combo_for_source()
         self._sync_tv_exchange_visibility()
-
-        ctrl_layout.addStretch()
 
         self._fetch_data_btn = QPushButton("获取数据")
         self._fetch_data_btn.setObjectName("primaryButton")
         self._fetch_data_btn.setMinimumWidth(90)
-        self._fetch_data_btn.setToolTip("开始从当前数据源持续拉取 K 线数据并实时更新图表")
+        self._fetch_data_btn.setToolTip(
+            "开始从当前数据源持续拉取 K 线数据并实时更新图表"
+        )
         self._fetch_data_btn.clicked.connect(self._on_fetch_data_clicked)
-        ctrl_layout.addWidget(self._fetch_data_btn)
+        lg_layout.addWidget(self._fetch_data_btn)
+
+        t_layout.addWidget(left_group)
+
+        # Middle group
+        mid_group = QWidget()
+        mid_group.setStyleSheet(
+            "background-color: #161b22; border-radius: 6px;"
+        )
+        mg_layout = QHBoxLayout(mid_group)
+        mg_layout.setContentsMargins(8, 4, 8, 4)
+        mg_layout.setSpacing(6)
 
         self._wait_close_checkbox = QCheckBox("等待最新K线收盘后再提交分析")
         self._wait_close_checkbox.setObjectName("waitCloseCheckbox")
@@ -419,23 +520,52 @@ class MainWindow(QMainWindow):
         self._wait_close_checkbox.setToolTip(
             "勾选后，点击提交分析将先等待当前未收盘K线走完，再抓取数据并开始分析"
         )
-        self._wait_close_checkbox.stateChanged.connect(self._on_wait_close_checkbox_changed)
-        ctrl_layout.addWidget(self._wait_close_checkbox)
+        self._wait_close_checkbox.stateChanged.connect(
+            self._on_wait_close_checkbox_changed
+        )
+        mg_layout.addWidget(self._wait_close_checkbox)
 
         self._wait_close_countdown_label = QLabel("")
         self._wait_close_countdown_label.setObjectName("mutedLabel")
         self._wait_close_countdown_label.setMinimumWidth(100)
-        ctrl_layout.addWidget(self._wait_close_countdown_label)
+        mg_layout.addWidget(self._wait_close_countdown_label)
+
+        mg_layout.addWidget(QLabel("分析模式:"))
+        self._speed_profile_combo = QComboBox()
+        self._speed_profile_combo.setMinimumWidth(132)
+        self._speed_profile_combo.setToolTip(
+            "选择下一次提交分析使用的二阶段分析过程；原始模式保留完整上下文，优化模式减少重复上下文以提速"
+        )
+        from pa_agent.gui.analysis_modes import analysis_mode_choices, infer_analysis_mode_key
+
+        for key, label in analysis_mode_choices():
+            self._speed_profile_combo.addItem(label, key)
+        profile_key = infer_analysis_mode_key(getattr(self._ctx, "settings", None))
+        profile_idx = self._speed_profile_combo.findData(profile_key)
+        if profile_idx >= 0:
+            self._speed_profile_combo.setCurrentIndex(profile_idx)
+        self._speed_profile_combo.currentIndexChanged.connect(
+            self._on_speed_profile_changed
+        )
+        mg_layout.addWidget(self._speed_profile_combo)
+
+        t_layout.addWidget(mid_group)
+
+        # Right group
+        right_group = QWidget()
+        right_group.setStyleSheet(
+            "background-color: #161b22; border-radius: 6px;"
+        )
+        rg_layout = QHBoxLayout(right_group)
+        rg_layout.setContentsMargins(8, 4, 8, 4)
+        rg_layout.setSpacing(6)
 
         self._submit_btn = QPushButton("提交分析")
         self._submit_btn.setObjectName("primaryButton")
         self._submit_btn.setMinimumWidth(100)
         self._submit_btn.clicked.connect(self._on_submit_analysis)
-        ctrl_layout.addWidget(self._submit_btn)
+        rg_layout.addWidget(self._submit_btn)
 
-        # Incremental button is kept for programmatic use but hidden from the
-        # toolbar — the submit button's label changes to "增量分析" automatically
-        # when an eligible prior record is detected.
         self._incremental_submit_btn = QPushButton("增量分析")
         self._incremental_submit_btn.setMinimumWidth(100)
         self._incremental_submit_btn.setToolTip(
@@ -443,30 +573,17 @@ class MainWindow(QMainWindow):
             "不受「增量分析最大新增K线」阈值限制；"
             "若无可用上一轮记录或 K 线无法对齐，将提示失败。"
         )
-        self._incremental_submit_btn.clicked.connect(self._on_submit_incremental_analysis)
-        self._incremental_submit_btn.hide()
-
-        # 演示模式按钮已移至左上角「设置」菜单，此处保留引用供内部逻辑使用（不加入 ctrl_layout）
-        self._demo_btn = QPushButton("演示模式")
-        self._demo_btn.setToolTip("用 records/pending 中已保存的分析记录回放界面")
-        self._demo_btn.clicked.connect(self._on_demo_mode_button)
-
-        # 持续跟踪分析勾选框：勾选后有新K线收盘时自动开始新一轮分析
-        # 每次启动强制为未勾选，避免程序启动时立即自动拉取数据
-        self._keep_analysis_checkbox = QCheckBox("持续跟踪分析")
-        self._keep_analysis_checkbox.setChecked(False)
-        self._keep_analysis_checkbox.setToolTip(
-            "勾选后，每当有新的K线收盘时自动开始新一轮分析"
+        self._incremental_submit_btn.clicked.connect(
+            self._on_submit_incremental_analysis
         )
-        self._keep_analysis_checkbox.stateChanged.connect(self._on_keep_analysis_checkbox_changed)
-        ctrl_layout.addWidget(self._keep_analysis_checkbox)
+        rg_layout.addWidget(self._incremental_submit_btn)
 
-        # Reset persisted keep_analysis flag so future restarts also start unchecked
-        if _settings is not None:
-            try:
-                _settings.general.keep_analysis = False
-            except Exception:  # noqa: BLE001
-                pass
+        self._demo_btn = QPushButton("演示模式")
+        self._demo_btn.setToolTip(
+            "用 records/pending 中已保存的分析记录回放界面"
+        )
+        self._demo_btn.clicked.connect(self._on_demo_mode_button)
+        rg_layout.addWidget(self._demo_btn)
 
         self._resume_chart_btn = QPushButton("图表实时更新")
         self._resume_chart_btn.setEnabled(False)
@@ -474,27 +591,29 @@ class MainWindow(QMainWindow):
             "恢复 K 线实时刷新；最右侧未收盘 K 线为浅色空心 K 线，不参与 AI 分析"
         )
         self._resume_chart_btn.clicked.connect(self._on_resume_chart_refresh)
-        ctrl_layout.addWidget(self._resume_chart_btn)
+        rg_layout.addWidget(self._resume_chart_btn)
 
         self._fit_chart_btn = QPushButton("恢复图表")
         self._fit_chart_btn.setToolTip(
             "自动调整图表缩放，将 K 线和价格线适配到可视区域"
         )
         self._fit_chart_btn.clicked.connect(self._on_fit_chart)
-        ctrl_layout.addWidget(self._fit_chart_btn)
+        rg_layout.addWidget(self._fit_chart_btn)
 
+        t_layout.addWidget(right_group)
+        layout.addWidget(toolbar)
+
+        # Hidden legacy widgets for backward compatibility
         self._decision_badge = QLabel("")
         self._decision_badge.setObjectName("mutedLabel")
-        ctrl_layout.addWidget(self._decision_badge)
+        self._decision_badge.hide()
 
         self._ai_mode_label = QLabel("")
         self._ai_mode_label.setObjectName("mutedLabel")
-        ctrl_layout.addWidget(self._ai_mode_label)
-
-        outer_layout.addLayout(ctrl_layout)
+        self._ai_mode_label.hide()
 
         self._api_key_alert_label = QLabel(
-            "未配置 API Key：请点击左上角「设置」按钮，在设置中填写 API Key 后才能进行 AI 分析。"
+            "未配置 API Key：请点击顶部「设置」按钮，在设置中填写 API Key 后才能进行 AI 分析。"
         )
         self._api_key_alert_label.setWordWrap(True)
         self._api_key_alert_label.setStyleSheet(
@@ -502,55 +621,62 @@ class MainWindow(QMainWindow):
             "border: 1px solid #8a6d2f; border-radius: 4px; font-weight: 600;"
         )
         self._api_key_alert_label.hide()
-        outer_layout.addWidget(self._api_key_alert_label)
 
-        # Risk disclaimer (UI-only; never included in AI prompts)
         self._disclaimer_label = QLabel("分析仅供参考，不构成投资建议")
         self._disclaimer_label.setObjectName("mutedLabel")
         self._disclaimer_label.setWordWrap(True)
         self._disclaimer_label.setStyleSheet(
             "color: #8b949e; font-size: 11px; padding: 2px 0;"
         )
-        outer_layout.addWidget(self._disclaimer_label)
+        self._disclaimer_label.hide()
 
-        status_row = QHBoxLayout()
-        status_row.addStretch()
-        self._last_refresh_ts: float = 0.0
-        self._refresh_elapsed_label = QLabel("距上次刷新: —")
-        self._refresh_elapsed_label.setObjectName("mutedLabel")
-        status_row.addWidget(self._refresh_elapsed_label)
+        # ── Row 4: Workspace (ChartPanel + AI Panel) ─────────────────────────
+        workspace = QSplitter(Qt.Orientation.Horizontal)
 
-        from PyQt6.QtCore import QTimer as _QTimer
-        self._elapsed_ticker = _QTimer(tab)
-        self._elapsed_ticker.setInterval(1000)
-        self._elapsed_ticker.timeout.connect(self._update_refresh_elapsed)
-        self._elapsed_ticker.start()
-
-        outer_layout.addLayout(status_row)
-
-        workbench = QSplitter(Qt.Orientation.Horizontal)
-
-        self._chart_widget = ChartWidget()
+        self._chart_panel = ChartPanel()
+        self._chart_widget = self._chart_panel.chart_widget()
         self._chart_widget.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._apply_chart_display_settings()
-        workbench.addWidget(self._chart_widget)
+        workspace.addWidget(self._chart_panel)
+
+        ai_container = QWidget()
+        ai_layout = QVBoxLayout(ai_container)
+        ai_layout.setContentsMargins(0, 0, 0, 0)
+        ai_layout.setSpacing(0)
+        self._summary_strip = SummaryStrip()
+        ai_layout.addWidget(self._summary_strip)
+        ai_layout.addWidget(self._ai_sidebar, stretch=1)
 
         self._ai_sidebar.setMinimumWidth(400)
-        workbench.addWidget(self._ai_sidebar)
+        workspace.addWidget(ai_container)
 
-        workbench.setStretchFactor(0, 3)
-        workbench.setStretchFactor(1, 2)
+        workspace.setStretchFactor(0, 3)
+        workspace.setStretchFactor(1, 2)
 
-        outer_layout.addWidget(workbench, stretch=1)
+        layout.addWidget(workspace, stretch=1)
 
-        # Connect symbol/timeframe combo boxes to the switch handler
+        # ── Row 5: StatusBar ─────────────────────────────────────────────────
+        self._status_bar = EnhancedStatusBar()
+        layout.addWidget(self._status_bar)
+
+        # Timers
+        from PyQt6.QtCore import QTimer as _QTimer
+
+        self._last_refresh_ts: float = 0.0
+        self._elapsed_ticker = _QTimer(central)
+        self._elapsed_ticker.setInterval(1000)
+        self._elapsed_ticker.timeout.connect(self._update_refresh_elapsed)
+        self._elapsed_ticker.start()
+
         self._symbol_switch_timer = QTimer(self)
         self._symbol_switch_timer.setSingleShot(True)
         self._symbol_switch_timer.setInterval(500)
         self._symbol_switch_timer.timeout.connect(self._flush_deferred_symbol_switch)
-        self._symbol_combo.currentTextChanged.connect(self._on_symbol_combo_text_changed)
+        self._symbol_combo.currentTextChanged.connect(
+            self._on_symbol_combo_text_changed
+        )
         sym_line = self._symbol_combo.lineEdit()
         if sym_line is not None:
             sym_line.editingFinished.connect(self._on_symbol_combo_editing_finished)
@@ -560,7 +686,7 @@ class MainWindow(QMainWindow):
             )
         )
 
-        return tab
+        return central
 
     def _connect_event_bus(self) -> None:
         """Wire EventBus signals to status bar and tab slots (if bus is ready)."""
@@ -642,18 +768,6 @@ class MainWindow(QMainWindow):
             pass
         if token is not None:
             token.set()
-        # Actively close the live WebSocket so any blocked get_hist() recv()
-        # exits immediately instead of waiting out the full timeout.  This is
-        # the only reliable way to unblock the RefreshLoop thread before the
-        # join below.
-        data_source = getattr(self._ctx, "data_source", None)
-        if data_source is not None:
-            close_ws = getattr(data_source, "_close_tv_socket", None)
-            if callable(close_ws):
-                try:
-                    close_ws()
-                except Exception:  # noqa: BLE001
-                    pass
         if loop.isRunning():
             loop.wait(_WORKER_JOIN_TIMEOUT_MS)
             if loop.isRunning():
@@ -788,9 +902,7 @@ class MainWindow(QMainWindow):
                 self._tf_combo.setCurrentText(A_SHARE_DEFAULT_TIMEFRAME)
 
     def _apply_tv_exchange_to_source(self, data_source: Any) -> None:
-        from pa_agent.data.tradingview import TradingViewSource
-
-        if isinstance(data_source, TradingViewSource):
+        if hasattr(data_source, "set_exchange"):
             data_source.set_exchange(self._tv_exchange_text())
 
     def _on_tv_probe_status(self, symbol: str, exchange: str, label: str) -> None:
@@ -839,8 +951,7 @@ class MainWindow(QMainWindow):
         self._persist_tradingview_exchange()
         data_source = getattr(self._ctx, "data_source", None)
         self._apply_tv_exchange_to_source(data_source)
-        # Stop any running refresh and immediately restart so the new exchange
-        # takes effect without requiring the user to click "获取数据" again.
+        # Stop any running refresh — user must click "获取数据" to re-fetch
         self._stop_refresh_loop()
         timeframe = self._tf_combo.currentText()
         ex_show = ex_val or "自动"
@@ -854,8 +965,6 @@ class MainWindow(QMainWindow):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("TV resubscribe after exchange change: %s", exc)
                 self._status_bar.showMessage(f"订阅失败：{exc}")
-            else:
-                self._start_refresh_loop()
 
     def _apply_data_source_symbol_placeholder(self) -> None:
         line = self._symbol_combo.lineEdit()
@@ -975,7 +1084,11 @@ class MainWindow(QMainWindow):
     def _switch_data_source(self, kind: str) -> None:
         """Replace ctx.data_source, reconnect, and restart RefreshLoop."""
         from pa_agent.config.settings import save_settings
-        from pa_agent.data.factory import create_data_source, data_source_label
+        from pa_agent.data.factory import (
+            configure_data_source,
+            create_data_source,
+            data_source_label,
+        )
 
         if self._switching:
             return
@@ -1017,9 +1130,10 @@ class MainWindow(QMainWindow):
 
             new_source = create_data_source(kind)
             # Wire auto-probe status callback for TV
-            from pa_agent.data.tradingview import TradingViewSource
-            if isinstance(new_source, TradingViewSource):
+            if hasattr(new_source, "on_probe_status"):
                 new_source.on_probe_status = self._on_tv_probe_status
+            settings = getattr(self._ctx, "settings", None)
+            configure_data_source(new_source, kind, settings)
             new_source.connect()
             self._apply_tv_exchange_to_source(new_source)
             new_source.subscribe(symbol, timeframe)
@@ -1156,12 +1270,21 @@ class MainWindow(QMainWindow):
 
     def _on_status_update(self, text: str) -> None:
         """Update the status bar with subscription / analysis / data-delay text."""
-        if not text:
-            # Empty string means data fetch recovered — clear any previous error.
-            if not self._analysis_in_progress:
-                self._status_bar.clearMessage()
-            return
         self._status_bar.showMessage(text)
+        if "阶段一分析中" in text:
+            self._flow_bar.set_step_status(2, "active")
+            self._flow_bar.set_step_caption(2, text)
+        elif "阶段一完成" in text:
+            self._flow_bar.set_step_status(2, "done")
+            self._flow_bar.set_step_caption(2, "阶段一完成")
+            self._flow_bar.set_step_status(3, "active")
+            self._flow_bar.set_step_caption(3, "阶段二决策中...")
+        elif "阶段二分析中" in text:
+            self._flow_bar.set_step_status(3, "active")
+            self._flow_bar.set_step_caption(3, text)
+        elif "阶段二完成" in text:
+            self._flow_bar.set_step_status(3, "done")
+            self._flow_bar.set_step_caption(3, "阶段二完成")
         if text == "数据延迟":
             self._update_symbol_data_alert()
         if self._analysis_in_progress:
@@ -1180,18 +1303,36 @@ class MainWindow(QMainWindow):
         """User requested live chart updates again."""
         if not self._chart_refresh_paused:
             return
-        # 恢复图表前先刷新哨兵，防止立即触发持续跟踪分析
-        self._refresh_keep_analysis_sentinel()
         self._set_chart_refresh_paused(False)
         self._status_bar.showMessage("图表已恢复实时更新")
         self._refresh_chart_once()
+        self._chart_panel.set_status("live")
+        self._toast.show_toast("图表已恢复实时更新", "info")
 
     def _on_fetch_data_clicked(self) -> None:
         """Start (or restart) continuous data refresh for the current symbol/timeframe."""
         data_source = getattr(self._ctx, "data_source", None)
-        if data_source is None or not getattr(data_source, "_connected", False):
-            self._status_bar.showMessage("数据源未连接，请先切换数据来源")
+        if data_source is None:
+            self._status_bar.showMessage("数据源未初始化，请先切换数据来源")
+            self._toast.show_toast("数据源未初始化", "warning")
             return
+        if not getattr(data_source, "_connected", False):
+            symbol = self._symbol_combo.currentText().strip()
+            timeframe = self._tf_combo.currentText()
+            try:
+                _ensure_data_source_connected(
+                    data_source,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    settings=getattr(self._ctx, "settings", None),
+                    tv_exchange=self._tv_exchange_text(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                msg = _format_data_source_error(exc)
+                logger.warning(msg)
+                self._status_bar.showMessage(msg)
+                self._toast.show_toast(msg, "warning")
+                return
         # For TradingView, probe connectivity on-demand (not at startup)
         if self._current_data_source_kind() == "tradingview":
             from pa_agent.data.tradingview_connectivity import check_tradingview_connectivity
@@ -1212,38 +1353,23 @@ class MainWindow(QMainWindow):
         self._stop_refresh_loop()
         self._set_chart_refresh_paused(False)
         self._start_refresh_loop()
-
-    def _ensure_refresh_loop_running(self) -> None:
-        """Start data fetch automatically if RefreshLoop is not already running.
-
-        Called when the user enables 「持续跟踪分析」 or 「等待最新K线收盘后再提交分析」
-        so they don't need to click 「获取数据」 first.
-        Does nothing if the data source is not connected or the loop is already active.
-        """
-        loop = getattr(self, "_refresh_loop", None)
-        if loop is not None and loop.isRunning():
-            logger.debug("_ensure_refresh_loop_running：RefreshLoop 已在运行，无需重启")
-            return  # already running — nothing to do
-        data_source = getattr(self._ctx, "data_source", None)
-        if data_source is None or not getattr(data_source, "_connected", False):
-            logger.warning(
-                "_ensure_refresh_loop_running：数据源未连接（data_source=%s connected=%s），"
-                "无法自动启动 RefreshLoop",
-                data_source,
-                getattr(data_source, "_connected", None) if data_source else "N/A",
-            )
-            return  # no data source — can't start
-        logger.info("Auto-starting RefreshLoop triggered by checkbox enable")
-        self._stop_refresh_loop()
-        self._set_chart_refresh_paused(False)
-        self._start_refresh_loop()
+        self._flow_bar.set_step_status(0, "done")
+        self._flow_bar.set_step_caption(0, "已连接")
+        self._toast.show_toast("正在获取数据...", "info")
+        self._chart_panel.set_status("live")
 
     def _on_fit_chart(self) -> None:
         """Auto-fit chart view to show recent bars with proper price range."""
         chart = getattr(self, "_chart_widget", None)
-        if chart is not None:
-            chart.fit_view()
+        if chart is None:
+            self._toast.show_toast("图表尚未初始化", "warning")
+            return
+        if chart.fit_view():
             self._status_bar.showMessage("图表已恢复默认缩放")
+            self._toast.show_toast("图表已恢复默认缩放", "info")
+        else:
+            self._status_bar.showMessage("暂无 K 线数据，请先点击「获取数据」")
+            self._toast.show_toast("暂无 K 线数据，请先点击「获取数据」", "warning")
 
     def _auto_resume_chart_after_analysis_enabled(self) -> bool:
         settings = getattr(self._ctx, "settings", None)
@@ -1394,28 +1520,51 @@ class MainWindow(QMainWindow):
 
         self._update_wait_close_countdown_display()
 
+        text = ""
+        style = ""
+        if self._pending_submit_after_close:
+            secs = self._forming_bar_seconds_remaining()
+            if secs is not None:
+                text = f"等待K线收盘，还剩 {secs}s"
+            else:
+                text = "等待最新K线收盘…"
+            style = "color: #58a6ff; font-size: 11px;"
+        elif self._wait_close_checkbox.isChecked():
+            secs = self._forming_bar_seconds_remaining()
+            if secs is not None:
+                text = f"距最新K线收盘还剩 {secs}s"
+            else:
+                text = "距最新K线收盘: —"
+            style = "color: #58a6ff; font-size: 11px;"
+        elif self._chart_refresh_paused:
+            text = "图表刷新已暂停"
+            style = "color: #e6b800; font-size: 11px;"
+        elif self._last_refresh_ts == 0.0:
+            text = "距上次刷新: —"
+        else:
+            elapsed = int(_time.monotonic() - self._last_refresh_ts)
+            if elapsed < 60:
+                text = f"距上次刷新: {elapsed}s"
+            else:
+                m, s = divmod(elapsed, 60)
+                text = f"距上次刷新: {m}m{s:02d}s"
+            if elapsed > 10:
+                style = "color: #f85149; font-size: 11px;"
+            else:
+                style = ""
+
         label = getattr(self, "_refresh_elapsed_label", None)
-        if label is None:
-            return
-        if self._chart_refresh_paused:
-            label.setText("图表刷新已暂停")
-            label.setStyleSheet("color: #e6b800; font-size: 11px;")
-            return
-        if self._last_refresh_ts == 0.0:
-            label.setText("距上次刷新: —")
-            return
-        elapsed = int(_time.monotonic() - self._last_refresh_ts)
-        if elapsed < 60:
-            label.setText(f"距上次刷新: {elapsed}s")
-        else:
-            m, s = divmod(elapsed, 60)
-            label.setText(f"距上次刷新: {m}m{s:02d}s")
-        # Turn red if stale (> 10 seconds without update)
-        if elapsed > 10:
-            label.setStyleSheet("color: #f85149; font-size: 11px;")
-        else:
-            label.setObjectName("mutedLabel")
-            label.setStyleSheet("")
+        if label is not None:
+            label.setText(text)
+            if style:
+                label.setStyleSheet(style)
+            else:
+                label.setObjectName("mutedLabel")
+                label.setStyleSheet("")
+
+        panel = getattr(self, "_chart_panel", None)
+        if panel is not None:
+            panel.set_footer_price(text.replace("距上次刷新: ", "距上次刷新 "))
 
     def _on_data_frame(self, frame: Any) -> None:
         """Forward a new KlineFrame to the chart widget (throttled by 30 Hz timer)."""
@@ -1444,19 +1593,7 @@ class MainWindow(QMainWindow):
             self._check_pending_bar_close(bars)
 
         if self._chart_refresh_paused:
-            # Even when chart is frozen, keep-analysis must still detect new bar closes
-            # so it can resume the chart and trigger the next round.
-            if bars:
-                self._check_keep_analysis(bars)
-            # In keep-analysis mode while waiting for the next bar close,
-            # continue rendering the live chart (including the forming bar)
-            # so the user sees real-time price action during the wait.
-            keep_analysis_on = (
-                getattr(self, "_keep_analysis_checkbox", None) is not None
-                and self._keep_analysis_checkbox.isChecked()
-            )
-            if not (keep_analysis_on and self._pending_submit_after_close):
-                return
+            return
 
         # Auto-incremental: if a switch set the pending flag, trigger now
         if self._auto_incremental_pending and bars:
@@ -1494,14 +1631,15 @@ class MainWindow(QMainWindow):
             # Record the time of this successful chart update
             self._last_refresh_ts = _time.monotonic()
             self._update_refresh_elapsed()
+            self._flow_bar.set_step_status(1, "done")
+            self._flow_bar.set_step_caption(1, "已获取 K 线")
+            symbol = self._symbol_combo.currentText().strip()
+            tf = self._tf_combo.currentText()
+            self._chart_panel.set_title(symbol, tf)
+            bar_count = len(bars) if bars else 0
+            self._chart_panel.set_meta(f"{bar_count} 根 K 线 · EMA20")
         except Exception as exc:  # noqa: BLE001
             logger.debug("Frame build skipped: %s", exc)
-
-        # Update submit button label after each successful data tick.
-        self._refresh_incremental_label()
-
-        # 保持分析：检测是否有新K线收盘，若有则自动触发分析
-        self._check_keep_analysis(bars)
 
     def _on_symbol_or_tf_changed(self, new_symbol: str, new_tf: str) -> None:
         """Handle symbol or timeframe combo box change.
@@ -1546,14 +1684,6 @@ class MainWindow(QMainWindow):
             return
 
         self._switching = True
-        # Reset the auto-incremental flag immediately — a manual symbol/tf
-        # switch means the user wants to control when analysis starts.
-        # The flag will be re-evaluated at the end of the switch by
-        # _check_auto_incremental if a prior record is found.
-        self._auto_incremental_pending = False
-        # Reset keep-analysis sentinel so a stale closed-bar ts doesn't
-        # immediately fire after the switch.
-        self._keep_analysis_last_closed_ts = None
         try:
             # ── Step 1: Cancel current AI worker ─────────────────────────────
             if self._worker is not None and self._worker.isRunning():
@@ -1592,9 +1722,6 @@ class MainWindow(QMainWindow):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("unsubscribe failed: %s", exc)
             self._last_frame_ready_bars = None
-            self._incremental_available = False
-            if hasattr(self, "_submit_btn"):
-                self._submit_btn.setText("提交分析")
             if data_source is not None:
                 self._apply_tv_exchange_to_source(data_source)
                 try:
@@ -1648,20 +1775,12 @@ class MainWindow(QMainWindow):
                 self._update_wait_close_countdown_display()
             self._refresh_chart_once()
 
-            # Auto-restart the refresh loop so data arrives immediately after a
-            # symbol/timeframe switch without requiring the user to click
-            # "获取数据" again.
-            data_source = getattr(self._ctx, "data_source", None)
-            if data_source is not None and getattr(data_source, "_connected", False):
-                self._start_refresh_loop()
-
-            # Check for prior analysis record — if found, show a hint in the
-            # status bar but do NOT auto-trigger analysis; the user decides
-            # when to submit.
+            # Check for prior analysis record — if found, auto-trigger incremental
             self._check_auto_incremental(new_symbol, new_tf)
-            # Ensure the flag is always cleared after the check so the next
-            # frame_ready signal does not unexpectedly fire analysis.
-            self._auto_incremental_pending = False
+            self._flow_bar.reset_all()
+            self._summary_strip.reset()
+            self._chart_panel.set_title(new_symbol, new_tf)
+            self._chart_panel.set_status("live")
 
     def _check_auto_incremental(self, symbol: str, timeframe: str) -> None:
         """After a symbol/tf switch, look for a prior record and set the
@@ -1714,8 +1833,6 @@ class MainWindow(QMainWindow):
     def _on_wait_close_checkbox_changed(self, _state: int) -> None:
         """Cancel pending wait if user unchecks the option."""
         if self._wait_close_checkbox.isChecked():
-            # Auto-start data fetch if RefreshLoop is not running yet.
-            self._ensure_refresh_loop_running()
             self._refresh_last_forming_ts()
             # UX: checking this option implies "submit after the next bar close".
             # Auto-trigger the same flow as clicking 「提交分析」 so the user does not
@@ -1770,7 +1887,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_wait_close_countdown_display(self) -> None:
-        """Update checkbox-adjacent countdown label while waiting."""
+        """Update checkbox-adjacent countdown and status bar while waiting."""
         lbl = getattr(self, "_wait_close_countdown_label", None)
         show = self._wait_close_checkbox.isChecked() or self._pending_submit_after_close
         if lbl is not None:
@@ -1783,6 +1900,12 @@ class MainWindow(QMainWindow):
                 else:
                     lbl.setText(f"还剩 {secs} 秒")
                     lbl.setStyleSheet("color: #58a6ff; font-size: 11px;")
+        if self._pending_submit_after_close:
+            secs = self._forming_bar_seconds_remaining()
+            if secs is not None:
+                self._status_bar.showMessage(
+                    f"等待当前K线收盘…还剩 {secs} 秒（收盘后将自动提交分析）"
+                )
 
     def _clear_pending_bar_close_wait(self) -> None:
         """Cancel wait-for-bar-close armed by the checkbox."""
@@ -1849,15 +1972,11 @@ class MainWindow(QMainWindow):
 
         data_source = getattr(self._ctx, "data_source", None)
         if data_source is None or not getattr(data_source, "_connected", False):
-            logger.warning("_arm_wait_for_bar_close：数据源未连接，放弃")
             self._status_bar.showMessage("数据源未连接")
             return False
 
         bars_raw = self._bars_for_analysis_submit(bar_count)
         if not bars_raw:
-            logger.warning(
-                "_arm_wait_for_bar_close：bars 为空（RefreshLoop 尚未推送数据？），放弃"
-            )
             self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
             return False
 
@@ -1899,7 +2018,7 @@ class MainWindow(QMainWindow):
         submit_hint = "提交增量分析" if force_incremental else "提交分析"
         if secs is not None:
             self._status_bar.showMessage(
-                f"等待当前K线收盘…（{ts_hint}，收盘后将自动{submit_hint}）"
+                f"等待当前K线收盘…还剩 {secs} 秒（{ts_hint}，收盘后将自动{submit_hint}）"
             )
         else:
             self._status_bar.showMessage(
@@ -1916,226 +2035,6 @@ class MainWindow(QMainWindow):
         menu.addAction("手动选择记录…", lambda: self._start_demo_mode("manual"))
         menu.addAction("自动随机记录", lambda: self._start_demo_mode("auto"))
         menu.exec(self._demo_btn.mapToGlobal(self._demo_btn.rect().bottomLeft()))
-
-    def _on_demo_menu_action(self, mode: str) -> None:
-        """Handle demo mode selection from the Settings menu."""
-        if self._demo_mode:
-            self._exit_demo_mode()
-        else:
-            self._start_demo_mode(mode)
-
-    def _on_keep_analysis_checkbox_changed(self, _state: int) -> None:
-        """Handle keep-analysis checkbox state change.
-
-        When enabled, automatically check and lock the wait-for-bar-close checkbox
-        so that every analysis cycle waits for the next K-line to close first.
-        When disabled, unlock and uncheck the wait-for-bar-close checkbox.
-        """
-        enabled = self._keep_analysis_checkbox.isChecked()
-        # Persist preference to settings
-        settings = getattr(self._ctx, "settings", None)
-        if settings is not None:
-            try:
-                settings.general.keep_analysis = enabled
-                from pa_agent.config.settings import save_settings
-                from pa_agent.config.paths import SETTINGS_JSON_PATH
-                save_settings(settings, SETTINGS_JSON_PATH)
-            except Exception:  # noqa: BLE001
-                pass
-
-        wait_cb = getattr(self, "_wait_close_checkbox", None)
-        if wait_cb is None:
-            return
-
-        if enabled:
-            # Auto-start data fetch if RefreshLoop is not running yet.
-            self._ensure_refresh_loop_running()
-            # Force-check wait_close and lock it so user can't uncheck independently
-            wait_cb.blockSignals(True)
-            wait_cb.setChecked(True)
-            wait_cb.blockSignals(False)
-            wait_cb.setEnabled(False)
-            # Resume live chart updates immediately — the chart should show real-time
-            # price action (including the forming bar) while waiting for bar close.
-            self._set_chart_refresh_paused(False)
-            self._status_bar.showMessage(
-                "持续跟踪分析已开启：等待K线收盘后将自动开始分析"
-            )
-            # Reset sentinel so the next RefreshLoop tick initialises it fresh.
-            # Do NOT call _begin_submit_analysis here — if the RefreshLoop just
-            # started, _last_frame_ready_bars may be empty and the arm would fail
-            # with no retry.  Instead, let _check_keep_analysis (called on every
-            # RefreshLoop tick) handle the first trigger once bars arrive.
-            self._keep_analysis_last_closed_ts = None
-            logger.info(
-                "持续跟踪分析已开启，重置哨兵，等待 RefreshLoop 推送第一批数据后自动触发"
-            )
-        else:
-            # Unlock wait_close and cancel any pending wait
-            wait_cb.setEnabled(True)
-            wait_cb.blockSignals(True)
-            wait_cb.setChecked(False)
-            wait_cb.blockSignals(False)
-            if self._pending_submit_after_close:
-                self._clear_pending_bar_close_wait()
-            self._status_bar.showMessage("持续跟踪分析已关闭")
-
-    def _refresh_keep_analysis_sentinel(self) -> None:
-        """Sync keep-analysis sentinel after analysis completes.
-
-        We restore the sentinel to the closed-bar ts that was current *when
-        analysis was submitted* (recorded in ``_keep_analysis_submit_closed_ts``).
-        This means any bars that closed *during* the analysis run will be seen
-        as "new" by ``_check_keep_analysis`` on the very next RefreshLoop tick
-        and will trigger a fresh analysis round immediately.
-
-        Falls back to the current latest closed bar only when the submit-time
-        snapshot is unavailable.
-        """
-        # Prefer the snapshot taken at submit time so bars that closed while
-        # the AI was running are NOT silently swallowed by the sentinel.
-        submit_ts = getattr(self, "_keep_analysis_submit_closed_ts", None)
-        if submit_ts is not None:
-            self._keep_analysis_last_closed_ts = submit_ts
-            self._keep_analysis_submit_closed_ts = None
-            return
-
-        # Fallback: derive from the latest RefreshLoop bars
-        bars = self._last_frame_ready_bars
-        if not bars or len(bars) < 2:
-            return
-        try:
-            from pa_agent.data.bar_close_wait import current_forming_ts
-
-            forming_ts = current_forming_ts(
-                bars,
-                self._tf_combo.currentText(),
-                symbol=self._symbol_combo.currentText().strip(),
-                now_ms=self._reference_now_ms(),
-            )
-            if forming_ts is not None:
-                closed_bar = None
-                for bar in bars:
-                    ts_open = getattr(bar, "ts_open", None) or (bar[0] if hasattr(bar, "__getitem__") else None)
-                    if ts_open is not None and int(ts_open) != int(forming_ts):
-                        closed_bar = bar
-                        break
-                if closed_bar is None:
-                    return
-                ts_open = getattr(closed_bar, "ts_open", None) or (closed_bar[0] if hasattr(closed_bar, "__getitem__") else None)
-            else:
-                bar = bars[0]
-                ts_open = getattr(bar, "ts_open", None) or (bar[0] if hasattr(bar, "__getitem__") else None)
-            if ts_open is not None:
-                self._keep_analysis_last_closed_ts = int(ts_open)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("_refresh_keep_analysis_sentinel error: %s", exc)
-
-    def _check_keep_analysis(self, bars: Any) -> None:
-        """Trigger a new analysis round when keep-analysis is enabled and a new bar has closed.
-
-        Uses the ts_open of the most recently closed bar (i.e. the second-to-last
-        bar when a forming bar is present, or the last bar otherwise) as the
-        sentinel.  If the sentinel changes between ticks a new bar has closed and
-        we auto-submit.
-        """
-        if not getattr(self, "_keep_analysis_checkbox", None):
-            return
-        if not self._keep_analysis_checkbox.isChecked():
-            return
-        if self._analysis_in_progress:
-            logger.debug("持续跟踪分析：跳过（分析进行中）")
-            return
-        if self._pending_submit_after_close:
-            logger.debug("持续跟踪分析：跳过（等待K线收盘中）")
-            return
-        if getattr(self, "_demo_mode", False):
-            return
-        if not bars or len(bars) < 2:
-            logger.warning("持续跟踪分析：跳过（bars 数量不足，len=%d）", len(bars) if bars else 0)
-            return
-
-        try:
-            from pa_agent.data.bar_close_wait import current_forming_ts
-
-            forming_ts = current_forming_ts(
-                bars,
-                self._tf_combo.currentText(),
-                symbol=self._symbol_combo.currentText().strip(),
-                now_ms=self._reference_now_ms(),
-            )
-            # The most recently closed bar is the last bar that is NOT the forming bar.
-            # If forming_ts is present, that's bars[-1]; closed bar is bars[-2].
-            # If no forming bar, closed bar is bars[-1].
-            if forming_ts is not None:
-                # bars is ordered newest-first or oldest-first — detect from ts_open
-                # The bar whose ts_open == forming_ts is the forming bar; skip it.
-                closed_bar = None
-                for bar in bars:
-                    ts_open = getattr(bar, "ts_open", None) or (bar[0] if hasattr(bar, "__getitem__") else None)
-                    if ts_open is not None and int(ts_open) != int(forming_ts):
-                        closed_bar = bar
-                        break
-                if closed_bar is None:
-                    return
-                ts_open = getattr(closed_bar, "ts_open", None) or (closed_bar[0] if hasattr(closed_bar, "__getitem__") else None)
-            else:
-                bar = bars[0]
-                ts_open = getattr(bar, "ts_open", None) or (bar[0] if hasattr(bar, "__getitem__") else None)
-
-            if ts_open is None:
-                return
-
-            closed_ts = int(ts_open)
-            if self._keep_analysis_last_closed_ts is None:
-                # First tick after enabling — record sentinel and immediately arm
-                # a wait for the *current* forming bar to close so the first
-                # analysis starts as soon as the bar in progress finishes, rather
-                # than waiting for an additional bar after that.
-                self._keep_analysis_last_closed_ts = closed_ts
-                logger.info(
-                    "持续跟踪分析：哨兵初始化 closed_ts=%s，立即 arm 等待当前K线收盘",
-                    closed_ts,
-                )
-                symbol = self._symbol_combo.currentText().strip()
-                tf = self._tf_combo.currentText()
-                bar_count = self._analysis_bar_count()
-                if (
-                    not self._analysis_in_progress
-                    and not self._pending_submit_after_close
-                    and self._bars_sufficient_for_analysis(bars, bar_count)
-                ):
-                    self._arm_wait_for_bar_close(
-                        symbol, tf, bar_count, force_incremental=False
-                    )
-                return
-
-            if closed_ts == self._keep_analysis_last_closed_ts:
-                logger.debug("持续跟踪分析：无新K线（sentinel=%s）", closed_ts)
-                return  # No new bar yet
-
-            # New bar has closed — update sentinel and trigger analysis
-            self._keep_analysis_last_closed_ts = closed_ts
-            logger.info("保持分析：检测到新K线收盘（ts_open=%s），自动触发分析", closed_ts)
-            symbol = self._symbol_combo.currentText().strip()
-            tf = self._tf_combo.currentText()
-            bar_count = self._analysis_bar_count()
-            if self._bars_sufficient_for_analysis(bars, bar_count):
-                # A bar just closed — submit analysis immediately with the
-                # current bars rather than arming another wait-for-close.
-                # Arming an extra wait would delay every cycle by one full
-                # bar period on top of the AI latency, which is undesirable.
-                logger.info("持续跟踪分析：直接提交分析（bars 已足够）")
-                self._start_analysis_with_bars(
-                    symbol, tf, bar_count, bars, force_incremental=False
-                )
-            else:
-                logger.warning(
-                    "持续跟踪分析：bars 数量不足（len=%d，需要=%d），跳过本轮",
-                    len(bars), bar_count,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("_check_keep_analysis error: %s", exc, exc_info=True)
 
     def _start_demo_mode(self, mode: str) -> None:
         """Load a pending JSON record and replay it through the UI."""
@@ -2257,13 +2156,6 @@ class MainWindow(QMainWindow):
         self._demo_mode = True
         self._demo_record_path = str(Path(path))
         self._demo_btn.setText("退出演示模式")
-        # 同步菜单项状态
-        if hasattr(self, "_demo_exit_action"):
-            self._demo_exit_action.setEnabled(True)
-        if hasattr(self, "_demo_manual_action"):
-            self._demo_manual_action.setEnabled(False)
-        if hasattr(self, "_demo_auto_action"):
-            self._demo_auto_action.setEnabled(False)
         ds_combo = getattr(self, "_data_source_combo", None)
         if ds_combo is not None:
             ds_combo.setEnabled(False)
@@ -2323,7 +2215,6 @@ class MainWindow(QMainWindow):
         self._decision_tree_panel.clear()
         self._decision_flow_viz_panel.clear()
         self._decision_panel.clear()
-        self._future_trend_panel.clear()
 
         from pa_agent.ai.prompt_assembler import stage1_prompt_txt_files
 
@@ -2405,13 +2296,6 @@ class MainWindow(QMainWindow):
         self._demo_mode_kind = None
         self._demo_record_path = None
         self._demo_btn.setText("演示模式")
-        # 同步菜单项状态
-        if hasattr(self, "_demo_exit_action"):
-            self._demo_exit_action.setEnabled(False)
-        if hasattr(self, "_demo_manual_action"):
-            self._demo_manual_action.setEnabled(True)
-        if hasattr(self, "_demo_auto_action"):
-            self._demo_auto_action.setEnabled(True)
         ds_combo = getattr(self, "_data_source_combo", None)
         if ds_combo is not None:
             ds_combo.setEnabled(True)
@@ -2430,13 +2314,8 @@ class MainWindow(QMainWindow):
             self._refresh_chart_once()
 
     def _on_submit_analysis(self) -> None:
-        """Handle the '提交分析' / '增量分析' button click.
-
-        When an eligible prior record is available the button label reads
-        '增量分析' and we honour that by passing force_incremental=True so
-        the user never needs a separate button.
-        """
-        self._begin_submit_analysis(force_incremental=self._incremental_available)
+        """Handle the '提交分析' button click."""
+        self._begin_submit_analysis(force_incremental=False)
 
     def _on_submit_incremental_analysis(self) -> None:
         """Handle the '增量分析' button click — always try incremental mode."""
@@ -2471,6 +2350,12 @@ class MainWindow(QMainWindow):
                 return
             return
 
+        self._flow_bar.set_step_status(2, "active")
+        self._flow_bar.set_step_caption(2, "阶段一诊断中...")
+        self._toast.show_toast("分析已提交", "info")
+        self._chart_panel.set_status("snapshot", "快照冻结 · AI 分析中")
+        self._summary_strip.reset()
+        self._status_bar.set_tps(0)
         self._start_analysis(
             symbol,
             timeframe,
@@ -2518,7 +2403,26 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Fetch K-lines on a worker thread when no RefreshLoop snapshot is cached yet."""
         data_source = getattr(self._ctx, "data_source", None)
-        if data_source is None or not getattr(data_source, "_connected", False):
+        if data_source is None:
+            self._status_bar.showMessage("数据源未初始化")
+            return
+        if not getattr(data_source, "_connected", False):
+            try:
+                _ensure_data_source_connected(
+                    data_source,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    settings=getattr(self._ctx, "settings", None),
+                    tv_exchange=self._tv_exchange_text(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                msg = _format_data_source_error(exc)
+                logger.warning(msg)
+                self._status_bar.showMessage(msg)
+                self._toast.show_toast(msg, "warning")
+                return
+
+        if not getattr(data_source, "_connected", False):
             self._status_bar.showMessage("数据源未连接")
             return
 
@@ -2602,35 +2506,6 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage(reason)
             QMessageBox.warning(self, "无法增量分析", reason)
             return
-
-        # Record the most-recently-closed bar ts at submit time so that
-        # _refresh_keep_analysis_sentinel can restore the sentinel to this
-        # value after analysis completes.  This ensures any bars that close
-        # *during* the analysis run are detected by _check_keep_analysis on
-        # the very next RefreshLoop tick.
-        try:
-            from pa_agent.data.bar_close_wait import current_forming_ts as _cft
-            _bars_snap = list(snapshot_bars) if snapshot_bars else []
-            _forming = _cft(
-                _bars_snap, timeframe,
-                symbol=symbol, now_ms=self._reference_now_ms(),
-            )
-            _submit_closed_ts: int | None = None
-            if _forming is not None:
-                for _b in _bars_snap:
-                    _bts = getattr(_b, "ts_open", None) or (_b[0] if hasattr(_b, "__getitem__") else None)
-                    if _bts is not None and int(_bts) != int(_forming):
-                        _submit_closed_ts = int(_bts)
-                        break
-            else:
-                _b0 = _bars_snap[0] if _bars_snap else None
-                if _b0 is not None:
-                    _bts = getattr(_b0, "ts_open", None) or (_b0[0] if hasattr(_b0, "__getitem__") else None)
-                    if _bts is not None:
-                        _submit_closed_ts = int(_bts)
-            self._keep_analysis_submit_closed_ts = _submit_closed_ts
-        except Exception:  # noqa: BLE001
-            self._keep_analysis_submit_closed_ts = None
 
         # Create cancel token
         from pa_agent.util.threading import CancelToken
@@ -2832,9 +2707,12 @@ class MainWindow(QMainWindow):
             # so DecisionPanel._apply_next_bar_prediction can find it.
             if "next_bar_prediction" in decision and "next_bar_prediction" not in inner:
                 inner = {**inner, "next_bar_prediction": decision["next_bar_prediction"]}
-            if "next_cycle_prediction" in decision and "next_cycle_prediction" not in inner:
-                inner = {**inner, "next_cycle_prediction": decision["next_cycle_prediction"]}
             self._chart_widget.set_decision(inner)
+            levels = extract_structure_levels(decision)
+            frame = self._chart_widget.displayed_frame()
+            if frame is not None:
+                levels = filter_levels_near_price(levels, frame.bars)
+            self._chart_widget.set_structure_levels(levels)
             if getattr(self, "_demo_mode", False):
                 self._chart_widget.fit_view()
             stance = None
@@ -2846,16 +2724,66 @@ class MainWindow(QMainWindow):
                 stage1_diagnosis=self._last_stage1_diagnosis,
                 decision_stance=stance,
             )
-            self._future_trend_panel.set_prediction(inner)
             self._bind_decision_tree(decision, self._last_stage1_diagnosis)
             order = inner.get("order_type", "—")
             self._decision_badge.setText(f"决策: {order}")
             if getattr(self, "_demo_mode", False):
                 self._present_decision_flow_playback(force_play=True)
+
+            self._flow_bar.set_step_status(3, "done")
+            self._flow_bar.set_step_caption(2, "阶段一完成")
+            self._flow_bar.set_step_caption(3, "阶段二完成")
+            self._flow_bar.set_step_status(4, "active")
+            self._flow_bar.set_step_caption(4, "可继续追问")
+            self._chart_panel.set_status("snapshot", "决策已生成")
+            self._toast.show_toast("分析完成 · 决策已生成", "ok")
+
+            order_type = inner.get("order_type", "—")
+            elapsed = getattr(self._worker, 'elapsed_s', None) if self._worker else None
+            total_tokens = (
+                (self._worker.stage1_tokens + self._worker.stage2_tokens)
+                if self._worker else 0
+            )
+            tps = (total_tokens / elapsed) if elapsed and elapsed > 0 else 0.0
+
+            # 方向概率：从 next_bar_prediction 提取
+            next_pred = inner.get("next_bar_prediction", {})
+            probs = next_pred.get("probabilities", {}) if isinstance(next_pred, dict) else {}
+            if probs:
+                parts = []
+                for k, v in probs.items():
+                    label = {"bullish": "多", "bearish": "空", "neutral": "中"}.get(k, k)
+                    parts.append(f"{label} {v}%")
+                direction_prob = " / ".join(parts)
+            else:
+                direction_prob = inner.get("order_direction", "—") or "—"
+
+            # Prefer structural levels when available; fall back to TP/SL.
+            tp_raw = inner.get("take_profit_price")
+            sl_raw = inner.get("stop_loss_price")
+
+            resistance = next((lvl for lvl in levels if lvl.kind == "resistance"), None)
+            support = next((lvl for lvl in levels if lvl.kind == "support"), None)
+            tp_str = format_level(resistance) if resistance is not None else (
+                f"{tp_raw:.1f}" if tp_raw is not None else "—"
+            )
+            sl_str = format_level(support) if support is not None else (
+                f"{sl_raw:.1f}" if sl_raw is not None else "—"
+            )
+
+            metrics = {
+                "最终动作": order_type or "—",
+                "方向概率": direction_prob,
+                "关键上破": tp_str,
+                "支撑区": sl_str,
+                "耗时": f"{elapsed:.1f}s" if elapsed else "—",
+            }
+            self._summary_strip.set_metrics(metrics)
+            self._status_bar.set_tps(tps)
         else:
             self._chart_widget.clear_decision_overlay()
+            self._chart_widget.clear_structure_levels()
             self._decision_panel.clear()
-            self._future_trend_panel.clear()
             self._decision_tree_panel.clear()
             if getattr(self, "_decision_flow_viz_panel", None) is not None:
                 self._decision_flow_viz_panel.clear()
@@ -3023,6 +2951,12 @@ class MainWindow(QMainWindow):
                 "validation_info": message,
             })
         self._prompt_debug_report_for_bug_fix("分析过程发生程序异常", message)
+        self._flow_bar.set_step_status(
+            2 if "stage1" in message.lower() else 3, "error"
+        )
+        self._toast.show_toast(f"分析异常: {message[:60]}", "warn")
+        self._chart_panel.set_status("error", "分析异常")
+        self._status_bar.set_tps(0)
 
     def _on_record_ready(self, record: Any) -> None:
         """Push the full AnalysisRecord to the conversation and debug tabs."""
@@ -3126,8 +3060,12 @@ class MainWindow(QMainWindow):
             # Carry next_bar_prediction from top-level into inner dict
             if "next_bar_prediction" in s2_full and "next_bar_prediction" not in inner:
                 inner = {**inner, "next_bar_prediction": s2_full["next_bar_prediction"]}
-            if "next_cycle_prediction" in s2_full and "next_cycle_prediction" not in inner:
-                inner = {**inner, "next_cycle_prediction": s2_full["next_cycle_prediction"]}
+            self._chart_widget.set_decision(inner)
+            levels = extract_structure_levels(s2_full)
+            frame = self._chart_widget.displayed_frame()
+            if frame is not None:
+                levels = filter_levels_near_price(levels, frame.bars)
+            self._chart_widget.set_structure_levels(levels)
             meta = getattr(record, "meta", None)
             stance = getattr(meta, "decision_stance", None) if meta is not None else None
             self._decision_panel.set_decision(
@@ -3136,7 +3074,6 @@ class MainWindow(QMainWindow):
                 stage1_diagnosis=s1_diag if isinstance(s1_diag, dict) else None,
                 decision_stance=stance,
             )
-            self._future_trend_panel.set_prediction(inner)
             self._bind_decision_tree(
                 s2_full,
                 s1_diag if isinstance(s1_diag, dict) else None,
@@ -3145,9 +3082,9 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_stream_panel", None)
         if panel is not None:
             s1_diag = getattr(record, "stage1_diagnosis", None)
-            s1_raw = getattr(record, "stage1_response", {}) or {}
             if s1_diag:
                 s1_content = _json.dumps(s1_diag, ensure_ascii=False, indent=2)
+                s1_raw = getattr(record, "stage1_response", {}) or {}
                 s1_reasoning = ""
                 if isinstance(s1_raw, dict):
                     choices = s1_raw.get("choices", [])
@@ -3155,17 +3092,11 @@ class MainWindow(QMainWindow):
                         msg = choices[0].get("message", {})
                         s1_reasoning = msg.get("reasoning_content", "") or ""
                 panel.show_stage_result("阶段一：市场诊断", s1_content, s1_reasoning)
-            # Push per-stage cache hit rate to stats label
-            if isinstance(s1_raw, dict):
-                s1_usage = s1_raw.get("usage") or {}
-                s1_hit_pct = s1_usage.get("cache_hit_rate_pct")
-                if s1_hit_pct is not None and hasattr(panel, "set_stage_cache_hit"):
-                    panel.set_stage_cache_hit("stage1", s1_hit_pct)
 
             s2_decision = getattr(record, "stage2_decision", None)
-            s2_raw = getattr(record, "stage2_response", {}) or {}
             if s2_decision:
                 s2_content = _json.dumps(s2_decision, ensure_ascii=False, indent=2)
+                s2_raw = getattr(record, "stage2_response", {}) or {}
                 s2_reasoning = ""
                 if isinstance(s2_raw, dict):
                     choices = s2_raw.get("choices", [])
@@ -3173,11 +3104,6 @@ class MainWindow(QMainWindow):
                         msg = choices[0].get("message", {})
                         s2_reasoning = msg.get("reasoning_content", "") or ""
                 panel.show_stage_result("阶段二：交易决策", s2_content, s2_reasoning)
-            if isinstance(s2_raw, dict):
-                s2_usage = s2_raw.get("usage") or {}
-                s2_hit_pct = s2_usage.get("cache_hit_rate_pct")
-                if s2_hit_pct is not None and hasattr(panel, "set_stage_cache_hit"):
-                    panel.set_stage_cache_hit("stage2", s2_hit_pct)
 
             if getattr(self, "_demo_mode", False):
                 panel.on_record_saved()
@@ -3206,6 +3132,16 @@ class MainWindow(QMainWindow):
                             "total_output": completion_tokens,
                         }
                     )
+                    pct = (total_tokens / context_window * 100) if context_window else 0
+                    status_bar = getattr(self, "_status_bar", None)
+                    if status_bar is not None:
+                        status_bar.set_progress(pct, f"{pct:.1f}% · {total_tokens:,} / {context_window:,}")
+                        if pct >= 95:
+                            status_bar.set_progress_color("red")
+                        elif pct >= 80:
+                            status_bar.set_progress_color("yellow")
+                        else:
+                            status_bar.set_progress_color("normal")
                 return
 
             # ── Create FreeChatSession and wire to stream panel ───────────────
@@ -3259,6 +3195,16 @@ class MainWindow(QMainWindow):
                     "total_cached_input": cached_tokens,
                     "total_output": completion_tokens,
                 })
+                pct = (total_tokens / context_window * 100) if context_window else 0
+                status_bar = getattr(self, "_status_bar", None)
+                if status_bar is not None:
+                    status_bar.set_progress(pct, f"{pct:.1f}% · {total_tokens:,} / {context_window:,}")
+                    if pct >= 95:
+                        status_bar.set_progress_color("red")
+                    elif pct >= 80:
+                        status_bar.set_progress_color("yellow")
+                    else:
+                        status_bar.set_progress_color("normal")
 
     def _bind_decision_tree(
         self,
@@ -3316,18 +3262,6 @@ class MainWindow(QMainWindow):
         # Reap any zombie RefreshLoops that finished while we were busy
         self._reap_zombie_loops()
 
-        # 分析结束后刷新持续跟踪分析哨兵，防止因分析期间新K线收盘而立即再次触发
-        self._refresh_keep_analysis_sentinel()
-
-        # Keep-analysis mode must always resume the chart so the next tick of
-        # RefreshLoop can deliver bars and detect the next bar close.
-        keep_analysis_on = (
-            getattr(self, "_keep_analysis_checkbox", None) is not None
-            and self._keep_analysis_checkbox.isChecked()
-        )
-        if keep_analysis_on and self._chart_refresh_paused:
-            self._set_chart_refresh_paused(False)
-
         auto_resumed = self._maybe_auto_resume_chart_after_analysis()
         if self._last_analysis_had_error:
             msg = "分析结束（存在错误，请查看「原始」页调试信息）"
@@ -3338,6 +3272,16 @@ class MainWindow(QMainWindow):
         else:
             msg = "分析完成"
         self._status_bar.showMessage(msg)
+        if self._last_analysis_had_error:
+            self._flow_bar.set_step_status(4, "idle")
+            self._flow_bar.set_step_caption(4, "等待完成")
+        else:
+            self._flow_bar.set_step_status(2, "done")
+            self._flow_bar.set_step_caption(2, "阶段一完成")
+            self._flow_bar.set_step_status(3, "done")
+            self._flow_bar.set_step_caption(3, "阶段二完成")
+            self._flow_bar.set_step_status(4, "active")
+            self._flow_bar.set_step_caption(4, "可继续追问")
 
     def showEvent(self, event: QShowEvent | None) -> None:
         """On first show, prompt for API Key when missing."""
@@ -3380,15 +3324,27 @@ class MainWindow(QMainWindow):
             alert.setVisible(not configured)
         self._sync_submit_button_state()
         status_bar = getattr(self, "_status_bar", None)
-        if status_bar is None or configured:
-            return
-        if self._analysis_in_progress:
-            return
-        cur = status_bar.currentMessage() or ""
-        if cur in ("就绪", "") or "API Key" in cur or "提交分析已锁定" in cur:
-            status_bar.showMessage(
-                "未配置 API Key：请点击左上角「设置」填写后才能分析"
-            )
+        if status_bar is not None and not configured:
+            if not self._analysis_in_progress:
+                cur = status_bar.currentMessage() or ""
+                if cur in ("就绪", "") or "API Key" in cur or "提交分析已锁定" in cur:
+                    status_bar.showMessage(
+                        "未配置 API Key：请点击顶部「设置」填写后才能分析"
+                    )
+        pill = getattr(self, "_header_api_pill", None)
+        if pill is not None:
+            if configured:
+                pill.setText("API 已配置")
+                pill.setStyleSheet(
+                    "background-color: #238636; color: #ffffff; padding: 2px 10px; "
+                    "border-radius: 999px; font-size: 11px;"
+                )
+            else:
+                pill.setText("API 未配置")
+                pill.setStyleSheet(
+                    "background-color: #3d2a00; color: #ffb86c; padding: 2px 10px; "
+                    "border-radius: 999px; font-size: 11px;"
+                )
 
     def _open_settings_dialog(self, *, focus_api_key: bool = False) -> None:
         """Open the SettingsDialog; import lazily to avoid circular imports."""
@@ -3421,6 +3377,34 @@ class MainWindow(QMainWindow):
             self._update_ai_mode_label()
             self._refresh_api_key_ui_state()
 
+    def _on_model_selector_clicked(self) -> None:
+        """Use the model pill as a settings shortcut until model groups exist."""
+        selector = getattr(self, "_model_selector", None)
+        if selector is not None and getattr(selector, "_groups", None):
+            return
+        self._open_settings_dialog()
+
+    def _on_speed_profile_changed(self, _index: int) -> None:
+        """Apply toolbar analysis mode to the in-memory AI settings."""
+        settings = getattr(self._ctx, "settings", None)
+        combo = getattr(self, "_speed_profile_combo", None)
+        if settings is None or combo is None:
+            return
+        key = combo.currentData()
+        if not key:
+            return
+        try:
+            from pa_agent.gui.analysis_modes import apply_analysis_mode
+
+            mode = apply_analysis_mode(settings, str(key))
+        except KeyError:
+            return
+        self._update_ai_mode_label()
+        self._status_bar.showMessage(f"分析模式：{mode.label}")
+        toast = getattr(self, "_toast", None)
+        if toast is not None:
+            toast.show_toast(f"已切换到 {mode.label}", "info")
+
     def _apply_chart_display_settings(self) -> None:
         """Sync chart label font sizes from persisted general settings."""
         chart = getattr(self, "_chart_widget", None)
@@ -3436,6 +3420,9 @@ class MainWindow(QMainWindow):
         settings = getattr(self._ctx, "settings", None)
         if settings is None:
             self._ai_mode_label.setText("")
+            selector = getattr(self, "_model_selector", None)
+            if selector is not None:
+                selector.set_model_name("—")
             return
         p = settings.provider
         base = (p.base_url or "").lower()
@@ -3468,6 +3455,9 @@ class MainWindow(QMainWindow):
             self._ai_mode_label.setText(
                 f"模型: {p.model} · 思考={('开' if p.thinking else '关')}"
             )
+        selector = getattr(self, "_model_selector", None)
+        if selector is not None:
+            selector.set_model_name(p.model)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -3478,7 +3468,7 @@ class MainWindow(QMainWindow):
     def _submit_block_reason(self) -> str | None:
         """Human-readable reason when submit is disabled, or None if allowed."""
         if not self._has_api_key_configured():
-            return "未配置 API Key，请点击左上角「设置」填写后才能分析"
+            return "未配置 API Key，请点击顶部「设置」填写后才能分析"
         if self._demo_mode:
             return "演示模式中，请退出演示后再提交真实分析"
         if self._analysis_in_progress:
@@ -3490,7 +3480,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _sync_submit_button_state(self) -> None:
-        """Enable submit button, update its label, and surface why it may be locked."""
+        """Enable submit button and surface why it may be locked."""
         if not hasattr(self, "_submit_btn"):
             return
         reason = self._submit_block_reason()
@@ -3510,82 +3500,11 @@ class MainWindow(QMainWindow):
             self._submit_btn.setToolTip("")
         else:
             self._submit_btn.setToolTip(reason or "")
-
-        status_bar = getattr(self, "_status_bar", None)
-        if status_bar is not None and reason:
-            cur = status_bar.currentMessage() or ""
-            if cur in ("就绪", "") or "提交分析已锁定" in cur:
-                status_bar.showMessage(f"提交分析已锁定：{reason}")
-
-        # Update submit button label to reflect incremental availability.
-        self._refresh_incremental_label()
-
-    def _refresh_incremental_label(self) -> None:
-        """Check whether an incremental base record is available and update the
-        submit button label accordingly ('增量分析' vs '提交分析').
-
-        This is a lightweight heuristic check — we only look up the prior record
-        when bars are already cached; if not cached we default to '提交分析'.
-        """
-        if not hasattr(self, "_submit_btn"):
-            return
-        # Don't change label while analysis is running or button is disabled.
-        if self._analysis_in_progress or not self._submit_btn.isEnabled():
-            self._submit_btn.setText("提交分析")
-            self._incremental_available = False
-            return
-
-        bars = self._last_frame_ready_bars
-        if not bars:
-            self._submit_btn.setText("提交分析")
-            self._incremental_available = False
-            return
-
-        symbol = self._symbol_combo.currentText().strip() if hasattr(self, "_symbol_combo") else ""
-        timeframe = self._tf_combo.currentText() if hasattr(self, "_tf_combo") else ""
-        if not symbol or not timeframe:
-            self._submit_btn.setText("提交分析")
-            self._incremental_available = False
-            return
-
-        try:
-            from pa_agent.records.analysis_history import (
-                compute_incremental_bar_delta,
-                find_latest_successful_record,
-            )
-            from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS
-
-            bar_count = self._analysis_bar_count()
-            frame = self._build_chart_frame_from_bars(
-                bars,
-                include_forming=False,
-                bar_count=bar_count,
-            )
-            if frame is None:
-                raise ValueError("frame is None")
-
-            previous = find_latest_successful_record(symbol=symbol, timeframe=timeframe)
-            if previous is None:
-                raise ValueError("no prior record")
-
-            settings = getattr(self._ctx, "settings", None)
-            threshold = int(
-                getattr(getattr(settings, "general", None), "incremental_max_new_bars", 10)
-            )
-
-            delta = compute_incremental_bar_delta(frame, previous)
-            if delta is None:
-                raise ValueError("cannot align")
-
-            if threshold > 0 and delta.new_count <= threshold:
-                self._incremental_available = True
-                self._submit_btn.setText("增量分析")
-                return
-        except Exception:  # noqa: BLE001
-            pass
-
-        self._incremental_available = False
-        self._submit_btn.setText("提交分析")
+            status_bar = getattr(self, "_status_bar", None)
+            if status_bar is not None and reason:
+                cur = status_bar.currentMessage() or ""
+                if cur in ("就绪", "") or "提交分析已锁定" in cur:
+                    status_bar.showMessage(f"提交分析已锁定：{reason}")
 
     def _update_submit_button_state(self) -> None:
         """Enable or disable the submit button based on current state."""
