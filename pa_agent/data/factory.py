@@ -15,6 +15,7 @@ DataSourceKind = Literal["mt5", "tradingview", "akshare"]
 DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
+    ("akshare", "AkShare"),
 )
 
 _DEFAULT_SYMBOLS: dict[DataSourceKind, str] = {

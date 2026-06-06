@@ -41,6 +41,7 @@ _PRESET_SYMBOLS: tuple[str, ...] = (
 
 _STOCK_CODE_RE = re.compile(r"^\d{6}$")
 _INDEX_PREFIX_RE = re.compile(r"^(sh|sz)(\d{6})$", re.IGNORECASE)
+_FUTURES_CODE_RE = re.compile(r"^[A-Za-z]{1,3}(?:\d{3,4}|0)$")
 
 
 def normalize_ashare_symbol(symbol: str) -> str:
@@ -57,7 +58,27 @@ def normalize_ashare_symbol(symbol: str) -> str:
     digits = re.sub(r"\D", "", raw)
     if len(digits) >= 6:
         return digits[-6:]
-    return digits
+    return ""
+
+
+def normalize_futures_symbol(symbol: str) -> str:
+    """Normalize China futures symbols accepted by AkShare/Sina, e.g. JD2607."""
+    raw = (symbol or "").strip()
+    if not raw:
+        return ""
+    compact = re.sub(r"[^0-9A-Za-z]", "", raw)
+    if _FUTURES_CODE_RE.match(compact):
+        return compact.upper()
+    return ""
+
+
+def normalize_akshare_symbol(symbol: str) -> str:
+    """Normalize to either an A-share/index code or a China futures contract."""
+    return normalize_ashare_symbol(symbol) or normalize_futures_symbol(symbol)
+
+
+def is_futures_symbol(symbol: str) -> bool:
+    return bool(normalize_futures_symbol(symbol))
 
 
 def _is_index_digits(digits: str) -> bool:
@@ -280,7 +301,7 @@ class AkShareSource(DataSource):
         logger.info("AkShareSource disconnected")
 
     def list_symbols(self) -> list[str]:
-        return list(_PRESET_SYMBOLS)
+        return list(_PRESET_SYMBOLS) + ["JD2607", "CU2607", "AU2607", "AG2607", "RB2607"]
 
     def supported_timeframes(self) -> list[str]:
         return list(_SUPPORTED_TIMEFRAMES)
@@ -291,9 +312,13 @@ class AkShareSource(DataSource):
                 f"Unsupported timeframe: {timeframe!r}. "
                 f"Use one of {list(_SUPPORTED_TIMEFRAMES)}"
             )
-        code = normalize_ashare_symbol(symbol)
-        if not code:
-            raise ValueError("A股代码无效，请输入 6 位数字（如 600519）或指数 sh000300")
+        code = normalize_akshare_symbol(symbol)
+        if not code or not (
+            _STOCK_CODE_RE.match(code)
+            or code.startswith(("sh", "sz"))
+            or is_futures_symbol(code)
+        ):
+            raise ValueError("AkShare 代码无效，请输入 6 位 A 股代码、指数 sh000300，或期货合约 JD2607")
         self._symbol = code
         self._timeframe = timeframe
         logger.info("AkShareSource subscribed: %s %s", code, timeframe)
@@ -304,8 +329,12 @@ class AkShareSource(DataSource):
         logger.info("AkShareSource unsubscribed")
 
     def is_symbol_available(self, symbol: str) -> bool:
-        code = normalize_ashare_symbol(symbol)
-        return bool(_STOCK_CODE_RE.match(code) or code.startswith(("sh", "sz")))
+        code = normalize_akshare_symbol(symbol)
+        return bool(
+            _STOCK_CODE_RE.match(code)
+            or code.startswith(("sh", "sz"))
+            or is_futures_symbol(code)
+        )
 
     def latest_snapshot(self, n: int) -> list[KlineBar]:
         if not self._connected:
@@ -327,12 +356,16 @@ class AkShareSource(DataSource):
                 f"AkShare 未返回数据: {self._symbol} {self._timeframe}"
             )
 
-        if _ashare_session_open():
+        if not is_futures_symbol(self._symbol) and _ashare_session_open():
             self._apply_spot_to_forming(rows_asc)
 
         rows_newest = list(reversed(rows_asc[-fetch_n:]))
         for i, row in enumerate(rows_newest):
-            row["closed"] = not (i == 0 and _ashare_session_open())
+            row["closed"] = not (
+                i == 0
+                and not is_futures_symbol(self._symbol)
+                and _ashare_session_open()
+            )
 
         return _rows_to_kline_bars(rows_newest, n)
 
@@ -375,6 +408,8 @@ class AkShareSource(DataSource):
         raise last_exc
 
     def _fetch_history(self, symbol: str, timeframe: str, n: int) -> list[dict[str, Any]]:
+        if is_futures_symbol(symbol):
+            return self._fetch_futures_history_ak(symbol, timeframe, n)
         try:
             if timeframe == "1d":
                 return self._fetch_daily_ak(symbol, n)
@@ -384,7 +419,17 @@ class AkShareSource(DataSource):
                 rows_60 = self._fetch_minute_ak(symbol, "60", n * 4 + 8)
                 return _resample_rows_to_4h(rows_60)[-n:]
         except Exception as exc:
-            logger.warning("AkShare 主源失败 (%s): %s", symbol, exc)
+            try:
+                rows = _fetch_history_eastmoney_browser(symbol, timeframe, n)
+                logger.debug(
+                    "AkShare 主源失败，已使用 EastMoney browser fallback (%s): %s",
+                    symbol,
+                    exc,
+                )
+                return rows
+            except Exception as em_exc:
+                logger.warning("AkShare 主源失败 (%s): %s", symbol, exc)
+                logger.warning("EastMoney browser fallback failed (%s): %s", symbol, em_exc)
             if self._baostock_ok:
                 try:
                     return self._fetch_history_baostock(symbol, timeframe, n)
@@ -397,6 +442,41 @@ class AkShareSource(DataSource):
         if self._baostock_ok:
             return self._fetch_history_baostock(symbol, timeframe, n)
         return []
+
+    def _fetch_futures_history_ak(
+        self,
+        symbol: str,
+        timeframe: str,
+        n: int,
+    ) -> list[dict[str, Any]]:
+        import akshare as ak
+
+        code = normalize_futures_symbol(symbol)
+        if timeframe == "1d":
+            df = self._call_with_retries(
+                f"futures_daily {code}",
+                lambda: ak.futures_zh_daily_sina(symbol=code),
+            )
+            norm = _normalize_ohlcv_df(df, time_col="date")
+            if norm.empty:
+                return []
+            return _df_to_bars_asc(norm.tail(n + 5), time_col="date")
+        if timeframe in {"1h", "4h"}:
+            fetch_n = n if timeframe == "1h" else n * 4 + 8
+            df = self._call_with_retries(
+                f"futures_min {code} 60",
+                lambda: ak.futures_zh_minute_sina(symbol=code, period="60"),
+            )
+            norm = _normalize_ohlcv_df(df, time_col="datetime")
+            if norm.empty:
+                return []
+            rows = _df_to_bars_asc(norm.tail(fetch_n + 8), time_col="datetime")
+            if timeframe == "4h":
+                return _resample_rows_to_4h(rows)[-n:]
+            return rows[-(n + 8) :]
+        raise ValueError(
+            f"Unsupported timeframe for futures: {timeframe!r}. Use one of {list(_SUPPORTED_TIMEFRAMES)}"
+        )
 
     def _fetch_daily_ak(self, symbol: str, n: int) -> list[dict[str, Any]]:
         import akshare as ak
@@ -604,3 +684,74 @@ def _baostock_code(symbol: str) -> str:
     if sym.startswith(("5", "6", "9")):
         return f"sh.{sym}"
     return f"sz.{sym}"
+
+
+def _eastmoney_secid(symbol: str) -> str:
+    sym = normalize_ashare_symbol(symbol)
+    if sym.startswith("sh"):
+        return f"1.{sym[2:]}"
+    if sym.startswith("sz"):
+        return f"0.{sym[2:]}"
+    if sym.startswith(("5", "6", "9")) or sym in {"000001", "000016", "000300", "000905", "000852"}:
+        return f"1.{sym}"
+    return f"0.{sym}"
+
+
+def _fetch_history_eastmoney_browser(
+    symbol: str,
+    timeframe: str,
+    n: int,
+) -> list[dict[str, Any]]:
+    """Fetch EastMoney K-lines with browser-like TLS when AkShare requests fail."""
+    if timeframe not in {"1d", "1h", "4h"}:
+        raise DataSourceTransientError(f"Unsupported timeframe for EastMoney fallback: {timeframe}")
+
+    try:
+        from curl_cffi import requests as curl_requests
+    except ImportError as exc:
+        raise DataSourceTransientError("curl_cffi not installed for EastMoney fallback") from exc
+
+    klt = "101" if timeframe == "1d" else "60"
+    fetch_n = n if timeframe != "4h" else n * 4 + 8
+    params = {
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+        "klt": klt,
+        "fqt": "1",
+        "secid": _eastmoney_secid(symbol),
+        "beg": "0",
+        "end": "20500000",
+    }
+    response = curl_requests.get(
+        "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+        params=params,
+        timeout=20,
+        impersonate="chrome",
+        proxies={},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data") or {}
+    klines = data.get("klines") or []
+    if not klines:
+        raise DataSourceTransientError(f"EastMoney returned no data for {symbol} {timeframe}")
+
+    rows: list[dict[str, Any]] = []
+    for line in klines[-(fetch_n + 8) :]:
+        parts = str(line).split(",")
+        if len(parts) < 6:
+            continue
+        rows.append(
+            {
+                "ts_open": _row_time_to_ts_ms(parts[0]),
+                "open": float(parts[1]),
+                "close": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "volume": float(parts[5] or 0.0),
+            }
+        )
+    if timeframe == "4h":
+        return _resample_rows_to_4h(rows)[-n:]
+    return rows[-(n + 8) :]
