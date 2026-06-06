@@ -368,15 +368,26 @@ class TwoStageOrchestrator:
         # ── Step 3: Stage 1 started ───────────────────────────────────────────
         on_event(OrchestratorEvent.Stage1Started)
 
+        analysis_mode = "original"
+        if self._settings is not None:
+            analysis_mode = str(
+                getattr(self._settings.general, "analysis_mode", "original")
+                or "original"
+            )
+
         # ── Step 4: Build Stage 1 messages ───────────────────────────────────
         if previous_record is not None and incremental_new_bar_count is not None:
             messages_s1 = self._assembler.build_incremental_stage1(
                 frame,
                 previous_record,
                 incremental_new_bar_count,
+                analysis_mode=analysis_mode,
             )
         else:
-            messages_s1 = self._assembler.build_stage1(frame)
+            messages_s1 = self._assembler.build_stage1(
+                frame,
+                analysis_mode=analysis_mode,
+            )
 
         # ── Step 5: Call AI for Stage 1 ───────────────────────────────────────
         logger.debug("\n" + "="*80)

@@ -456,6 +456,27 @@ trade_confidence_reasoning：必须简要说明打分依据（如“入场信号
 estimated_win_rate_reasoning：必须简要说明依据（如“宽通道顺势 Low1，结构支持约 45–50%，取 47% 用于方程”）
 """.strip()
 
+def _stage1_output_reminder_for_mode(analysis_mode: str = "original") -> str:
+    """Return Stage 1 output rules adjusted for the selected analysis mode."""
+    mode = (analysis_mode or "original").strip().lower()
+    if mode == "optimized":
+        return _STAGE1_OUTPUT_REMINDER
+    return (
+        _STAGE1_OUTPUT_REMINDER
+        + "\n\n"
+        + """
+## 原始分析过程闸门硬规则（覆盖上文任何相反描述）
+
+- 当前为 **原始分析过程**：不要使用“程序已经判定 / 由程序填充 / AI 不输出”作为省略 gate_trace 节点的理由。
+- 即使你在思考中认为某个节点已被程序预判，最终 JSON 仍必须在 `gate_trace` 中显式写出该节点。
+- 当 `gate_result="proceed"` 时，`gate_trace` 必须至少包含以下节点，且每个节点都要有独立的 `question`、`answer`、`reason`、`bar_range`：
+  `0.1`、`0.2`、`1.1`、`1.2`、`1.3`、`2.1`、`2.2`、`2.3`、`2.4`、`2.5`。
+- `0.1`/`0.2` 是阶段一前置可读性与继续分析条件闸门；`1.1` 是数据是否足够；`2.3` 是方向；`2.4` 是 Always In。原始模式必须由你自己写入 `gate_trace`。
+- 不要在 `gate_trace` 中跳过 `0.1`、`0.2`、`1.1`、`2.3`、`2.4`；否则校验会失败，阶段二不会执行。
+""".strip()
+    )
+
+
 _NEXT_BAR_PREDICTION_INSTRUCTION = """\
 ## 下一根K线预测任务（阶段二附加输出，不影响下单决策）
 
@@ -796,10 +817,18 @@ class PromptAssembler:
 
     # ── Stage 1 ───────────────────────────────────────────────────────────────
 
-    def build_stage1(self, frame: KlineFrame) -> list[dict]:
+    def build_stage1(
+        self,
+        frame: KlineFrame,
+        *,
+        analysis_mode: str = "original",
+    ) -> list[dict]:
         """Build the message list for Stage 1 (market diagnosis)."""
         system_content = self._build_stage1_system_prompt()
-        user_content = self._build_stage1_user_prompt(frame)
+        user_content = self._build_stage1_user_prompt(
+            frame,
+            analysis_mode=analysis_mode,
+        )
 
         return [
             {"role": "system", "content": system_content},
@@ -811,6 +840,8 @@ class PromptAssembler:
         frame: KlineFrame,
         previous_record: AnalysisRecord,
         new_bar_count: int,
+        *,
+        analysis_mode: str = "original",
     ) -> list[dict]:
         """Build Stage 1 as a continuation-based incremental update.
 
@@ -862,6 +893,7 @@ class PromptAssembler:
             frame,
             previous_record,
             new_bar_count,
+            analysis_mode=analysis_mode,
         )
 
         return [
@@ -947,14 +979,20 @@ class PromptAssembler:
             logger.warning("_render_program_prefill_hint failed: %s", exc)
             return ""
 
-    def _build_stage1_user_prompt(self, frame: KlineFrame) -> str:
+    def _build_stage1_user_prompt(
+        self,
+        frame: KlineFrame,
+        *,
+        analysis_mode: str = "original",
+    ) -> str:
         """Build the Stage 1 task turn; stage-specific rules stay out of system."""
         pattern_block = self._stage1_pattern_supplement()
-        prefill_hint = self._render_program_prefill_hint(frame)
+        use_prefill = (analysis_mode or "original").strip().lower() == "optimized"
+        prefill_hint = self._render_program_prefill_hint(frame) if use_prefill else ""
         stage1_parts = [
             *(self._load(name) for name in STAGE1_TASK_PROMPT_TXT_FILES),
             *([pattern_block] if pattern_block else []),
-            _STAGE1_OUTPUT_REMINDER,
+            _stage1_output_reminder_for_mode(analysis_mode),
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
         kline_table = self._render_kline_table(frame)
@@ -1002,14 +1040,17 @@ class PromptAssembler:
         frame: KlineFrame,
         previous_record: AnalysisRecord,
         new_bar_count: int,
+        *,
+        analysis_mode: str = "original",
     ) -> str:
         """Build a Stage 1 update turn using the last completed analysis."""
         pattern_block = self._stage1_pattern_supplement()
-        prefill_hint = self._render_program_prefill_hint(frame)
+        use_prefill = (analysis_mode or "original").strip().lower() == "optimized"
+        prefill_hint = self._render_program_prefill_hint(frame) if use_prefill else ""
         stage1_parts = [
             *(self._load(name) for name in STAGE1_TASK_PROMPT_TXT_FILES),
             *([pattern_block] if pattern_block else []),
-            _STAGE1_OUTPUT_REMINDER,
+            _stage1_output_reminder_for_mode(analysis_mode),
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
         n_bars = len(frame.bars)
@@ -1068,6 +1109,8 @@ class PromptAssembler:
         frame: KlineFrame,
         previous_record: AnalysisRecord,
         new_bar_count: int,
+        *,
+        analysis_mode: str = "original",
     ) -> str:
         """Build the incremental continuation user turn (message [3] in 4-message mode).
 
@@ -1076,7 +1119,8 @@ class PromptAssembler:
         Injects prefill_hint so the AI knows the updated §2.3/§2.4 verdicts
         even though the full K-line table is not re-sent.
         """
-        prefill_hint = self._render_program_prefill_hint(frame)
+        use_prefill = (analysis_mode or "original").strip().lower() == "optimized"
+        prefill_hint = self._render_program_prefill_hint(frame) if use_prefill else ""
         n_bars = len(frame.bars)
         new_count = max(0, min(new_bar_count, n_bars))
         new_kline_table = self._render_kline_table(frame, limit=new_count)

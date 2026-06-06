@@ -195,6 +195,32 @@ def test_stage1_output_reminder_present(assembler: PromptAssembler):
     assert "gate_result" in user
 
 
+def test_stage1_original_mode_requires_full_gate_trace(assembler: PromptAssembler):
+    """Original mode must not tell the model to omit program-prefilled gates."""
+    frame = _make_frame()
+    messages = assembler.build_stage1(frame, analysis_mode="original")
+    user = messages[1]["content"]
+
+    assert "原始分析过程闸门硬规则" in user
+    assert "0.1" in user
+    assert "0.2" in user
+    assert "1.1" in user
+    assert "2.3" in user
+    assert "2.4" in user
+    assert "不要使用“程序已经判定 / 由程序填充 / AI 不输出”" in user
+    assert "程序预填充节点判断依据" not in user
+
+
+def test_stage1_optimized_mode_keeps_program_prefill_hint(assembler: PromptAssembler):
+    """Optimized mode keeps the local deterministic prefill path."""
+    frame = _make_frame()
+    messages = assembler.build_stage1(frame, analysis_mode="optimized")
+    user = messages[1]["content"]
+
+    assert "程序预填充节点判断依据" in user
+    assert "原始分析过程闸门硬规则" not in user
+
+
 def test_stage2_output_contract_present(assembler: PromptAssembler):
     """Stage 2 user turn must contain the output contract with null rule."""
     frame = _make_frame()
