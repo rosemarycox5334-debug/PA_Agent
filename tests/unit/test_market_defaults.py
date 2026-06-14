@@ -103,6 +103,11 @@ def test_tradingview_kind_keeps_ashare_symbol():
     assert normalize_gold_symbol_for_kind("tradingview", "600519") == "600519"
 
 
+def test_akshare_kind_keeps_futures_symbol():
+    assert normalize_gold_symbol_for_kind("akshare", "JD2607") == "JD2607"
+    assert normalize_gold_symbol_for_kind("akshare", "2607") == "000001"
+
+
 def test_numeric_hk_style_code_not_rewritten_to_xauusd():
     ex, sym, adjusted = resolve_tv_pair("", "00988")
     assert (ex, sym, adjusted) == ("", "00988", False)

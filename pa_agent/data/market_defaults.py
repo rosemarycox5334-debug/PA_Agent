@@ -102,6 +102,11 @@ def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
 
     sym = (symbol or "").strip()
     if kind == "akshare":
+        from pa_agent.data.akshare_source import normalize_futures_symbol
+
+        futures_code = normalize_futures_symbol(sym)
+        if futures_code:
+            return futures_code
         code = normalize_ashare_symbol(sym)
         if not code or not _looks_like_ashare_code(code):
             return A_SHARE_DEFAULT_SYMBOL

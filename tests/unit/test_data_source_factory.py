@@ -22,11 +22,13 @@ def test_create_data_source_returns_expected_types():
     assert isinstance(create_data_source("mt5"), MT5Source)
     assert isinstance(create_data_source("tradingview"), TradingViewSource)
     assert isinstance(create_data_source("yfinance"), MT5Source)
+    assert create_data_source("akshare").__class__.__name__ == "AkShareSource"
 
 
 def test_default_symbols_per_kind():
     assert default_symbol_for_kind("mt5") == "XAUUSDm"
     assert default_symbol_for_kind("tradingview") == "XAUUSD"
+    assert default_symbol_for_kind("akshare") == "000001"
 
 
 def test_default_tradingview_exchange_is_auto():
@@ -38,5 +40,5 @@ def test_general_settings_last_data_source_default():
     assert g.last_data_source == "mt5"
 
 
-def test_normalize_data_source_kind_downgrades_akshare() -> None:
-    assert normalize_data_source_kind("akshare") == "mt5"
+def test_normalize_data_source_kind_accepts_akshare() -> None:
+    assert normalize_data_source_kind("akshare") == "akshare"
