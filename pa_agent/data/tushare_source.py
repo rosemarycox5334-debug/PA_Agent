@@ -24,16 +24,12 @@ from pa_agent.data.base import (
     DataSource,
     DataSourceTransientError,
     KlineBar,
-    normalize_kline_bar,
 )
-from pa_agent.data.datetime_ts import datetime_to_ts_ms
 from pa_agent.data.ashare_common import (
     cn_now,
-    ashare_session_open,
     normalize_ashare_symbol,
     is_index_symbol,
     index_symbol_for_api,
-    row_time_to_ts_ms,
     df_to_bars_asc,
     normalize_ohlcv_df,
     resample_rows_to_4h,
@@ -266,11 +262,16 @@ class TushareSource(DataSource):
                 f"Tushare 未返回数据: {self._symbol} {self._timeframe}"
             )
 
-        # Mark forming bar if in session (tushare doesn't stream real-time forming bar)
-        if self._timeframe == "1d":
-            rows_newest = list(reversed(rows_asc[-fetch_n:]))
-        else:
-            rows_newest = list(reversed(rows_asc[-fetch_n:]))
+        # Tushare provides completed bars only (no real-time streaming).
+        # Mark all bars as closed; rows_to_kline_bars defaults closed=False
+        # for the first bar, so we override via the 'closed' key.
+        from pa_agent.data.ashare_common import ashare_session_open
+
+        rows_newest = list(reversed(rows_asc[-fetch_n:]))
+        session_open = ashare_session_open()
+        for i, row in enumerate(rows_newest):
+            # Mark the first (newest) bar as forming if market is open
+            row["closed"] = not (i == 0 and session_open)
 
         return rows_to_kline_bars(rows_newest, n)
 
@@ -346,12 +347,13 @@ class TushareSource(DataSource):
         else:
             code = _ts_code(symbol)
 
+            # Note: ``daily()`` does NOT support the ``adj`` parameter (silently ignored).
+            # For forward-adjusted data, use ``pro_bar(adj='qfq')`` (requires 2000+ credits).
             def _pull() -> Any:
                 return self._pro.daily(
                     ts_code=code,
                     start_date=start,
                     end_date=end,
-                    adj="qfq",
                 )
 
             df = self._call_with_retries(f"daily {code}", _pull)
