@@ -313,7 +313,7 @@ def normalize_ohlcv_df(df: Any, *, time_col: str) -> Any:
             rename[col] = "volume"
         elif c in ("成交额", "成交金额", "amount", "Amount"):
             rename[col] = "amount"
-        elif c in ("涨跌幅", "pct_chg", "pctChg", "change"):
+        elif c in ("涨跌幅", "pct_chg", "pctChg"):
             rename[col] = "pct_chg"
     out = out.rename(columns=rename)
     drop_cols = [
