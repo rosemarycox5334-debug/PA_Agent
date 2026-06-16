@@ -383,18 +383,21 @@ class ChartWidget(pg.PlotWidget):
             self.addItem(candle)
             self._candle_items.append(candle)
 
-            # Sequence label — odd seq only; skip forming bar (seq=0)
-            if bar.seq > 0 and bar.seq % 2 == 1:
-                label_y = bar.high
-                seq_label = SeqLabelItem(
-                    bar.seq,
-                    x_pos,
-                    label_y,
-                    font_pt=self._seq_label_font_pt,
-                    forming=forming,
-                )
-                self.addItem(seq_label)
-                self._seq_labels.append(seq_label)
+            # Price label — show close price above every other bar
+            # Skip forming bar (seq=0); show odd display-index bars only
+            if bar.seq > 0:
+                display_seq = n - i  # 1..N from left to right
+                if display_seq % 2 == 1:
+                    label_y = bar.high
+                    seq_label = SeqLabelItem(
+                        bar.close,
+                        x_pos,
+                        label_y,
+                        font_pt=self._seq_label_font_pt,
+                        forming=forming,
+                    )
+                    self.addItem(seq_label)
+                    self._seq_labels.append(seq_label)
 
             # EMA20 point (skip NaN)
             ema_val = frame.indicators.ema20[i]
