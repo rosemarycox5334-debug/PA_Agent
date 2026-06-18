@@ -27,6 +27,8 @@ dependencies = [
     "baostock>=0.8",
     "curl_cffi>=0.13",
 ]
+
+[project.optional-dependencies]
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",
