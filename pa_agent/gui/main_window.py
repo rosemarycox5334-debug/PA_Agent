@@ -674,7 +674,10 @@ class MainWindow(QMainWindow):
         if settings is not None:
             interval_ms = getattr(settings.general, "refresh_interval_ms", 1000)
             n_bars = self._analysis_bar_count()
-        if self._current_data_source_kind() in ("akshare", "eastmoney") and interval_ms < 2500:
+        if (
+            self._current_data_source_kind() in ("akshare", "eastmoney", "tushare")
+            and interval_ms < 2500
+        ):
             interval_ms = 2500
 
         self._refresh_cancel_token = CancelToken()
