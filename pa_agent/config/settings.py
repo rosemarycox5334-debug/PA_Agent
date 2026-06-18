@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
-DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney"]
+DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney", "tushare"]
 NormalizationMode = Literal["strict", "lenient"]
 
 
@@ -102,6 +102,8 @@ class GeneralSettings(BaseModel):
             return "akshare"
         if v == "eastmoney":
             return "eastmoney"
+        if v == "tushare":
+            return "tushare"
         return v
 
     @field_validator("decision_flow_default_zoom_pct", mode="before")
@@ -135,6 +137,13 @@ class FeishuSettings(BaseModel):
     notify_on_order_only: bool = True
 
 
+class TushareSettings(BaseModel):
+    """Tushare Pro data source settings (persisted in ignored settings.json)."""
+    model_config = ConfigDict(extra="ignore")
+
+    token: str = ""
+
+
 class Settings(BaseModel):
     """Root settings object persisted to config/settings.json."""
     model_config = ConfigDict(extra="ignore")
@@ -144,6 +153,7 @@ class Settings(BaseModel):
     prompt: PromptSettings = Field(default_factory=PromptSettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
     feishu: FeishuSettings = Field(default_factory=FeishuSettings)
+    tushare: TushareSettings = Field(default_factory=TushareSettings)
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:

@@ -88,6 +88,28 @@ class GeneralSettingsDialog(QDialog):
 
         form_layout.addWidget(trade_group)
 
+        # ── 数据源 ────────────────────────────────────────────────────────────
+        data_group = QGroupBox("数据源")
+        data_form = QFormLayout(data_group)
+
+        tushare_token_row = QHBoxLayout()
+        self._tushare_token_edit = QLineEdit()
+        self._tushare_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._tushare_token_edit.setPlaceholderText("Tushare Pro Token")
+        self._tushare_token_edit.setToolTip(
+            "用于 Tushare(A股) 数据源。保存到本地 config/settings.json；该文件不会提交到 Git。"
+        )
+        tushare_token_row.addWidget(self._tushare_token_edit)
+
+        self._show_tushare_token_btn = QPushButton("显示")
+        self._show_tushare_token_btn.setCheckable(True)
+        self._show_tushare_token_btn.setFixedWidth(52)
+        self._show_tushare_token_btn.toggled.connect(self._toggle_tushare_token_visibility)
+        tushare_token_row.addWidget(self._show_tushare_token_btn)
+        data_form.addRow("Tushare Token:", tushare_token_row)
+
+        form_layout.addWidget(data_group)
+
         # ── 分析行为 ──────────────────────────────────────────────────────────
         analysis_group = QGroupBox("分析行为")
         analysis_form = QFormLayout(analysis_group)
@@ -220,6 +242,9 @@ class GeneralSettingsDialog(QDialog):
             bool(getattr(g, "enable_next_bar_prediction", False))
         )
         self._enable_next_bar_check.blockSignals(False)
+        self._tushare_token_edit.setText(
+            str(getattr(getattr(self._settings, "tushare", None), "token", "") or "")
+        )
 
         self._analysis_bar_count_spin.setValue(g.analysis_bar_count)
         self._incremental_max_new_bars_spin.setValue(
@@ -256,6 +281,7 @@ class GeneralSettingsDialog(QDialog):
         g.decision_stance = self._decision_stance_combo.currentData()  # type: ignore[assignment]
         g.alert_on_order_opportunity = self._alert_on_order_check.isChecked()
         g.enable_next_bar_prediction = self._enable_next_bar_check.isChecked()
+        self._settings.tushare.token = self._tushare_token_edit.text().strip()
 
         g.analysis_bar_count = self._analysis_bar_count_spin.value()
         g.incremental_max_new_bars = self._incremental_max_new_bars_spin.value()
@@ -297,6 +323,14 @@ class GeneralSettingsDialog(QDialog):
                 "下根K线预期",
                 "下根K线预期难度大，结果仅供参考。\n\nAI 预测单根K线方向的准确率有限，请勿将其作为交易依据。",
             )
+
+    def _toggle_tushare_token_visibility(self, checked: bool) -> None:
+        if checked:
+            self._tushare_token_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            self._show_tushare_token_btn.setText("隐藏")
+        else:
+            self._tushare_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._show_tushare_token_btn.setText("显示")
 
     def _on_play_decision_flow_now(self) -> None:
         g = self._settings.general

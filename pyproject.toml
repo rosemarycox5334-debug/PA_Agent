@@ -26,6 +26,7 @@ dependencies = [
     "akshare>=1.14",
     "baostock>=0.8",
     "curl_cffi>=0.13",
+    "tushare>=1.4",
 ]
 
 [project.optional-dependencies]

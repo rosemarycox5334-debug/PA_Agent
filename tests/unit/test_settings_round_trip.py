@@ -82,6 +82,20 @@ def test_feishu_round_trip(tmp_path):
     assert loaded.feishu.app_id == "cli_test"
 
 
+def test_tushare_round_trip(tmp_path):
+    """save/load preserves the locally configured Tushare token."""
+    p = tmp_path / "settings.json"
+    original = Settings()
+    original.tushare.token = "ts-test-token"
+    save_settings(original, p)
+
+    loaded = load_settings(p)
+
+    assert loaded.tushare.token == "ts-test-token"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["tushare"]["token"] == "ts-test-token"
+
+
 def test_migrate_legacy_feishu_json(tmp_path):
     """Legacy config/feishu.json is merged into settings.json on load."""
     p = tmp_path / "settings.json"
