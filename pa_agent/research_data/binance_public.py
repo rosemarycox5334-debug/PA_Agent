@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
 class PublicEndpointError(ValueError):
     pass
+
+
+class PublicTransportError(PublicEndpointError):
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 PUBLIC_BASE_URL = "https://fapi.binance.com"
@@ -69,7 +76,14 @@ class BinancePublicClient:
             url = f"{url}?{query}"
         try:
             payload = json.loads(self._transport(url, self._timeout))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except HTTPError as exc:
+            raise PublicTransportError(
+                f"Binance public HTTP error: {exc.code}",
+                retryable=exc.code == 429 or exc.code >= 500,
+            ) from exc
+        except (URLError, OSError) as exc:
+            raise PublicTransportError("Binance public transport error", retryable=True) from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PublicEndpointError("Invalid public endpoint response") from exc
         if not isinstance(payload, (dict, list)):
             raise PublicEndpointError("Public endpoint response must be a JSON object or array")

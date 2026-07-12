@@ -1,3 +1,4 @@
+from pa_agent.research_data.binance_public import PublicTransportError
 from pa_agent.research_data.downloader import DatasetDownloader
 from pa_agent.research_data.storage import AtomicDatasetStore
 
@@ -79,3 +80,65 @@ def test_fresh_download_stops_on_short_page_and_is_sorted(tmp_path):
 
     assert [row[0] for row in result.records] == [0, 60_000, 120_000]
     assert result.resumed is False
+
+
+def test_retryable_public_errors_use_bounded_exponential_backoff(tmp_path):
+    class Client:
+        def __init__(self):
+            self.attempts = 0
+
+        def get_json(self, _path, _params):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise PublicTransportError("rate limited", retryable=True)
+            return [[0]]
+
+    sleeps = []
+    client = Client()
+    result = DatasetDownloader(
+        client,
+        AtomicDatasetStore(tmp_path),
+        clock_ms=lambda: 1,
+        sleep=sleeps.append,
+        max_retries=3,
+        base_delay_seconds=0.5,
+    ).download_pages(
+        dataset_name="retry",
+        path="/fapi/v1/klines",
+        params={},
+        start_time_ms=0,
+        end_time_ms=0,
+        limit=1,
+        timestamp_extractor=lambda row: int(row[0]),
+    )
+
+    assert client.attempts == 3
+    assert sleeps == [0.5, 1.0]
+    assert result.manifest["pages"][0]["retry_count"] == 2
+
+
+def test_nonretryable_public_error_is_not_retried(tmp_path):
+    class Client:
+        def get_json(self, _path, _params):
+            raise PublicTransportError("bad request", retryable=False)
+
+    sleeps = []
+    downloader = DatasetDownloader(
+        Client(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 1, sleep=sleeps.append
+    )
+
+    try:
+        downloader.download_pages(
+            dataset_name="no_retry",
+            path="/fapi/v1/klines",
+            params={},
+            start_time_ms=0,
+            end_time_ms=0,
+            limit=1,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+    except PublicTransportError as exc:
+        assert str(exc) == "bad request"
+    else:
+        raise AssertionError("expected non-retryable error")
+    assert sleeps == []

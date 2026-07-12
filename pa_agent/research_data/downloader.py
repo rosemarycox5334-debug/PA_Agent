@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from time import sleep as system_sleep
 from typing import Any, Protocol
 
+from pa_agent.research_data.binance_public import PublicTransportError
 from pa_agent.research_data.hashing import acquisition_manifest_hash
 from pa_agent.research_data.storage import AtomicDatasetStore
 
@@ -28,10 +30,29 @@ class DatasetDownloader:
         store: AtomicDatasetStore,
         *,
         clock_ms: Callable[[], int],
+        sleep: Callable[[float], None] = system_sleep,
+        max_retries: int = 3,
+        base_delay_seconds: float = 0.5,
     ) -> None:
+        if max_retries < 0 or base_delay_seconds < 0:
+            raise ValueError("Retry settings must be non-negative")
         self._client = client
         self._store = store
         self._clock_ms = clock_ms
+        self._sleep = sleep
+        self._max_retries = max_retries
+        self._base_delay_seconds = base_delay_seconds
+
+    def _get_page(self, path: str, params: Mapping[str, Any]) -> tuple[dict[str, Any] | list[Any], int]:
+        retry_count = 0
+        while True:
+            try:
+                return self._client.get_json(path, params), retry_count
+            except PublicTransportError as exc:
+                if not exc.retryable or retry_count >= self._max_retries:
+                    raise
+                self._sleep(self._base_delay_seconds * (2**retry_count))
+                retry_count += 1
 
     def download_pages(
         self,
@@ -65,7 +86,7 @@ class DatasetDownloader:
             request_params.update(
                 {"endTime": end_time_ms, "limit": limit, "startTime": current_start}
             )
-            payload = self._client.get_json(path, request_params)
+            payload, retry_count = self._get_page(path, request_params)
             if not isinstance(payload, list):
                 raise TypeError("Paginated endpoint must return a list")
             downloaded_at = self._clock_ms()
@@ -74,6 +95,7 @@ class DatasetDownloader:
                 "page_index": page_index,
                 "path": path,
                 "request": request_params,
+                "retry_count": retry_count,
                 "row_count": len(payload),
             }
             self._store.write_raw_page(
