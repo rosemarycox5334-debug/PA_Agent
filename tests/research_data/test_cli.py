@@ -1,4 +1,7 @@
 
+import subprocess
+import sys
+
 from pa_agent.research_data.cli import run_first_batch
 
 MINUTE_MS = 60_000
@@ -46,9 +49,13 @@ def native_rows(count):
 
 
 class FakeBinanceClient:
+    def __init__(self, exchange_nonce=0):
+        self.exchange_nonce = exchange_nonce
+
     def get_json(self, path, params):
         if path == "/fapi/v1/exchangeInfo":
             return {
+                "serverTime": self.exchange_nonce,
                 "symbols": [
                     {
                         "symbol": symbol,
@@ -107,17 +114,37 @@ def test_first_batch_orchestration_writes_data_and_validates_native_periods(tmp_
 
 def test_same_content_has_same_dataset_hash_but_different_acquisition_hash(tmp_path):
     common = {
-        "client": FakeBinanceClient(),
         "symbols": ("BTCUSDT", "ETHUSDT"),
         "start_time_ms": 0,
         "end_time_ms": DAY_MS - 1,
         "page_limit": 2_000,
         "include_index": False,
     }
-    first = run_first_batch(output_dir=tmp_path / "first", clock_ms=lambda: 1, **common)
-    second = run_first_batch(output_dir=tmp_path / "second", clock_ms=lambda: 2, **common)
+    first = run_first_batch(
+        client=FakeBinanceClient(exchange_nonce=1),
+        output_dir=tmp_path / "first",
+        clock_ms=lambda: 1,
+        **common,
+    )
+    second = run_first_batch(
+        client=FakeBinanceClient(exchange_nonce=2),
+        output_dir=tmp_path / "second",
+        clock_ms=lambda: 2,
+        **common,
+    )
 
     assert first["dataset_content_hash"] == second["dataset_content_hash"]
     assert first["acquisition_manifest_hash"] != second["acquisition_manifest_hash"]
     assert first["acquisition_run_id"] != second["acquisition_run_id"]
 
+
+def test_wrapper_script_can_import_package_from_repo_root():
+    result = subprocess.run(
+        [sys.executable, "scripts/download_binance_research.py", "--help"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Download public Binance research data" in result.stdout

@@ -303,7 +303,11 @@ def run_first_batch(
         key_fields=("symbol",),
     )
     contract_content_records = [
-        {key: value for key, value in record.items() if key != "acquired_at_utc_ms"}
+        {
+            key: value
+            for key, value in record.items()
+            if key not in {"acquired_at_utc_ms", "source_hash"}
+        }
         for record in contract_dicts
     ]
     contract_content_hash = dataset_content_hash(
