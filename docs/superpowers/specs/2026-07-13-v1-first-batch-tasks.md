@@ -29,7 +29,8 @@
 - [ ] 定义成交 K 线、标记价格 K 线、审计指数 K 线、资金费率和 raw page Schema。
 - [ ] 定义 `contract_rule_version`，含来源、哈希、有效期、审核状态和 `CURRENT_SNAPSHOT_ONLY`。
 - [ ] 定义未来使用的 lifecycle 结构外壳：StrategyCandidate、ExecutionPlan、FillEvent、ValidationFailure、ExecutionRejection；不实现业务逻辑。
-- [ ] Candidate Schema 禁止 stop、TP、quantity 和 fill-dependent cost 字段。
+- [ ] Candidate Schema 禁止 stop、TP、quantity、fill-dependent cost、contract rule 和 maintenance margin 字段。
+- [ ] ExecutionPlan Schema 才允许 contract rule 与 maintenance margin 版本；定义 `CONTRACT_RULE_UNAVAILABLE` 拒绝原因，但不实现业务逻辑。
 - [ ] 区分 market reason、validation failure 和 execution reject reason。
 - [ ] 为 Schema 增加不可变性、枚举、序列化和非法字段测试。
 
@@ -37,7 +38,8 @@
 
 - [ ] 实现 UTF-8、键排序、无空白、UTC int64、Decimal 字符串、负零规范和主键排序。
 - [ ] 实现独立 `dataset_content_hash`。
-- [ ] 实现独立 `acquisition_manifest_hash`，包含 content hash、请求页、时间、重试、断点和采集器版本。
+- [ ] 实现独立 `acquisition_manifest_hash` 与 `acquisition_run_id`，包含 content hash、请求页、时间、重试、断点和采集器版本。
+- [ ] 定义 `computational_experiment_id` 纯函数，只接受 content hash、样本区间、策略/执行/成本版本、代码和依赖版本；明确拒绝 acquisition 字段。
 - [ ] 测试同内容不同分页/下载时间产生相同 content hash、不同 acquisition hash。
 - [ ] 测试字段顺序、Decimal 表示、CRLF/LF 和运行平台不改变 Canonical content hash。
 
@@ -55,8 +57,8 @@
 
 - [ ] 校验 UTC、K 线闭合、时间单调、主键唯一、OHLC 约束、重复和断档。
 - [ ] 将成交 1m 聚合为 4H/1D，与原生 4H/1D 逐根交叉验证。
-- [ ] 校验 OHLC 精确一致、volume/quote volume Decimal 容差和 UTC 周期边界。
-- [ ] 对成交或标记关键流缺失输出机器可读 fail-closed 结果。
+- [ ] 实现版本 `AGG_VALIDATION_V1`：四个 volume 字段使用文档冻结的绝对/相对 Decimal 容差 OR 规则；trade_count 精确求和；OHLC/UTC 精确一致。
+- [ ] 分别输出 `trade_gap_intervals`、`mark_gap_intervals`、`funding_gap_intervals`、`index_gap_intervals` 和独立状态，不在数据层判定整个实验 INVALID。
 - [ ] 对指数价缺失只输出审计告警，不使必需数据集失败。
 - [ ] 校验 contract rule 的有效期覆盖语义；当前快照不能通过历史覆盖测试。
 - [ ] 对 schema 变化、未知字段语义和无法解析的 Decimal fail closed。
@@ -65,9 +67,9 @@
 
 - [ ] 分页在任意页中断后恢复，结果无重复、无缺口且 content hash 不变。
 - [ ] 边界重叠、空页、乱序页、重复页和响应重试测试。
-- [ ] 未收盘 K 线、分钟缺口、标记价缺口、原生周期不一致和成交量超容差测试。
+- [ ] 未收盘 K 线、各流分钟缺口、原生周期不一致、四类 volume 容差边界和 trade_count 不一致测试。
 - [ ] 资金费下载的起止边界、重复时刻、缺失区间和结算标记价缺失测试；本批只验证数据，不做结算。
-- [ ] 数据流缺失测试：成交/标记为阻断，指数为审计告警。
+- [ ] 数据流缺失测试：四类缺口均独立记录；第一批不依据持仓上下文判定路径或实验失败。
 - [ ] contract_rule_version 来源、哈希、有效期和 CURRENT_SNAPSHOT_ONLY 测试。
 - [ ] 两次独立下载产生相同 Canonical content 与 content hash。
 - [ ] acquisition manifest 能区分不同下载过程。
@@ -78,7 +80,7 @@
 
 - 上述任务及测试全部通过。
 - 指定小区间可以中断恢复并生成稳定双哈希。
-- 1m 聚合与原生 4H/1D 交叉验证，任何关键不一致 fail closed。
+- 1m 聚合与原生 4H/1D 按 `AGG_VALIDATION_V1` 交叉验证；不一致以验证结果报告，不生成可交易数据。
 - 当前 contract rule 明确只代表当前快照，不被用于历史回测。
 - 未配置云雾 Key、Binance Key 或任何私钥时可完整运行。
 - 没有策略、仓位、事件引擎、回测、GUI 或 LLM 代码。
