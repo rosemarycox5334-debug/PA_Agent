@@ -1,205 +1,196 @@
 # BTC_ETH_PA_STRATEGY_V1 确定性规则规范
 
-版本：1.0.0-draft
+版本：1.0.0-draft.2
 日期：2026-07-13
-状态：待用户书面冻结；冻结前不得开始策略代码
+状态：未冻结；不得开始策略、仓位或回测代码
 
-## 1. 目的
+## 1. 规则边界
 
-本规范完整定义 BTCUSDT、ETHUSDT 永续合约 V1 的确定性 `LONG`、`SHORT`、`NO_TRADE`、入场、止损、止盈、失效、仓位和时间退出规则。任何 LLM 输出都不是本策略的输入。
+本规范定义 `BTCUSDT`、`ETHUSDT` 永续合约的市场 Candidate、执行计划、退出和失效规则。任何 LLM 输出都不是输入。
 
-## 2. 市场与周期
+交易生命周期严格分为：
 
-- 市场：Binance USDⓈ-M `BTCUSDT`、`ETHUSDT` 永续。
-- 方向：允许 LONG 和 SHORT。
-- 信号周期：成交价格 4H。
-- 趋势过滤：成交价格 1D。
-- 撮合与路径判断：成交价格 1m；估算爆仓使用标记价格 1m。
-- 仅使用通过原生周期交叉验证的已收盘 K 线。
-- 所有周期边界使用 UTC。
+1. `StrategyCandidate`：4H 收盘后的市场结论。
+2. `ExecutionPlan`：到达下一执行时刻后，基于当时可见成交价计算 stop、TP、quantity、费用和保证金。
+3. `FillEvent`：不可变的模拟实际成交。
 
-## 3. 指标定义
+Candidate 阶段禁止预写依赖下一开盘成交价的 stop、TP、quantity、手续费或保证金。
 
-指标以 `float64` 计算，输入必须按时间升序且无无效值。指标结果进入交易边界时转换为 Decimal 并按交易规则量化。
+## 2. 市场、数据与时间
 
-### 3.1 1D 趋势过滤
+- Binance USDⓈ-M `BTCUSDT`、`ETHUSDT` 永续，允许 LONG/SHORT。
+- 4H 成交价生成 Candidate；最近已收盘 1D 成交价做趋势过滤。
+- 1m 成交价用于执行和保护性退出；1m 标记价只用于估算爆仓。
+- 指数价格仅供审计，不参与 V1 计算，缺失不阻断路径。
+- 信号只使用通过 1m 聚合与原生 4H/1D 交叉验证的已收盘数据。
+- 所有时间为 UTC。
+- 持仓期间关键 1m 成交价或标记价缺失时，对应路径立即 `INVALID` 并终止。
 
-- `EMA50_D`：1D close 的 50 期指数移动平均，`adjust=False`。
-- `EMA200_D`：1D close 的 200 期指数移动平均，`adjust=False`。
-- 在 4H 决策时刻，只能使用 `close_time <= decision_time` 的最近已收盘 1D。
+## 3. 指标的精确定义
 
-趋势状态：
+### 3.1 Pre-roll
 
-- `BULL`: `close_D > EMA200_D` 且 `EMA50_D > EMA200_D`。
-- `BEAR`: `close_D < EMA200_D` 且 `EMA50_D < EMA200_D`。
-- 其他情况：`NEUTRAL`。
+指标从规范数据集中该合约最早的连续有效 K 线开始递推，跨训练、验证和锁定 OOS 边界保持连续，不在区间边界重新播种。研究区间开始前至少有 250 根有效 1D 和 100 根有效 4H；不足时不生成 Candidate，并记录 `PRE_ROLL_INSUFFICIENT` ValidationFailure。
 
-至少需要 250 根有效 1D 作为预热。预热不足时 `NO_TRADE`。
+### 3.2 EMA
 
-### 3.2 4H 突破与波动
+- `EMA50_D` 与 `EMA200_D` 使用 close。
+- `alpha=2/(N+1)`、`adjust=False`、`min_periods=N`。
+- 第一根有效 close 是递推内部种子：`ema_1=close_1`；随后 `ema_t=alpha*close_t+(1-alpha)*ema_(t-1)`。
+- 前 `N-1` 项即使有内部递推值，也对策略视为无效。
 
-- `DONCHIAN_HIGH_20_PREV`: 当前信号 K 线之前 20 根已收盘 4H 的最高价最大值，不含当前 K 线。
-- `DONCHIAN_LOW_20_PREV`: 当前信号 K 线之前 20 根已收盘 4H 的最低价最小值，不含当前 K 线。
-- `ATR14_4H`: True Range 的 14 期 Wilder 平滑，`alpha=1/14`、`adjust=False`。
+### 3.3 ATR14
 
-至少需要 100 根有效 4H 作为预热。`ATR14_4H <= 0` 或非有限值时 `NO_TRADE`。
+True Range：
 
-## 4. 决策规则
+- 第一根：`TR_1=high_1-low_1`。
+- 后续：`max(high-low, abs(high-prev_close), abs(low-prev_close))`。
+- 第 14 根的首个有效 ATR 是前 14 个 TR 的算术平均。
+- 此后 `ATR_t=(ATR_(t-1)*13+TR_t)/14`。
+- `min_periods=14`；ATR 非有限或不大于零时 ValidationFailure。
 
-每根有效 4H 收盘后，每个无持仓品种最多生成一个决策。
+### 3.4 Donchian 20
 
-### 4.1 LONG
+- `DONCHIAN_HIGH_20_PREV=max(high[t-20:t-1])`。
+- `DONCHIAN_LOW_20_PREV=min(low[t-20:t-1])`。
+- 不含当前 4H；至少第 21 根才有效。
+- Donchian 源自 Decimal OHLC，不先转 float。
 
-同时满足：
+### 3.5 舍入与比较
 
-1. 1D 趋势为 `BULL`。
-2. 当前 4H `close > DONCHIAN_HIGH_20_PREV`。
-3. 品种当前没有仓位或待执行信号。
-4. 组合未处于回撤暂停。
-5. 数据、规则、费用、滑点、估算爆仓和维持保证金版本全部有效。
+- 指标内部不舍入，使用锁定 numpy/pandas 版本的 IEEE-754 float64。
+- 决策边界把 EMA/ATR 以 round-half-even 规范为 15 位有效数字的 Decimal。
+- ATR 形成价格距离前再按上述规则转换；最终交易价格按 tick_size 量化。
+- EMA 与 close、EMA 与 EMA 使用规范 Decimal 严格 `>`/`<`；相等为 NEUTRAL。
+- 4H close 与 Donchian 使用原始 Decimal 严格 `>`/`<`；相等不突破。
+- 指标实现版本、numpy/pandas 版本和转换规则进入配置/代码哈希。
 
-满足时生成 `LONG`，否则继续检查 SHORT。
+## 4. StrategyCandidate 市场规则
 
-### 4.2 SHORT
+### 4.1 1D 状态
 
-同时满足：
+- `BULL`：`close_D > EMA200_D` 且 `EMA50_D > EMA200_D`。
+- `BEAR`：`close_D < EMA200_D` 且 `EMA50_D < EMA200_D`。
+- 否则 `NEUTRAL`。
 
-1. 1D 趋势为 `BEAR`。
-2. 当前 4H `close < DONCHIAN_LOW_20_PREV`。
-3. 品种当前没有仓位或待执行信号。
-4. 组合未处于回撤暂停。
-5. 数据、规则、费用、滑点、估算爆仓和维持保证金版本全部有效。
+在 4H decision time 只能使用 `close_time <= decision_time` 的最近已收盘 1D。
 
-满足时生成 `SHORT`。
+### 4.2 LONG Candidate
 
-### 4.3 NO_TRADE
+有效数据下，1D 为 BULL 且当前 4H `close > DONCHIAN_HIGH_20_PREV`，产生 `market_view=LONG`。
 
-未满足 LONG/SHORT，或发生任一 fail-closed 条件时生成 `NO_TRADE`。必须记录原因，不能只返回空值。
+### 4.3 SHORT Candidate
 
-主要原因：
+有效数据下，1D 为 BEAR 且当前 4H `close < DONCHIAN_LOW_20_PREV`，产生 `market_view=SHORT`。
 
-- `TREND_NEUTRAL`
-- `NO_BREAKOUT`
-- `WARMUP_INSUFFICIENT`
-- `DATA_INVALID`
-- `NATIVE_BAR_MISMATCH`
-- `CONFIG_HASH_MISMATCH`
-- `MODEL_VERSION_EXPIRED`
-- `EXISTING_POSITION`
-- `PENDING_SIGNAL_EXISTS`
-- `DRAWDOWN_PAUSE`
+### 4.4 NO_TRADE Candidate
 
-LONG 与 SHORT 条件在正常数据下互斥；若因异常数据同时为真，必须 `NO_TRADE/DATA_INVALID`。
+有效数据下不满足 LONG/SHORT 时产生 `NO_TRADE`，市场原因仅限 `TREND_NEUTRAL`、`NO_BREAKOUT`、`BREAKOUT_AGAINST_TREND`。
 
-## 5. 入场规则
+数据/pre-roll/版本错误生成 `ValidationFailure`，不生成 NO_TRADE。已有仓位、HALTED、风险、资金、数量和保证金问题由执行/风险层拒绝，不改变 Candidate 的市场结论。
 
-- `order_type = MARKET_NEXT_4H_OPEN`。
-- 信号在当前 4H 收盘后创建，`eligible_from` 为下一根 4H 的 UTC 开盘。
-- 信号当根禁止成交。
-- 只在 `eligible_from` 对应的第一个有效 1m 成交价开盘处理一次；不存在有效开盘则取消 `DATA_GAP_AT_ENTRY`，不得顺延追单。
-- LONG 成交价 = 1m open 加版本化不利滑点；SHORT 成交价 = 1m open 减版本化不利滑点。
-- 若 LONG 的未加滑点开盘价高于决策 4H close `0.5 * ATR14_4H` 以上，或 SHORT 低于决策 close `0.5 * ATR14_4H` 以上，取消 `GAP_TOO_LARGE`。
-- 成交按 `tick_size` 向不利方向量化。
+### 4.5 Candidate 内容
 
-`valid_until` 等于 `eligible_from` 对应 1m 时间片结束。未在该时间片成交即 `EXPIRED`。
+Candidate 保存方向、市场原因、decision time、下一 4H open、冻结 ATR、决策 close、趋势/突破阈值、数据/配置/代码/指标/contract rule 版本和哈希。不得保存 stop、TP、quantity 或 fill-dependent cost。
 
-## 6. 止损与止盈
+## 5. 版本化执行延迟与 ExecutionPlan
 
-ATR 在信号决策时冻结，入场后不移动止损和止盈。
+- `EXEC_DELAY_V1` 基准为下一 4H UTC open 后 1 分钟的 1m open。
+- 压力实验固定测试 0、1、2 分钟，每个值产生不同执行版本和实验 ID。
+- 目标分钟缺失时路径 INVALID，不顺延。
+- 到达目标分钟后读取参考成交价 `P0`，先执行 gap 过滤，再计算 fill、stop、TP 和 quantity。
 
-### 6.1 LONG
+Gap 过滤：LONG 若 `P0 > decision_close+0.5*ATR`，SHORT 若 `P0 < decision_close-0.5*ATR`，ExecutionPlan 拒绝 `GAP_TOO_LARGE`。
 
-- 原始止损：`fill_price - 2.0 * ATR14_4H`。
-- 止损按 tick 向上量化，确保量化不会扩大计划亏损。
-- 原始止盈：`fill_price + 3.0 * ATR14_4H`。
-- 止盈按 tick 向下量化，采用保守可成交价格。
+## 6. 冻结的 V1 成本模型
 
-### 6.2 SHORT
+- `FEE_V1_ASSUMED_TAKER_5BP`：每次 fill 的 taker fee rate `f=0.0005`。
+- `SLIPPAGE_V1_BASE`：BTC 单边 `0.0001`，ETH 单边 `0.0002`。
+- `FUNDING_BUFFER_V1_1BP_X6`：仓位 sizing 每次预留 `0.0001`，48 小时最多 6 次。
+- 压力实验把 fee/slippage 同时乘 `1.5`、`2.0`；真实账本资金费仍使用历史真实值。
 
-- 原始止损：`fill_price + 2.0 * ATR14_4H`。
-- 止损按 tick 向下量化，确保量化不会扩大计划亏损。
-- 原始止盈：`fill_price - 3.0 * ATR14_4H`。
-- 止盈按 tick 向上量化，采用保守可成交价格。
+这些是版本化研究假设，不代表所有历史账户费率或真实市场冲击。
 
-止损、止盈均由合约成交价格触发并按版本化不利滑点成交。估算爆仓只由标记价格触发。
+令 `q>0`：
 
-## 7. 仓位规则
+- LONG entry fill：`quantize_up(P0*(1+s), tick)`。
+- SHORT entry fill：`quantize_down(P0*(1-s), tick)`。
+- LONG stop trigger：`quantize_up(entry_fill-2*ATR, tick)`。
+- SHORT stop trigger：`quantize_down(entry_fill+2*ATR, tick)`。
+- LONG TP trigger：`quantize_down(entry_fill+3*ATR, tick)`。
+- SHORT TP trigger：`quantize_up(entry_fill-3*ATR, tick)`。
+- LONG stop fill estimate：`quantize_down(stop_trigger*(1-s), tick)`。
+- SHORT stop fill estimate：`quantize_up(stop_trigger*(1+s), tick)`。
+- fill fee：`abs(q*fill_price)*f`。
+- 资金费现金变化：`-side_sign*q*mark_price*funding_rate`，LONG `side_sign=+1`、SHORT `-1`。
 
-- V1 默认杠杆固定为 1。
-- 每笔最大计划损失为入场前组合权益的 0.5%。
-- 单位风险包括 `abs(fill_price - stop_price)`、预计开平仓手续费和基准滑点缓冲。
-- 原始数量 = `risk_budget / unit_risk`。
-- 数量按 `step_size` 向下量化。
-- 量化后重新计算名义价值、保证金、费用和最坏计划损失。
-- 若超过单笔 0.5%、组合开放风险 1%、可用资金或逐仓保证金约束，继续缩量；无法得到合法数量则取消。
-- 低于最小数量或最小名义价值则取消，不允许向上取整。
-- 每品种最多一个仓位，不加仓、不摊平、不对冲。
+entry/exit fill 已包含相应滑点。不得再从 PnL、费用或 unit_risk 重复扣除该滑点；审计滑点金额为 `abs(fill-P0)*q`。
 
-BTC 和 ETH 同一时刻都有信号时，先处理 `BTCUSDT`，再处理 `ETHUSDT`；ETH 只能使用剩余风险和可用资金。
+## 7. unit_risk、仓位与保证金
 
-## 8. 持仓失效与退出
+每单位：
 
-退出优先级由事件引擎统一执行：开盘估算爆仓、开盘跳空止损、分钟内路径规则、止盈、确定性时间/趋势退出。
+```text
+price_loss = abs(entry_fill-stop_fill_estimate)
+entry_fee = entry_fill*f
+exit_fee = stop_fill_estimate*f
+funding_buffer = entry_fill*0.0001*6
+unit_risk = price_loss+entry_fee+exit_fee+funding_buffer
+risk_budget = pre_entry_equity*0.005
+raw_quantity = risk_budget/unit_risk
+```
 
-### 8.1 保护性退出
+数量按有效 contract rule 的 step_size 向下量化，之后重新计算风险、名义价值和 required cash；不得向上取整满足最小数量。
 
-- 止损：触达固定 stop 后退出全部仓位。
-- 止盈：触达固定 TP 后退出全部仓位。
-- 不做分批止盈，不移动到保本，不使用追踪止损。
+1 倍逐仓：
 
-### 8.2 趋势失效退出
+```text
+initial_margin = abs(q*entry_fill)
+entry_fee_cash = abs(q*entry_fill)*f
+exit_fee_reserve = abs(q*stop_fill_estimate)*f
+funding_reserve = q*entry_fill*0.0001*6
+required_cash = initial_margin+entry_fee_cash+exit_fee_reserve+funding_reserve
+```
 
-在每根 4H 收盘后：
+单笔风险上限 0.5%，组合开放风险上限 1%。真实资金费逐次记账，剩余 funding reserve 平仓释放。估算维持保证金按有效版本 `notional*mmr-cumulative_deduction`；版本不覆盖当时则路径 INVALID。
 
-- LONG 若最近已收盘 1D 不再是 `BULL`，生成全平信号，在下一根 4H 第一个有效 1m 开盘退出。
-- SHORT 若最近已收盘 1D 不再是 `BEAR`，同样在下一根 4H 开盘退出。
+同一执行时刻 BTC/ETH 先独立计算，再按：
 
-若下一开盘缺失，保持保护性止损和估算爆仓检查，并在第一个恢复的有效 1m 开盘执行趋势退出，同时记录 `DELAYED_EXIT_DATA_GAP`。该延迟必须出现在数据质量报告中。
+```text
+scale=min(1, remaining_risk/sum_planned_risk,
+            available_cash/sum_required_cash)
+```
 
-### 8.3 时间退出
+共同等比例缩量，按各自 step 向下量化并复核。输入顺序不得影响结果。
 
-- 最大持有期为 12 根完整 4H K 线。
-- 入场所在 4H 不计为第一根完整持有 K 线。
-- 第 12 根完整持有 K 线收盘后仍未退出，则在下一根 4H 第一个有效 1m 开盘全平。
-- 数据缺失处理与趋势失效退出相同。
+`EXISTING_POSITION`、`HALTED`、风险、资金、最小数量等产生 ExecutionPlan rejection，不产生 NO_TRADE。
 
-若趋势失效和时间退出同时发生，使用原因 `TREND_AND_TIME_EXIT`，只生成一次退出。
+## 8. FillEvent 与退出
 
-### 8.4 反向信号
+FillEvent 保存未加滑点参考价、最终 fill、滑点金额、数量、手续费、时间、计划 ID、路径和原因，写入后不可变。
 
-持仓期间不评估反向入场，不直接反手。仓位退出后，最早从下一根完整 4H 收盘重新评估新信号。
+- 固定 stop/TP，全部退出；不分批、不移动保本、不追踪、不加仓、不反手。
+- LONG 的 1D 状态不再 BULL、SHORT 不再 BEAR 时，在下一版本化执行时刻退出。
+- 最大持有期固定为从入场 FillEvent 时间起精确 48 小时。
+- 在首个 `timestamp >= fill_time+48h` 的有效 1m open 全平；不采用“入场后 12 根完整 4H”。
+- 持仓期间关键成交/标记 1m 缺失，路径立即 INVALID，不延迟退出。
+- 退出后最早从下一根完整 4H 收盘重新评估。
 
-## 9. 取消规则
+## 9. 第二批事件与终态规则
 
-入场前发生以下任一条件必须取消：
+资金费、撮合、PATH_AMBIGUOUS、估算爆仓、保证金和账本属于第二批；本规范确认不代表授权实现。
 
-- 数据或交叉验证失效。
-- 数据、配置、代码或模型版本哈希变化。
-- 下一 4H 开盘数据缺失。
-- 开盘追价超过 `0.5 * ATR14_4H`。
-- 回撤暂停。
-- 单笔或组合风险限制。
-- 可用资金或逐仓保证金不足。
-- 数量/名义价值低于交易规则。
-- 品种已有仓位或待执行信号。
-- 维持保证金版本不覆盖该回测时刻。
+- 标记价开盘已越过估算爆仓线时两条路径均先估算爆仓。
+- 同分钟 stop 与估算爆仓均可能触发且开盘均未触发：记录 PATH_AMBIGUOUS；baseline stop 优先，conservative 估算爆仓优先。
+- 同分钟 stop 与 TP 均触发：两条路径 stop 优先。
+- 资金费时刻前已有仓位先结算，同刻退出在后，同刻新入场不参与该次资金费。
+- 关键资金费记录或结算标记价缺失：路径 INVALID，不按零处理。
+- 回撤达到 10%：触发 HALT，取消 Candidate/Plan，下一有效 1m open 执行 HALT_EXIT；关键数据缺失则 INVALID，否则退出后终态 HALTED。
+- HALTED 后不延长现金曲线，指标只计算至 terminal time 并标记删失。
 
-取消后不顺延、不重试、不在同一根 4H 重新生成信号。
+## 10. 合约规则与确定性
 
-## 10. 路径歧义
-
-同一 1m 内若成交价触发止损且标记价触发估算爆仓，但开盘均未触发，则标记 `PATH_AMBIGUOUS` 并运行：
-
-- `baseline`：保护性止损优先。
-- `conservative`：估算爆仓优先。
-
-同一 1m 内止损和止盈同时触发时，两条路径都按止损优先。标记价开盘已越过估算爆仓线时，两条路径都先估算爆仓。
-
-资金费时刻之前已经持有的仓位先结算资金费，再处理同刻退出；同刻新入场在结算之后发生，不参与该次资金费。资金费率或结算标记价格缺失时 fail closed，不允许回填为零。
-
-## 11. 确定性与变更控制
-
-- 策略不读取 LLM、新闻、未来数据、随机数或系统本地时区。
-- 所有参数均来自带哈希的版本化配置。
-- 相同数据、配置、代码和模型版本必须产生逐字节一致的信号序列。
-- 修改本规范任何交易规则都必须提升 `strategy_version` 并创建新实验，不得覆盖旧结果。
+- 每个交易边界必须有覆盖当时的 `contract_rule_version`；当前 exchangeInfo 快照不得静默回填历史。
+- 价格/数量/费用/保证金/账本用 Decimal；指标内部可用 float64。
+- 相同 dataset content、配置、代码、依赖、执行、成本、contract rule 和模型版本必须产生逐字节一致结果。
+- 修改任一规则必须提升版本并创建新实验。

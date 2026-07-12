@@ -1,71 +1,88 @@
-# V1 第一批任务清单
+# V1 第一批任务清单：数据与验证
 
 日期：2026-07-13
-状态：待设计与策略规范书面确认后转为实施计划
+状态：待修订设计书面确认后实施
 
-## 范围约束
+## 范围硬边界
 
-本批只做数据、Schema、验证、确定性规则与测试。不接 GUI，不接 LLM，不做实时模拟循环，不实现交易所鉴权或交易操作。
+第一批只实现公共数据下载、规范化、版本、Canonical 序列化、双哈希与数据验证。
 
-## A. 项目与安全基线
+可以定义纯数据 Schema，但不得实现：
 
-- [ ] 建立研究包目录和依赖边界。
-- [ ] 增加 Binance 只读 HTTP 客户端接口；仅允许 `GET` 和公开市场数据路径。
-- [ ] 增加静态测试，禁止交易端点、签名参数、API secret 和 `create_order`。
-- [ ] 增加依赖锁定、UTC、Decimal 和日志规范。
+- StrategyCandidate 生成规则或指标计算
+- ExecutionPlan、仓位 sizing 或风险拒绝
+- FillEvent 产生、撮合、资金费结算、保证金、估算爆仓或 PATH_AMBIGUOUS
+- 账户账本、组合回撤或回测绩效
+- GUI、LLM、交易所鉴权和任何交易接口
 
-## B. Schema 与版本
+资金费边界、路径歧义、估算爆仓和撮合测试全部移动到待单独批准的第二批。
 
-- [ ] 定义 K 线、资金费率、合约规则和数据 manifest Schema。
-- [ ] 定义信号、取消、订单意图、持仓意图和退出 Schema。
-- [ ] 定义费用、滑点、估算爆仓和维持保证金版本 Schema。
-- [ ] 定义数据/配置/代码哈希及实验 ID 生成规则。
-- [ ] 为 Schema 增加序列化、枚举和不可变性测试。
+## A. 安全与项目基线
 
-## C. Binance 公共数据
+- [ ] 建立独立研究数据包及模块边界。
+- [ ] Binance HTTP 客户端只允许公开市场数据域名、`GET` 和 allowlist 路径。
+- [ ] 静态和运行时守卫禁止签名参数、API secret、账户/交易路径、POST/PUT/DELETE 和 `create_order`。
+- [ ] 锁定 UTC、Decimal、Canonical JSON、哈希和依赖版本。
 
-- [ ] 下载 BTCUSDT、ETHUSDT 成交 1m、原生 4H、原生 1D K 线。
-- [ ] 下载 1m 标记价格和 1m 指数价格 K 线。
-- [ ] 下载真实历史资金费率。
-- [ ] 下载公开 exchange information 并规范 tick/step/minimum filters。
-- [ ] 实现分页、限速、退避、断点恢复、重叠页去重和原子提交。
-- [ ] 保存 raw page hash、规范数据 hash 和完整 manifest。
+## B. 数据 Schema
 
-## D. 数据验证
+- [ ] 定义成交 K 线、标记价格 K 线、审计指数 K 线、资金费率和 raw page Schema。
+- [ ] 定义 `contract_rule_version`，含来源、哈希、有效期、审核状态和 `CURRENT_SNAPSHOT_ONLY`。
+- [ ] 定义未来使用的 lifecycle 结构外壳：StrategyCandidate、ExecutionPlan、FillEvent、ValidationFailure、ExecutionRejection；不实现业务逻辑。
+- [ ] Candidate Schema 禁止 stop、TP、quantity 和 fill-dependent cost 字段。
+- [ ] 区分 market reason、validation failure 和 execution reject reason。
+- [ ] 为 Schema 增加不可变性、枚举、序列化和非法字段测试。
 
-- [ ] 校验 UTC 周期边界、闭合状态、OHLC 约束、重复和断档。
-- [ ] 将 1m 聚合为 4H/1D，与 Binance 原生 4H/1D 交叉验证。
-- [ ] 对不一致、缺分钟、边界错位和 schema 变化 fail closed。
-- [ ] 校验成交、标记、指数和资金费时间范围可用性。
-- [ ] 测试分页中断恢复、边界重叠、重复数据和数据流缺失。
+## C. Canonical 序列化与双哈希
 
-## E. BTC_ETH_PA_STRATEGY_V1
+- [ ] 实现 UTF-8、键排序、无空白、UTC int64、Decimal 字符串、负零规范和主键排序。
+- [ ] 实现独立 `dataset_content_hash`。
+- [ ] 实现独立 `acquisition_manifest_hash`，包含 content hash、请求页、时间、重试、断点和采集器版本。
+- [ ] 测试同内容不同分页/下载时间产生相同 content hash、不同 acquisition hash。
+- [ ] 测试字段顺序、Decimal 表示、CRLF/LF 和运行平台不改变 Canonical content hash。
 
-- [ ] 将已批准规范转成冻结的版本化配置。
-- [ ] 实现 EMA50/EMA200、Donchian 20 和 Wilder ATR14。
-- [ ] 实现 LONG、SHORT、NO_TRADE 及原因枚举。
-- [ ] 实现 next-4H-open 入场意图、gap 失效、固定 stop/TP、趋势退出和 12-bar 时间退出。
-- [ ] 实现 Decimal 交易边界、tick/step 量化和最小交易规则。
-- [ ] 实现 0.5% 单笔、1% 组合、1× 杠杆、逐仓和 10% 回撤暂停规则的纯函数。
+## D. Binance 公共数据下载
+
+- [ ] 下载 BTCUSDT、ETHUSDT 永续成交 1m、原生 4H、原生 1D。
+- [ ] 下载 1m 标记价格。
+- [ ] 下载真实历史资金费率及返回的结算标记价格。
+- [ ] 可选下载 1m 指数价格作为审计数据；失败只记录审计告警。
+- [ ] 下载当前 exchangeInfo 并保存为 `CURRENT_SNAPSHOT_ONLY` contract rule，不推断历史有效期。
+- [ ] 实现分页、限速、429/5xx 有界退避、断点恢复、重叠页去重和原子提交。
+- [ ] 保存 raw response、page hash、规范表、content hash 和 acquisition manifest。
+
+## E. 数据验证
+
+- [ ] 校验 UTC、K 线闭合、时间单调、主键唯一、OHLC 约束、重复和断档。
+- [ ] 将成交 1m 聚合为 4H/1D，与原生 4H/1D 逐根交叉验证。
+- [ ] 校验 OHLC 精确一致、volume/quote volume Decimal 容差和 UTC 周期边界。
+- [ ] 对成交或标记关键流缺失输出机器可读 fail-closed 结果。
+- [ ] 对指数价缺失只输出审计告警，不使必需数据集失败。
+- [ ] 校验 contract rule 的有效期覆盖语义；当前快照不能通过历史覆盖测试。
+- [ ] 对 schema 变化、未知字段语义和无法解析的 Decimal fail closed。
 
 ## F. 第一批测试
 
-- [ ] 指标 golden fixtures 与预热测试。
-- [ ] LONG/SHORT 对称性与 NO_TRADE 原因测试。
-- [ ] 信号当根禁止成交、下一 4H 开盘生效测试。
-- [ ] 日线只读取最近已收盘数据测试。
-- [ ] 修改未来数据不改变历史信号测试。
-- [ ] Decimal/tick/step 边界与数量向下取整属性测试。
-- [ ] 资金费率结算时刻边界：开仓前、同刻、平仓同刻和缺失。
-- [ ] 保证金模型版本有效期、来源和哈希测试。
-- [ ] `PATH_AMBIGUOUS` baseline/conservative 数据结构测试。
-- [ ] 相同 manifest/config/code hash 重跑结果逐字节一致。
-- [ ] 人为制造原生周期不一致、数据流缺失和过期模型时 fail closed。
+- [ ] 分页在任意页中断后恢复，结果无重复、无缺口且 content hash 不变。
+- [ ] 边界重叠、空页、乱序页、重复页和响应重试测试。
+- [ ] 未收盘 K 线、分钟缺口、标记价缺口、原生周期不一致和成交量超容差测试。
+- [ ] 资金费下载的起止边界、重复时刻、缺失区间和结算标记价缺失测试；本批只验证数据，不做结算。
+- [ ] 数据流缺失测试：成交/标记为阻断，指数为审计告警。
+- [ ] contract_rule_version 来源、哈希、有效期和 CURRENT_SNAPSHOT_ONLY 测试。
+- [ ] 两次独立下载产生相同 Canonical content 与 content hash。
+- [ ] acquisition manifest 能区分不同下载过程。
+- [ ] 固定 fixture 在不同运行顺序下逐字节一致。
+- [ ] 安全测试证明无鉴权、无私钥、无交易能力。
 
 ## 第一批完成定义
 
-- 所有任务对应测试通过。
-- 可在不配置云雾 Key、Binance Key 或任何私钥的环境运行。
-- 小型固定数据集能从 raw 数据稳定生成相同 manifest、验证结果和策略信号。
-- 安全守卫确认不存在实盘能力。
-- 第一批不以 GUI 启动或 LLM 调用作为验收条件。
+- 上述任务及测试全部通过。
+- 指定小区间可以中断恢复并生成稳定双哈希。
+- 1m 聚合与原生 4H/1D 交叉验证，任何关键不一致 fail closed。
+- 当前 contract rule 明确只代表当前快照，不被用于历史回测。
+- 未配置云雾 Key、Binance Key 或任何私钥时可完整运行。
+- 没有策略、仓位、事件引擎、回测、GUI 或 LLM 代码。
+
+## 第二批候选范围（未授权）
+
+第二批才考虑冻结后的指标/Candidate、ExecutionPlan、0/1/2 分钟延迟、成本与 unit_risk、同时等比例缩量、FillEvent、真实资金费结算、最小事件引擎、估算爆仓、PATH_AMBIGUOUS、INVALID/HALTED 和可复现账本。

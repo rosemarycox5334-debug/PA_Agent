@@ -1,301 +1,271 @@
 # BTC/ETH 永续合约确定性研究系统 V1 设计
 
 日期：2026-07-13
-状态：待用户书面确认
+状态：第二轮修订，待用户书面确认
 上游项目：PA_Agent（AGPL-3.0-or-later）
 
-## 1. 目标与边界
+## 1. 目标与不可绕过边界
 
-V1 用 Binance USDⓈ-M 的 `BTCUSDT`、`ETHUSDT` 永续合约研究可复现的确定性交易策略。信号主周期为 4H，1D 只用于趋势过滤；允许做多和做空。
+V1 研究 Binance USDⓈ-M `BTCUSDT`、`ETHUSDT` 永续合约。市场策略使用成交价 4H 主周期和已收盘 1D 趋势过滤，允许做多和做空；事件回放使用 1m 成交价，估算爆仓使用 1m 标记价。
 
-V1 不是实盘交易系统。它只包含公开市场数据下载、数据校验、确定性策略、事件驱动回测、模拟账户、风险控制和研究报告。
-
-以下边界不可绕过：
-
-- Python 确定性规则是 `LONG`、`SHORT`、`NO_TRADE`、入场、止损、止盈和仓位的唯一决策源。
-- 三个 LLM 永久处于 Shadow Mode。第一批任务不接入 LLM。
+- Python 确定性规则是市场结论和交易计划的唯一来源。
+- 三个 LLM 永久处于 Shadow Mode；第一、第二批均不接入 LLM。
 - Binance 客户端只允许公开、无鉴权的只读 `GET` 市场数据接口。
-- 禁止交易所 API Key、签名请求、账户接口、`create_order` 和任何自动实盘能力。
-- V1 固定逐仓、单向持仓模式和 1 倍杠杆。系统绝对上限为 2 倍；只有 1 倍策略通过锁定样本外验证后，才能把 2 倍作为独立实验。
-- 单笔计划风险上限 0.5%，组合总开放风险上限 1%，组合回撤达到 10% 后暂停新仓。
+- 禁止 Binance API Key、签名请求、账户接口、交易端点、`create_order` 和自动实盘。
+- V1 固定逐仓、单向持仓、1 倍杠杆；2 倍仅可在 1 倍通过锁定样本外后作为新实验测试。
+- 单笔计划风险不超过 0.5%，组合开放风险不超过 1%。回撤达到 10% 时实验进入终态 `HALTED`。
+- 第一批只实现数据下载、规范化、版本和数据验证；策略、仓位、撮合、回测、GUI 与 LLM 代码在书面设计重新确认前不得实施。
 
-## 2. 系统架构
+## 2. 分层架构
 
-### 2.1 模块
+1. `market_data`：公共市场数据下载、分页、断点恢复、原始响应保存。
+2. `data_model`：UTC 规范表、Canonical 序列化、内容哈希与采集清单哈希。
+3. `data_validation`：闭合、重复、断档、时间边界、OHLCV、原生周期交叉验证和版本覆盖。
+4. `strategy_schema`：只定义 `StrategyCandidate`、`ExecutionPlan`、`FillEvent` 及验证/拒绝事件的结构。
+5. `strategy_v1`：未来按独立规范生成市场 Candidate；不得访问组合状态来改变市场结论。
+6. `execution`：未来把有效 Candidate 与执行时市场状态转换为 ExecutionPlan。
+7. `risk`：未来验证风险、资金、逐仓和组合限制，只能批准、缩量或拒绝计划。
+8. `event_engine`：第二批实现资金费、撮合、路径歧义、估算爆仓、保证金和账本。
+9. `paper`：后续复用同一执行和账本接口，只维护本地模拟账户。
+10. `shadow`：后续独立进程，只读冻结快照、只写 Shadow 日志，不能导入执行、风险或账本写接口。
+11. `reporting`：区分市场策略、执行拒绝、风险拒绝、路径有效性和实验终态。
 
-1. `market_data`：下载成交 K 线、标记价格 K 线、指数价格 K 线、真实历史资金费率和公开合约元数据；支持分页、断点续传、校验和内容哈希。
-2. `data_validation`：校验时间、闭合状态、重复、断档、价格约束以及原生周期与 1m 聚合周期的一致性。
-3. `strategy_schema`：定义版本化、不可变的信号、取消和退出数据结构。
-4. `strategy_v1`：实现独立规范 `BTC_ETH_PA_STRATEGY_V1.md`。在该规范书面冻结前，不得编写策略代码。
-5. `risk`：仓位量化、风险预算、逐仓保证金占用、组合风险和回撤暂停。
-6. `backtest`：以 1m 成交价和 1m 标记价驱动事件，生成 baseline 与 conservative 两条可复现路径。
-7. `paper`：复用同一事件、撮合、风险和账本接口，但只维护本地模拟账户。
-8. `research`：管理训练、验证、锁定样本外、walk-forward、成本压力、敏感性和基准对比。
-9. `shadow`：未来阶段的 LLM 独立进程，只能读取冻结快照并写 Shadow 日志，不能导入或调用组合、风险、订单和撮合写接口。
-10. `reporting`：输出数据质量、信号、交易、成本、路径歧义、回撤和实验元数据。
+PA_Agent GUI 保留为上游展示入口，不参与第一批。
 
-PA_Agent GUI 保留为上游展示与人工研究入口，不进入第一批任务，也不能直接驱动模拟账户。
+## 3. 三阶段交易生命周期
 
-### 2.2 数据流
+### 3.1 StrategyCandidate
 
-```text
-Binance public GET
-  -> raw immutable responses
-  -> normalized UTC 1m/native 4H/native 1D datasets
-  -> validation and cross-validation
-  -> versioned dataset manifest + hashes
-  -> deterministic Python strategy
-  -> risk gate
-  -> baseline/conservative event replay
-  -> immutable ledger and reports
+每根有效 4H 收盘后产生市场研究结果：
 
-validated closed bars
-  -> future Shadow workers
-  -> shadow-only log store
-```
+- `candidate_id`、`strategy_id`、`strategy_version`、`symbol`
+- `decision_time_utc_ms`
+- `market_view = LONG | SHORT | NO_TRADE`
+- `market_reason`
+- `entry_intent = NEXT_4H_OPEN_MARKET`（仅 LONG/SHORT）
+- 冻结的 `atr_value`、趋势状态、突破阈值和决策 4H close
+- `eligible_4h_open_utc_ms`、`execution_delay_version`
+- 数据内容、配置、代码、指标和合约规则版本/哈希
 
-任何关键数据集不完整、周期交叉验证失败、模型版本过期或哈希不匹配时，系统必须 fail closed：不生成可交易信号，不继续相关回测区间，并记录明确原因。
+Candidate 不得包含依赖下一开盘成交价的 `stop_price`、`take_profit_price`、`quantity`、保证金或费用。数据校验失败时不生成 `NO_TRADE`，而生成独立 `ValidationFailure`。
 
-## 3. 市场数据设计
+`NO_TRADE` 只表示有效市场数据下没有市场入场条件，例如 `TREND_NEUTRAL` 或 `NO_BREAKOUT`。`EXISTING_POSITION`、`DRAWDOWN_PAUSE/HALTED`、资金不足和风险上限不是市场结论。
 
-### 3.1 数据范围
+### 3.2 ExecutionPlan
 
-每个品种保存：
+到达版本化执行时刻后，执行层读取当时可见的成交价，依次：
+
+1. 根据参考开盘价和滑点版本计算预计/确定性成交价。
+2. 基于该成交价和 Candidate 冻结 ATR 计算止损、止盈。
+3. 基于完整 `unit_risk` 公式计算数量、费用缓冲、资金费缓冲和逐仓保证金。
+4. 同刻多品种计划先独立计算，再按组合风险与资金等比例缩量。
+5. 风险层产生 `APPROVED | SCALED | REJECTED`，并记录独立 `execution_reject_reason`。
+
+ExecutionPlan 保存 `order_type`、`trigger_basis`、`margin_mode=ISOLATED`、`position_mode=ONE_WAY`、stop/TP、数量、费用/滑点/资金费/保证金/估算爆仓版本、数据/配置/代码哈希及有效期。
+
+### 3.3 FillEvent
+
+FillEvent 是不可变的实际模拟成交记录，包含计划 ID、时间、方向、数量、未加滑点参考价、滑点金额、最终成交价、手续费、成交原因和路径 ID。最终成交价已经含滑点；后续任何公式不得重复加入同一侧滑点。
+
+取消与拒绝记录在 Candidate 之外，例如：`DATA_INVALID`、`CONTRACT_RULE_EXPIRED`、`EXISTING_POSITION`、`HALTED`、`RISK_LIMIT`、`INSUFFICIENT_MARGIN`、`BELOW_MIN_QTY`、`GAP_TOO_LARGE`、`EXECUTION_DATA_MISSING`。
+
+## 4. 市场数据与版本
+
+### 4.1 必需数据
 
 - 永续合约成交 K 线：原生 1m、4H、1D。
-- 标记价格 K 线：1m；必要时保留原生 4H/1D 作为审计数据。
-- 指数价格 K 线：1m；必要时保留原生 4H/1D 作为审计数据。
-- 真实历史资金费率及资金费结算时刻的标记价格字段。
-- 公开合约交易规则：价格精度、数量精度、`tick_size`、`step_size`、最小数量、最小名义价值和合约状态。
-- 版本化费用、滑点和估算维持保证金配置。
+- 标记价格 K 线：1m。
+- 真实历史资金费率及返回的结算标记价格。
+- 公开合约规则及其采集证据。
 
-时间统一为 UTC。持久化主键使用 `symbol/pair + interval + open_time_utc_ms` 或 `symbol + funding_time_utc_ms`。
+指数价格为审计数据，不参与 V1 策略、撮合、风险、资金费或估算爆仓计算。指数数据缺失只降低审计完整度，不阻断回测。若未来模型使用指数价，必须提升依赖版本并把它改为必需数据。
 
-### 3.2 K 线字段
+### 4.2 通用字段
 
-通用字段：
+- `source`、`market`、`symbol/pair`、`interval`
+- `open_time_utc_ms`、`close_time_utc_ms`
+- `open`、`high`、`low`、`close`、`is_closed`
+- 成交数据的 volume、quote volume、trade count、taker volumes
+- `downloaded_at_utc_ms`、`source_page_hash`、`schema_version`
 
-- `source`
-- `market`
-- `symbol` 或 `pair`
-- `interval`
-- `open_time_utc_ms`
-- `close_time_utc_ms`
-- `open`、`high`、`low`、`close`
-- `is_closed`
-- `downloaded_at_utc_ms`
-- `raw_payload_hash`
-- `schema_version`
+所有内部时间使用 UTC 毫秒。价格、数量、费用、保证金和账本使用 Decimal；指标允许 `float64`，进入交易边界时按明确规则转换和量化。
 
-成交 K 线增加：
+### 4.3 dataset_content_hash 与 acquisition_manifest_hash
 
-- `base_volume`
-- `quote_volume`
-- `trade_count`
-- `taker_buy_base_volume`
-- `taker_buy_quote_volume`
+- `dataset_content_hash`：只代表规范化数据内容，与下载重试次数、下载时间和页边界无关。
+- `acquisition_manifest_hash`：代表采集过程，包含端点、请求参数、页哈希、请求时间、重试、断点、采集器版本和最终 content hash。
 
-资金费率增加：
+Canonical 序列化规则：
 
-- `funding_time_utc_ms`
-- `funding_rate`
-- `mark_price`
-- `source_page_hash`
+1. UTF-8、JSON、对象键按 Unicode code point 升序、无无意义空白。
+2. 时间为 UTC `int64` 毫秒；布尔值和 null 使用标准 JSON。
+3. Decimal 一律序列化为无指数、无多余前导/尾随零的字符串；负零规范为 `"0"`。
+4. 表记录按声明的复合主键升序；数组保持声明顺序。
+5. 哈希算法固定 `SHA-256`，输入为 Canonical UTF-8 字节。
+6. schema、Canonical 规则或排序键变化必须提升版本，禁止复用旧哈希。
 
-### 3.3 数值规则
+### 4.4 原生周期交叉验证
 
-- 价格、数量、费用、资金费、保证金、已实现/未实现盈亏和账户账本使用 `Decimal`。
-- 指标和向量化研究计算允许使用 `float64`。
-- 从指标层进入交易边界时，价格按 `tick_size`、数量按 `step_size` 进行方向明确的量化；数量一律向下取整，风险保护价按不放大风险的方向量化。
-- 禁止把二进制浮点结果直接写入订单、费用、保证金或账本。
+1m 成交 K 线分别聚合为 4H、1D，并与 Binance 原生 4H/1D 比较：open 为首分钟 open，high/low 为区间极值，close 为末分钟 close，成交量/成交额在 Decimal 容差内一致，UTC 边界完全一致。
 
-### 3.4 原生周期交叉验证
+任何 OHLC 不一致、分钟缺失、边界错位或成交量超出容差均 fail closed。不得用原生周期静默覆盖聚合数据。
 
-1m 成交 K 线分别聚合为 4H 和 1D，再与 Binance 原生 4H/1D 成交 K 线逐根比较：
+### 4.5 合约规则版本
 
-- `open` 必须等于第一根 1m 的 `open`。
-- `high`/`low` 必须等于区间内极值。
-- `close` 必须等于最后一根 1m 的 `close`。
-- 成交量与成交额在配置的 Decimal 容差内一致。
-- 时间边界必须与 UTC Binance 周期边界一致。
+`contract_rule_version` 必须包含 symbol、tick/step、最小数量、最小名义价值、合约状态、来源、采集时间、source hash、`effective_from`、`effective_to` 和审核状态。
 
-任何 OHLC 不一致、缺少分钟、周期边界错位或成交量超出容差，都标记该聚合周期为无效并 fail closed。不得用原生周期静默覆盖聚合结果，也不得静默填补关键缺口。
+当前 `exchangeInfo` 只能证明采集时附近的当前规则，不能静默用于全部历史。历史区间必须由有证据的归档规则版本覆盖；缺少覆盖时，该区间不得进入可交易回测。第一批可以下载并保存当前规则，但必须标记 `CURRENT_SNAPSHOT_ONLY`，不能伪造历史有效期。
 
-### 3.5 下载可靠性
+估算维持保证金同样具有独立版本、来源和有效期；爆仓输出只能称“估算”。
+
+### 4.6 下载可靠性
 
 - 每页保存请求区间、响应哈希、首尾时间和下一游标。
-- 使用临时分片与原子提交；校验通过后才进入规范数据集。
-- 中断后从最后一个已验证游标恢复，恢复时重新请求边界重叠页并去重。
-- 对 429/5xx 使用有上限的指数退避；对 schema 变化立即停止。
-- 数据集 manifest 保存来源 URL、下载时刻、区间、行数、哈希、缺口和代码版本。
+- 使用临时分片与原子提交，校验后才进入规范数据集。
+- 恢复时重新请求边界重叠页并去重。
+- 429/5xx 有上限指数退避；schema 变化立即停止。
+- 关键 1m 成交价或标记价在持仓期间缺失时，对应 baseline 与 conservative 路径均标记 `INVALID` 并立即终止；不假设保护性止损仍然有效。
 
-## 4. 信号 Schema
+## 5. 指标数值规范
 
-每个信号至少包含：
+完整规则同时写入 `BTC_ETH_PA_STRATEGY_V1.md`：
 
-- 身份：`signal_id`、`strategy_id`、`strategy_version`、`symbol`。
-- 决策：`decision_time_utc_ms`、`side`、`order_type`、`trigger_basis`。
-- 价格：`entry_rule`、`entry_reference_price`、`stop_price`、`take_profit_price`。
-- 生命周期：`eligible_from_utc_ms`、`valid_until_utc_ms`、`max_holding_bars`。
-- 风险：`risk_pct`、`planned_quantity`、`leverage`、`margin_mode=ISOLATED`、`position_mode=ONE_WAY`。
-- 数据身份：`dataset_manifest_hash`、`trade_data_hash`、`mark_data_hash`、`index_data_hash`、`funding_data_hash`。
-- 实验身份：`strategy_config_hash`、`code_commit_hash`、`fee_model_version`、`slippage_model_version`、`liquidation_model_version`、`maintenance_margin_version`。
-- 状态：`status`、`cancel_reason`、`path_status`。
+- EMA(N)：`alpha=2/(N+1)`、`adjust=False`、`min_periods=N`；首个输入 close 是递推种子，但前 N-1 项无有效输出。
+- ATR14：首个 TR 为 `high-low`；第 14 个 TR 的 ATR 以首 14 个 TR 算术平均为种子，之后用 `(prior_atr*13+tr)/14`。
+- Donchian 20：只取当前 4H 之前 20 根，至少第 21 根才有效。
+- pre-roll 从规范数据集中该合约最早连续有效 K 线开始，跨训练/验证/OOS 边界连续计算，不在区间边界重置；进入研究区间前至少 250 根 1D 与 100 根 4H。
+- 指标内部不舍入。决策边界将 float64 指标用 round-half-even 规范为 15 位有效数字的 Decimal；价格型阈值随后按 tick 量化。比较使用严格 `>`/`<`，相等为不触发。
+- numpy/pandas 与实现版本进入代码和实验哈希。
 
-枚举要求：
+## 6. 执行、成本、资金和保证金公式
 
-- `side`: `LONG | SHORT | NO_TRADE`
-- `order_type`: V1 仅 `MARKET_NEXT_4H_OPEN`
-- `trigger_basis`: V1 入场、止损、止盈为 `CONTRACT_TRADE_PRICE`；爆仓为 `MARK_PRICE`
-- `status`: `CREATED | ELIGIBLE | FILLED | CANCELLED | EXPIRED | CLOSED`
-- `path_status`: `UNAMBIGUOUS | PATH_AMBIGUOUS`
+### 6.1 执行延迟
 
-取消必须给出机器可读原因，例如 `DATA_INVALID`、`NATIVE_BAR_MISMATCH`、`RISK_LIMIT`、`DRAWDOWN_PAUSE`、`INSUFFICIENT_MARGIN`、`BELOW_MIN_QTY`、`GAP_TOO_LARGE`、`EXISTING_POSITION`、`EXPIRED`、`MODEL_VERSION_EXPIRED`。
+`execution_delay_version=EXEC_DELAY_V1`：Candidate 在 4H 收盘形成，基准在下一根 4H 开盘后 1 分钟的 1m open 执行。压力测试冻结为 0、1、2 分钟。延迟从下一 4H UTC open 计算；目标分钟缺失则拒绝/使路径 INVALID，不顺延。
 
-## 5. 估算爆仓与保证金模型
+### 6.2 V1 成本常量
 
-V1 的爆仓模型统一称为“估算爆仓模型”，不得声称精确复刻 Binance 爆仓引擎。原因包括账户级细节、费用、保险基金处理、维持保证金档位和交易所规则可能变化。
+- taker fee rate：`f=0.0005`，版本 `FEE_V1_ASSUMED_TAKER_5BP`。
+- baseline 单边滑点：BTC `s=0.0001`、ETH `s=0.0002`，版本 `SLIPPAGE_V1_BASE`。
+- 成本压力：相应滑点和手续费乘 1.5、2.0；每个组合是新实验。
+- 资金费使用历史真实费率；仓位 sizing 的不利资金费缓冲固定为每次 `0.0001`，48 小时最多 6 次，版本 `FUNDING_BUFFER_V1_1BP_X6`。
 
-每次回测必须保存：
+这些是研究假设，不声称等于所有历史账户费率或真实市场冲击。
 
-- `liquidation_model_version`
-- `maintenance_margin_version`
-- `maintenance_margin_source`
-- `effective_from_utc_ms`
-- `effective_to_utc_ms`
-- `retrieved_at_utc_ms`
-- `source_hash`
-- 公式版本、舍入规则和强平费用假设
+### 6.3 价格与费用
 
-若回测时刻不在保证金版本有效期内，或来源/哈希缺失，则该区间 fail closed。维持保证金版本通过人工审核的公开资料快照导入；V1 不调用需要账户鉴权的档位接口。
+令执行参考 1m open 为 `P0`、数量为正数 `q`：
 
-爆仓仅由标记价格触发。报告必须使用“估算爆仓”“估算强平价格”等措辞，并单独列出模型不确定性。
+- LONG 入场 fill：`quantize_up(P0*(1+s_entry), tick_size)`。
+- SHORT 入场 fill：`quantize_down(P0*(1-s_entry), tick_size)`。
+- LONG 止损预计 fill：`quantize_down(stop_trigger*(1-s_exit), tick_size)`。
+- SHORT 止损预计 fill：`quantize_up(stop_trigger*(1+s_exit), tick_size)`。
+- 每次成交手续费：`abs(q*fill_price)*f`。
+- 资金费现金变化：`-side_sign*q*mark_price_at_funding*funding_rate`，LONG 的 `side_sign=+1`，SHORT 为 `-1`。
 
-## 6. 事件驱动回测顺序
+fill price 已含该次滑点，不再额外从 PnL 或 unit risk 扣同一笔滑点金额。滑点金额仅作为审计字段 `abs(fill_price-P0)*q`。
 
-信号只使用已收盘的 4H 和 1D 数据。4H 收盘形成的信号当根禁止成交，最早在下一根 4H 的第一个有效 1m 开盘处理。
+### 6.4 unit_risk、数量和保证金
 
-每个 1m 时间片按以下顺序运行：
+止损触发价由 fill price 与冻结 ATR 计算；止损预计 fill 含退出滑点。每单位：
 
-1. 验证本时间片成交价、标记价、指数价和必要配置有效。
-2. 对时间片开始前已持有的仓位，按真实结算时刻和真实费率结算资金费。
-3. 用标记价开盘检查跳空估算爆仓。
-4. 用成交价开盘处理已有仓位的跳空止损或时间退出。
-5. 处理已到 `eligible_from` 的入场；按成交价加不利滑点成交，收取手续费并占用逐仓保证金。
-6. 检查分钟内止损、估算爆仓和止盈。
-7. 处理退出费用、释放逐仓保证金、更新已实现盈亏。
-8. 以分钟收盘更新权益、可用资金、未实现盈亏、总开放风险和回撤。
-9. 4H 收盘后运行确定性策略，使用最近一根已收盘 1D 作为过滤。
-10. 写入不可变事件、订单、成交、仓位和账户账本。
+```text
+price_loss_per_unit = abs(entry_fill - stop_fill_estimate)
+entry_fee_per_unit = entry_fill * f
+exit_fee_per_unit = stop_fill_estimate * f
+funding_buffer_per_unit = entry_fill * 0.0001 * 6
+unit_risk = price_loss_per_unit + entry_fee_per_unit
+            + exit_fee_per_unit + funding_buffer_per_unit
+risk_budget = pre_entry_equity * 0.005
+raw_quantity = risk_budget / unit_risk
+```
 
-资金费边界采用明确顺序：在资金费时刻之前已经持有的仓位先结算资金费，再处理该时刻的退出；恰好在资金费时刻新开仓的仓位在结算之后建立，不参与本次结算。资金费率或结算标记价格缺失时，该品种在受影响区间 fail closed，禁止用零费率代替。
+数量按 step 向下量化后重新计算全部值。1 倍逐仓：
 
-同一 1m 内止损与估算爆仓的真实先后无法从 OHLC 唯一判断时：
+```text
+initial_margin = abs(quantity * entry_fill) / 1
+entry_fee = abs(quantity * entry_fill) * f
+exit_fee_reserve = abs(quantity * stop_fill_estimate) * f
+funding_reserve = quantity * entry_fill * 0.0001 * 6
+required_cash = initial_margin + entry_fee + exit_fee_reserve + funding_reserve
+```
 
-- 标记 `PATH_AMBIGUOUS`。
-- `baseline` 路径：若标记价开盘未先爆仓，同一分钟内保护性止损优先于估算爆仓；同分钟止损和止盈均触发时止损优先。
-- `conservative` 路径：估算爆仓优先于分钟内保护性退出，并使用更不利的允许成交假设。
-- 两条路径共享完全相同的数据、信号和参数哈希，分别保存账本和绩效。
+真实资金费逐次进入账本，未使用的 funding reserve 在平仓时释放。估算维持保证金按有效版本的 tier 公式 `notional*mmr-cumulative_deduction` 计算；版本不覆盖回放时刻则路径 INVALID。
 
-若标记价开盘已经越过估算爆仓线，两条路径均先爆仓，不属于路径歧义。
+## 7. 第二批最小事件引擎
 
-资金不可重复使用：已占用逐仓保证金、预估费用缓冲和开放风险预算都从可用额度中扣除。暂停新仓不能阻止已有仓位止损、止盈、时间退出或估算爆仓。
+资金费、撮合、保证金、估算爆仓、PATH_AMBIGUOUS 和账户账本全部移至第二批。第二批开始前仍需单独批准。
 
-## 7. 风险与组合规则
+每个 1m 事件顺序：验证关键数据；结算此前持仓的真实资金费；检查标记价开盘估算爆仓；处理成交价开盘保护性退出；创建/执行到期 ExecutionPlan；检查分钟内保护性退出和估算爆仓；更新费用、逐仓、PnL、权益和回撤；写不可变事件。
 
-- 初始资金由实验配置给定，不在策略代码中硬编码。
-- 单笔计划最大亏损含入场/退出费用和基准滑点缓冲，不超过入场前权益的 0.5%。
-- BTC 与 ETH 的总开放风险不超过权益的 1%。
-- 计划数量先按风险计算，再按 `step_size` 向下量化并重新校验最小数量、最小名义价值、保证金和风险。
-- V1 每个品种最多一个逐仓方向仓位，不加仓、不摊平、不对冲。
-- 同时信号按 `decision_time`、再按固定品种顺序 `BTCUSDT`、`ETHUSDT` 处理；后处理信号只能使用剩余风险和资金。
-- 组合从历史权益高点回撤达到 10% 后进入 `DRAWDOWN_PAUSE`，拒绝新仓。恢复必须开启新的、显式批准的实验；V1 不自动恢复。
+持仓期间关键 1m 成交价或标记价缺口使路径立即 `INVALID` 并终止。指数价缺失只记录审计告警。
 
-## 8. 研究与验证层
+同分钟止损与估算爆仓无法排序时记录 `PATH_AMBIGUOUS`：baseline 为开盘未爆仓时止损优先；conservative 为估算爆仓优先。同分钟止损与 TP 均触发时均按止损优先。两条路径共享数据与配置哈希，独立保存账本。
 
-### 8.1 样本治理
+资金费时刻前已有仓位先结算，再处理同刻退出；同刻新仓不参与本次结算。资金费记录或结算标记价缺失使路径 INVALID，不能回填零。
 
-- 训练区间：用于形成和冻结规则及少量预先声明的参数候选。
-- 验证区间：用于选择候选，但不得反复扩展参数空间。
-- 锁定样本外区间：在规则、参数、成本模型和代码哈希冻结前，报告层拒绝展示绩效。
-- 前向模拟区间：部署后只追加，不回写历史结果。
+## 8. 组合、持有期和终态
 
-具体日期和数据截止时间写入实验 manifest，不能隐藏在代码默认值里。任何修改日期、参数、成本或策略代码都会产生新的实验 ID，旧的锁定样本外结果不得覆盖。
+- 同一执行时刻的 BTC/ETH ExecutionPlan 先按各自 0.5% 风险独立计算。
+- 若总风险超过 1% 或 required cash 超过可用资金，所有同刻计划按共同系数 `min(1, risk_capacity/sum_risk, cash_capacity/sum_required_cash)` 等比例缩量；再按 step 向下量化和重新验证。
+- 不使用 BTC_FIRST/ETH_FIRST；测试应证明输入顺序不改变结果。
+- V1 每品种最多一个仓位，不加仓、不摊平、不对冲。
+- 持有期固定为从 FillEvent 时间起精确 48 小时，不使用“入场后 12 根完整 4H”的定义。首个 `timestamp >= fill_time+48h` 的有效 1m open 执行时间退出；关键数据缺失则路径 INVALID。
+- 组合回撤在分钟账本达到 10% 时生成 `HALT_TRIGGERED`，取消所有 Candidate/Plan，并在下一有效 1m open 对所有仓位执行 `HALT_EXIT`。若所需关键数据缺失则终态为 INVALID；否则最后一笔退出后终态为 `HALTED`。
+- HALTED 后不延长现金曲线到原计划结束。年化指标只计算到 terminal time，报告必须显示 `HALTED`、实际存续天数和删失状态，不得与完整区间结果混排。
 
-### 8.2 Walk-forward
+## 9. 研究、样本和前向模拟硬门槛
 
-V1 使用时间顺序 walk-forward；每个窗口只允许使用过去数据确定参数，在下一个窗口评价。窗口长度在首次实验 manifest 中冻结。不得随机打乱时间序列。
+### 9.1 样本治理
 
-### 8.3 成本压力与敏感性
+训练、验证、锁定样本外、walk-forward 和前向区间写入实验 manifest。指标 pre-roll 可以读取区间前数据，但交易和绩效不能越界。修改日期、规则、参数、成本或代码必须创建新实验；锁定 OOS 不得覆盖。
 
-- 基准费用/滑点模型。
-- 费用与滑点分别为基准的 1.5 倍和 2 倍。
-- 资金费率使用真实历史值，并测试资金费边界恰好发生在开仓、平仓和数据缺失时的行为。
-- 对 Donchian、EMA、ATR、止损倍数、止盈倍数和最大持有期使用小范围、预声明网格；禁止观察锁定样本外后新增“恰好有效”的参数。
-- 输出参数表面，不只输出最佳点；孤立尖峰视为不稳健。
+### 9.2 基准与压力
 
-### 8.4 基准
+比较现金、BTC/ETH 1 倍买入持有、简单 1D 趋势、无 1D 过滤的 Donchian、V1 baseline 与 conservative。执行延迟测试 0/1/2 分钟；成本测试 1.0/1.5/2.0 倍；参数只用预声明小网格并输出完整参数表面。
 
-至少对比：
+### 9.3 进入前向模拟的全部硬门槛
 
-- 全程现金。
-- BTC/ETH 1 倍买入持有。
-- 仅 1D 趋势过滤的简单基准。
-- 不使用 1D 过滤的 4H Donchian 基准。
-- `BTC_ETH_PA_STRATEGY_V1` baseline 路径。
-- `BTC_ETH_PA_STRATEGY_V1` conservative 路径。
+只有以下条件全部满足，才允许创建新的前向模拟实验：
 
-报告同时展示收益、年化波动、最大回撤、Calmar、Sharpe、Sortino、Profit Factor、胜率、平均盈亏、交易数、资金利用率、手续费、滑点、资金费、估算爆仓次数和 `PATH_AMBIGUOUS` 次数。不得只按收益排序。
+1. 锁定 OOS 至少覆盖 18 个月；合计至少 60 笔闭合交易，BTC、ETH 各至少 20 笔。
+2. baseline 与 conservative 均为 `COMPLETED`，无 INVALID、无 HALTED，净收益为正，最大回撤严格低于 10%。
+3. conservative 路径在 2 倍费用与滑点压力下净收益不低于 0。
+4. 时间顺序 walk-forward 至少三窗，至少三分之二窗口净收益为正，任何窗口均未 HALTED。
+5. 以 OOS 每日净收益做 7 日 moving-block bootstrap，固定 10,000 次、固定种子；95% 双侧置信区间的平均日收益下界必须大于 0。
+6. 以 OOS 交易序列做 10,000 次 block bootstrap；95% 置信区间的 Profit Factor 下界必须大于 1.0。
+7. 预声明参数邻域（每个可调参数上下约 20% 的合法网格）中，至少 70% 组合在 conservative、基准成本下净收益为正；最佳点不能是孤立尖峰。
+8. 数据验证 100% 通过；所有可交易时段有有效 contract rule、费用、资金费、保证金和估算爆仓版本。
+9. 相同数据、配置、依赖和代码哈希重复运行，Candidate、Plan、Fill、账本与指标逐字节一致。
 
-## 9. 可复现性
+置信区间方法、block 长度、种子和样本选择必须在解锁 OOS 前冻结。任何门槛失败都返回研究阶段，不得以主观判断豁免。
 
-一次回测由以下内容唯一标识：
+## 10. 可复现性
 
-- 数据 manifest 与所有分表哈希
-- 策略规范版本与配置哈希
-- 代码 commit 哈希
-- Python 与依赖锁文件哈希
-- 费用、滑点、估算爆仓、维持保证金版本
-- 样本区间与 walk-forward 配置
-- 随机种子；V1 核心路径应无随机性
+实验 ID 由 dataset content hash、acquisition manifest hash、样本区间、策略/执行/成本/合约/保证金/估算爆仓版本、代码 commit、依赖锁哈希和 Canonical 规则版本生成。相同实验 ID 的结果必须逐字节一致。
 
-使用相同标识重复执行，事件、成交、账本和汇总指标必须逐项一致。若不一致，测试失败。
+## 11. 批次边界
 
-## 10. 第一批范围
+### 第一批：数据与验证
 
-第一批只实现：
+只实现公共下载、UTC 规范化、Canonical 序列化、双哈希、断点恢复、原生周期交叉验证、contract rule 当前快照和数据测试。允许定义生命周期 Schema，但不得实现 Candidate 生成、ExecutionPlan、仓位、资金费结算、撮合、回测或 GUI/LLM。
 
-1. 公共市场数据下载和断点恢复。
-2. UTC 规范数据模型与数据 manifest。
-3. 原生 4H/1D 与 1m 聚合交叉验证。
-4. 策略、订单、取消、持仓和模型版本 Schema。
-5. 独立规则规范 `BTC_ETH_PA_STRATEGY_V1.md`。
-6. 确定性指标、信号和仓位计算。
-7. 与上述模块对应的单元、属性和集成测试。
+### 第二批：待单独批准
 
-第一批明确不实现 GUI、LLM、模拟实时循环、完整回测报告和任何实盘接口。详细清单见 `2026-07-13-v1-first-batch-tasks.md`。
+实现冻结后的指标与 Candidate、ExecutionPlan、等比例缩量、最小事件引擎、资金费、保证金、baseline/conservative、估算爆仓、HALTED/INVALID 和账本测试。
 
-## 11. 第一批验收条件
-
-- 所有 Binance 调用均为公开无鉴权 `GET`。
-- BTCUSDT、ETHUSDT 指定小区间数据可重复下载并断点恢复。
-- 1m 聚合与原生 4H/1D 交叉验证；人为制造不一致会 fail closed。
-- 未收盘、缺失、重复、错位和 schema 变化数据会 fail closed。
-- 确定性策略对固定 fixture 产生完全一致的信号和哈希。
-- 信号当根无法成交，未来数据变化不影响过去信号。
-- 价格、数量、费用和风险边界量化符合 Decimal/tick/step 规则。
-- 未配置云雾 API 或任何交易所密钥时，第一批全部测试可通过。
-- 静态与运行时守卫证明不存在交易端点、签名请求和 `create_order`。
+详细第一批范围见 `2026-07-13-v1-first-batch-tasks.md`。
 
 ## 12. 已知限制
 
-- OHLC 无法完整重建分钟内路径，因此保留 baseline/conservative 双路径和 `PATH_AMBIGUOUS`。
-- 估算爆仓模型不等同 Binance 实际强平引擎。
-- 历史盘口深度不可得时，滑点是版本化假设，需要压力测试。
-- 回测通过不代表未来盈利；只有锁定样本外与持续前向模拟能逐步提高可信度。
+- 估算爆仓不等同 Binance 实际强平。
+- OHLC 无法重建分钟内路径，因此保留双路径。
+- 当前 exchangeInfo 不能证明历史规则。
+- 历史盘口缺失使滑点只能作为版本化假设和压力测试。
+- 通过回测硬门槛也不保证未来盈利。
 
-## 13. 参考资料
+## 13. 参考
 
-- PA_Agent README：<https://github.com/rosemarycox5334-debug/PA_Agent>
+- PA_Agent：<https://github.com/rosemarycox5334-debug/PA_Agent>
 - Binance USDⓈ-M 市场数据：<https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data>
-- 云雾 OpenAI 兼容 Chat Completions：<https://yunwuapi.apifox.cn/api-390890183>
+- 云雾 Chat Completions：<https://yunwuapi.apifox.cn/api-390890183>
