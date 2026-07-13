@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from pa_agent.research_data.models import (
+    KLINE_SCHEMA_VERSION,
     ContractRuleSnapshot,
     ContractRuleValidationSnapshot,
     FundingRate,
@@ -26,7 +27,6 @@ class ContractRuleValidationFailure(DataSchemaError):
         )
 
 
-KLINE_SCHEMA_VERSION = "BINANCE_KLINE_V1_EXACT_12"
 INTERVAL_MS = {
     "1m": 60_000,
     "4h": 4 * 60 * 60_000,
@@ -81,13 +81,21 @@ def _validated_ohlc(row: Sequence[Any], *, interval: str) -> tuple[int, int, Dec
 
 
 def normalize_trade_kline(
-    row: Sequence[Any], *, symbol: str, interval: str, now_ms: int
+    row: Sequence[Any],
+    *,
+    symbol: str,
+    interval: str,
+    source_server_time_utc_ms: int,
 ) -> Kline:
     _validate_kline_row(row, interval=interval)
     try:
         open_time, close_time, open_price, high, low, close = _validated_ohlc(
             row, interval=interval
         )
+        if close_time >= source_server_time_utc_ms:
+            raise DataSchemaError(
+                "UNCLOSED_BAR: kline close boundary has not passed exchange server time"
+            )
         trade_count = _integer(row[8], "trade_count")
         if trade_count < 0:
             raise DataSchemaError("Negative field: trade_count")
@@ -111,7 +119,7 @@ def normalize_trade_kline(
             taker_buy_quote_volume=_nonnegative(
                 _decimal(row[10], "taker_buy_quote_volume"), "taker_buy_quote_volume"
             ),
-            is_closed=close_time < now_ms,
+            is_closed=True,
         )
     except (IndexError, TypeError, ValueError) as exc:
         if isinstance(exc, DataSchemaError):
@@ -120,7 +128,12 @@ def normalize_trade_kline(
 
 
 def normalize_price_kline(
-    row: Sequence[Any], *, stream: str, symbol: str, interval: str, now_ms: int
+    row: Sequence[Any],
+    *,
+    stream: str,
+    symbol: str,
+    interval: str,
+    source_server_time_utc_ms: int,
 ) -> Kline:
     _validate_kline_row(row, interval=interval)
     if stream not in {"mark", "index"}:
@@ -129,6 +142,10 @@ def normalize_price_kline(
         open_time, close_time, open_price, high, low, close = _validated_ohlc(
             row, interval=interval
         )
+        if close_time >= source_server_time_utc_ms:
+            raise DataSchemaError(
+                "UNCLOSED_BAR: kline close boundary has not passed exchange server time"
+            )
         return Kline(
             source="binance_fapi",
             stream=stream,
@@ -145,7 +162,7 @@ def normalize_price_kline(
             trade_count=0,
             taker_buy_base_volume=Decimal("0"),
             taker_buy_quote_volume=Decimal("0"),
-            is_closed=close_time < now_ms,
+            is_closed=True,
         )
     except (IndexError, TypeError, ValueError) as exc:
         if isinstance(exc, DataSchemaError):
@@ -153,17 +170,31 @@ def normalize_price_kline(
         raise DataSchemaError("Invalid Binance price kline row") from exc
 
 
-def normalize_funding_rate(item: Mapping[str, Any]) -> FundingRate:
+def normalize_funding_rate(
+    item: Mapping[str, Any], *, expected_symbol: str
+) -> FundingRate:
     required = {"symbol", "fundingTime", "fundingRate", "markPrice"}
     if not required.issubset(item):
         raise DataSchemaError(f"Funding rate missing fields: {sorted(required - set(item))}")
     try:
+        returned_symbol = str(item["symbol"])
+        if returned_symbol != expected_symbol:
+            raise DataSchemaError(
+                f"Funding symbol mismatch: expected {expected_symbol}, got {returned_symbol}"
+            )
+        funding_time = _integer(item["fundingTime"], "funding_time")
+        if funding_time < 0:
+            raise DataSchemaError("Invalid funding_time: must be nonnegative")
+        funding_rate = _decimal(item["fundingRate"], "funding_rate")
+        mark_price = _decimal(item["markPrice"], "mark_price")
+        if mark_price <= 0:
+            raise DataSchemaError("Invalid mark_price: must be positive")
         return FundingRate(
             source="binance_fapi",
-            symbol=str(item["symbol"]),
-            funding_time_utc_ms=int(item["fundingTime"]),
-            funding_rate=_decimal(item["fundingRate"], "funding_rate"),
-            mark_price=_decimal(item["markPrice"], "mark_price"),
+            symbol=returned_symbol,
+            funding_time_utc_ms=funding_time,
+            funding_rate=funding_rate,
+            mark_price=mark_price,
         )
     except (TypeError, ValueError) as exc:
         if isinstance(exc, DataSchemaError):

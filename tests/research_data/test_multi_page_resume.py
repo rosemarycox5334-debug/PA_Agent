@@ -60,6 +60,8 @@ class PagingClient:
         return [row for row in rows if start <= timestamp(row) <= end][:limit]
 
     def get_json(self, path, params):
+        if path == "/fapi/v1/time":
+            return {"serverTime": THREE_DAYS_MS + 1}
         self.calls += 1
         if self.calls == self.interrupt_on_call:
             raise OSError("intentional page interruption")

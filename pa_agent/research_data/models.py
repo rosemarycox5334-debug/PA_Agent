@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+KLINE_SCHEMA_VERSION = "BINANCE_KLINE_V1_EXACT_12"
+FUNDING_SCHEMA_VERSION = "BINANCE_FUNDING_V1"
+CONTRACT_RULE_SCHEMA_VERSION = "CONTRACT_RULE_SNAPSHOT_V1"
+
 
 @dataclass(frozen=True, slots=True)
 class Kline:
@@ -22,6 +26,7 @@ class Kline:
     taker_buy_base_volume: Decimal
     taker_buy_quote_volume: Decimal
     is_closed: bool
+    schema_version: str = KLINE_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +36,7 @@ class FundingRate:
     funding_time_utc_ms: int
     funding_rate: Decimal
     mark_price: Decimal
+    schema_version: str = FUNDING_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +72,7 @@ class ContractRuleSnapshot:
     acquired_at_utc_ms: int
     source_hash: str
     validity: str
+    schema_version: str = CONTRACT_RULE_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)

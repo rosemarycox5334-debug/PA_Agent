@@ -72,6 +72,25 @@ def _deduplicate_records(
     return tuple(deduplicated[key] for key in sorted(deduplicated))
 
 
+def _validate_record_request_range(
+    timestamps: list[int],
+    *,
+    original_start_time_ms: int,
+    original_end_time_ms: int,
+    page_start_time_ms: int,
+) -> None:
+    if any(
+        timestamp < original_start_time_ms
+        or timestamp > original_end_time_ms
+        or timestamp < page_start_time_ms
+        for timestamp in timestamps
+    ):
+        raise ValueError(
+            "RAW_RECORD_OUT_OF_REQUEST_RANGE: raw record timestamp is outside "
+            "the original or page request range"
+        )
+
+
 def _validate_raw_pages(
     pages: list[dict[str, Any]],
     *,
@@ -125,6 +144,14 @@ def _validate_raw_pages(
         if request != expected_request:
             raise ValueError("Raw page request parameters do not match request identity")
         request_start = request.get("startTime")
+        if not isinstance(request_start, int):
+            raise ValueError("Raw page request startTime must be an integer")
+        _validate_record_request_range(
+            timestamps,
+            original_start_time_ms=int(request_identity["start_time_ms"]),
+            original_end_time_ms=int(request_identity["end_time_ms"]),
+            page_start_time_ms=request_start,
+        )
         if expected_index == 0:
             if request_start != request_identity["start_time_ms"]:
                 raise ValueError("Raw page chain has an invalid first request")
@@ -241,6 +268,12 @@ class DatasetDownloader:
                 raise TypeError("Paginated endpoint must return a list")
             downloaded_at = self._clock_ms()
             timestamps = [timestamp_extractor(record) for record in payload]
+            _validate_record_request_range(
+                timestamps,
+                original_start_time_ms=start_time_ms,
+                original_end_time_ms=end_time_ms,
+                page_start_time_ms=current_start,
+            )
             first_timestamp = min(timestamps) if timestamps else None
             last_timestamp = max(timestamps) if timestamps else None
             next_start = last_timestamp + 1 if last_timestamp is not None else None

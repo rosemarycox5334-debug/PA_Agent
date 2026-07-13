@@ -53,10 +53,15 @@ def native_rows(count):
 
 
 class FakeBinanceClient:
-    def __init__(self, exchange_nonce=0):
+    def __init__(self, exchange_nonce=0, server_time=DAY_MS + 1):
         self.exchange_nonce = exchange_nonce
+        self.server_time = server_time
+        self.calls = []
 
     def get_json(self, path, params):
+        self.calls.append((path, dict(params)))
+        if path == "/fapi/v1/time":
+            return {"serverTime": self.server_time}
         if path == "/fapi/v1/exchangeInfo":
             return {
                 "serverTime": self.exchange_nonce,
@@ -96,8 +101,9 @@ class FakeBinanceClient:
 
 
 def test_first_batch_orchestration_writes_data_and_validates_native_periods(tmp_path):
+    client = FakeBinanceClient()
     summary = run_first_batch(
-        client=FakeBinanceClient(),
+        client=client,
         output_dir=tmp_path,
         symbols=("BTCUSDT", "ETHUSDT"),
         start_time_ms=0,
@@ -124,12 +130,25 @@ def test_first_batch_orchestration_writes_data_and_validates_native_periods(tmp_
     assert snapshot["missing_symbols"] == []
     assert snapshot["validity"] == "CURRENT_SNAPSHOT_ONLY"
     assert snapshot["review_status"] == "REVIEW_REQUIRED"
+    assert client.calls[0] == ("/fapi/v1/time", {})
+    assert summary["source_server_time_utc_ms"] == DAY_MS + 1
     assert (tmp_path / "canonical/BTCUSDT_trade_1m.jsonl").exists()
     assert (tmp_path / "summary.json").exists()
     acquisition = json.loads(
         (tmp_path / "acquisition_manifest.json").read_text(encoding="utf-8")
     )
     assert "exchange_info" in acquisition["dataset_page_hashes"]
+    assert acquisition["source_server_time_utc_ms"] == DAY_MS + 1
+    assert len(acquisition["source_server_time_raw_payload_sha256"]) == 64
+    source_time_page = json.loads(
+        (tmp_path / "raw/source_server_time/page-000000.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert source_time_page["payload"] == {"serverTime": DAY_MS + 1}
+    assert source_time_page["metadata"]["raw_payload_sha256"] == acquisition[
+        "source_server_time_raw_payload_sha256"
+    ]
     assert all(
         hashes and all(len(value) == 64 for value in hashes)
         for hashes in acquisition["dataset_page_hashes"].values()
@@ -160,6 +179,89 @@ def test_same_content_has_same_dataset_hash_but_different_acquisition_hash(tmp_p
     assert first["dataset_content_hash"] == second["dataset_content_hash"]
     assert first["acquisition_manifest_hash"] != second["acquisition_manifest_hash"]
     assert first["acquisition_run_id"] != second["acquisition_run_id"]
+
+
+def test_canonical_records_persist_versioned_schema_identities(tmp_path):
+    summary = run_first_batch(
+        client=FakeBinanceClient(),
+        output_dir=tmp_path,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        start_time_ms=0,
+        end_time_ms=DAY_MS - 1,
+        page_limit=2_000,
+        include_index=False,
+        clock_ms=lambda: 999_999_999,
+    )
+
+    kline = json.loads(
+        (tmp_path / "canonical/BTCUSDT_trade_1m.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    funding = json.loads(
+        (tmp_path / "canonical/BTCUSDT_funding.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    contract_rule = json.loads(
+        (tmp_path / "canonical/contract_rules_current.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[0]
+    )
+    assert kline["schema_version"] == "BINANCE_KLINE_V1_EXACT_12"
+    assert funding["schema_version"] == "BINANCE_FUNDING_V1"
+    assert contract_rule["schema_version"] == "CONTRACT_RULE_SNAPSHOT_V1"
+    assert summary["dataset_manifests"]["BTCUSDT_trade_1m"][
+        "canonical_schema_version"
+    ] == "BINANCE_KLINE_V1_EXACT_12"
+    assert summary["dataset_manifests"]["BTCUSDT_funding"][
+        "canonical_schema_version"
+    ] == "BINANCE_FUNDING_V1"
+    assert summary["contract_rule_dataset_manifest"][
+        "canonical_schema_version"
+    ] == "CONTRACT_RULE_SNAPSHOT_V1"
+    assert (
+        tmp_path / "manifests/contract_rules_current.json"
+    ).exists()
+
+
+def test_unclosed_native_bar_fails_before_canonical_persistence(tmp_path):
+    with pytest.raises(DataSchemaError, match="UNCLOSED_BAR"):
+        run_first_batch(
+            client=FakeBinanceClient(server_time=DAY_MS - 1),
+            output_dir=tmp_path,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            start_time_ms=0,
+            end_time_ms=DAY_MS - 1,
+            page_limit=2_000,
+            include_index=False,
+            clock_ms=lambda: 10 * DAY_MS,
+        )
+
+    assert not (tmp_path / "canonical/BTCUSDT_trade_1d.jsonl").exists()
+
+
+def test_wrong_funding_symbol_fails_before_canonical_persistence(tmp_path):
+    class WrongFundingSymbolClient(FakeBinanceClient):
+        def get_json(self, path, params):
+            payload = super().get_json(path, params)
+            if path == "/fapi/v1/fundingRate":
+                payload[0]["symbol"] = "ETHUSDT" if params["symbol"] == "BTCUSDT" else "BTCUSDT"
+            return payload
+
+    with pytest.raises(DataSchemaError, match="symbol"):
+        run_first_batch(
+            client=WrongFundingSymbolClient(),
+            output_dir=tmp_path,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            start_time_ms=0,
+            end_time_ms=DAY_MS - 1,
+            page_limit=2_000,
+            include_index=False,
+            clock_ms=lambda: DAY_MS + 1,
+        )
+
+    assert not (tmp_path / "canonical/BTCUSDT_funding.jsonl").exists()
 
 
 def test_wrapper_script_can_import_package_from_repo_root():

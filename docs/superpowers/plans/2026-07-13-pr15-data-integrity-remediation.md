@@ -117,3 +117,70 @@
 - [ ] Run the required first-batch, security/scope, ruff, diff-check, and compileall commands.
 - [ ] Re-run fixed-seed main/feature comparison and trigger or document actual GitHub Actions status.
 - [ ] Commit, push the same feature branch, verify PR #15 head SHA/files, and stop without merging or starting second batch.
+
+### Task 7: Exchange-server close-time boundary
+
+**Files:**
+- Modify: `pa_agent/research_data/cli.py`
+- Modify: `pa_agent/research_data/normalize.py`
+- Modify: `tests/research_data/test_cli.py`
+- Modify: `tests/research_data/test_normalize.py`
+
+**Interfaces:**
+- Consumes: public `GET /fapi/v1/time` response `{\"serverTime\": int}`.
+- Produces: `source_server_time_utc_ms`, its raw response SHA-256, and fail-closed `UNCLOSED_BAR` behavior before Canonical persistence.
+
+- [ ] Add failing orchestration tests proving `/fapi/v1/time` is the first request, local `clock_ms` cannot change content hash, and source time evidence is persisted.
+- [ ] Add failing normalization/orchestration tests proving any trade, mark, index, 4H, or 1D bar whose close boundary has not passed raises `UNCLOSED_BAR` before Canonical output.
+- [ ] Run focused tests and confirm they fail because closure currently uses local `clock_ms` and unclosed rows are accepted.
+- [ ] Fetch and validate Binance server time once at orchestration start, persist the raw envelope/hash, pass it to every Kline normalizer, and reject unclosed records.
+- [ ] Run focused tests to green.
+
+### Task 8: Persisted Canonical schema identities
+
+**Files:**
+- Modify: `pa_agent/research_data/models.py`
+- Modify: `pa_agent/research_data/normalize.py`
+- Modify: `tests/research_data/test_normalize.py`
+- Modify: `tests/research_data/test_cli.py`
+
+**Interfaces:**
+- Produces: `Kline.schema_version=BINANCE_KLINE_V1_EXACT_12`, `FundingRate.schema_version=BINANCE_FUNDING_V1`, and `ContractRuleSnapshot.schema_version=CONTRACT_RULE_SNAPSHOT_V1` in Canonical JSON and content hashes.
+
+- [ ] Add failing tests for all three model schema fields and for content-hash changes when a Canonical schema identity changes.
+- [ ] Run tests and confirm the fields are absent.
+- [ ] Add immutable schema fields at normalization boundaries so dataclass serialization automatically includes them in Canonical records and dataset hashes.
+- [ ] Run focused tests to green.
+
+### Task 9: Funding source identity and numeric invariants
+
+**Files:**
+- Modify: `pa_agent/research_data/normalize.py`
+- Modify: `pa_agent/research_data/cli.py`
+- Modify: `tests/research_data/test_normalize.py`
+
+**Interfaces:**
+- Consumes: `normalize_funding_rate(item, expected_symbol=...)`.
+- Produces: fail-closed validation for exact symbol match, integral nonnegative funding time, strictly positive mark price, and finite funding rate.
+
+- [ ] Add failing tests for wrong symbol, fractional/negative time, zero/negative mark price, and non-finite rate.
+- [ ] Run focused tests and confirm existing normalization accepts the invalid cases.
+- [ ] Add `expected_symbol` and enforce the four invariants before returning a Canonical `FundingRate`.
+- [ ] Run focused tests to green.
+
+### Task 10: Raw response request-range invariants and final evidence
+
+**Files:**
+- Modify: `pa_agent/research_data/downloader.py`
+- Modify: `tests/research_data/test_downloader_resume.py`
+- Modify: `docs/verification/2026-07-13-first-batch-data-validation-results.md`
+
+**Interfaces:**
+- Produces: `RAW_RECORD_OUT_OF_REQUEST_RANGE` for records outside the original inclusive range or before the page request `startTime`, enforced both on fresh pages and restored pages.
+
+- [ ] Add failing tests for original-range overflow, page-start underflow, and restored-page tampering across page boundaries.
+- [ ] Run focused tests and confirm out-of-range payloads currently pass raw validation.
+- [ ] Validate every timestamp against the immutable request identity and the page request before raw commit and again during raw-page replay.
+- [ ] Run all first-batch, security/scope, ruff, diff-check, and compileall commands.
+- [ ] Run a real BTCUSDT/ETHUSDT three-day interrupted/resumed/clean comparison and record server time, closure, funding identity, raw-range, aggregation, and dual-hash evidence.
+- [ ] Update the PR report, commit/push the existing feature branch, verify PR #15 status, and stop without merging or starting second batch.

@@ -26,6 +26,15 @@ def test_content_hash_ignores_record_order_but_not_content():
     )
 
 
+def test_content_hash_changes_when_canonical_schema_version_changes():
+    first = [{"symbol": "BTCUSDT", "time": 1, "schema_version": "SCHEMA_V1"}]
+    second = [{"symbol": "BTCUSDT", "time": 1, "schema_version": "SCHEMA_V2"}]
+
+    assert dataset_content_hash(
+        first, key_fields=("symbol", "time")
+    ) != dataset_content_hash(second, key_fields=("symbol", "time"))
+
+
 def test_acquisition_hash_changes_when_download_process_changes():
     first = {"dataset_content_hash": "same", "downloaded_at_utc_ms": 1, "pages": ["a"]}
     second = {"dataset_content_hash": "same", "downloaded_at_utc_ms": 2, "pages": ["a", "b"]}

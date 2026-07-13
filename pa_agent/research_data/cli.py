@@ -21,7 +21,13 @@ from pa_agent.research_data.hashing import (
     acquisition_run_id,
     dataset_content_hash,
 )
-from pa_agent.research_data.models import Kline, StreamGapReport
+from pa_agent.research_data.models import (
+    CONTRACT_RULE_SCHEMA_VERSION,
+    FUNDING_SCHEMA_VERSION,
+    KLINE_SCHEMA_VERSION,
+    Kline,
+    StreamGapReport,
+)
 from pa_agent.research_data.normalize import (
     ContractRuleValidationFailure,
     contract_rule_validation_snapshot,
@@ -47,6 +53,53 @@ def _gap_report_dict(report: StreamGapReport) -> dict[str, Any]:
     return result
 
 
+def _capture_source_server_time(
+    *, client: JsonClient, store: AtomicDatasetStore, downloaded_at_utc_ms: int
+) -> tuple[int, str]:
+    response = client.get_json("/fapi/v1/time", {})
+    if not isinstance(response, dict):
+        raise TypeError("Binance server time must return an object")
+    server_time = response.get("serverTime")
+    if isinstance(server_time, bool) or not isinstance(server_time, int) or server_time < 0:
+        raise ValueError("Binance serverTime must be a nonnegative integer")
+    raw_hash = _sha256_json(response)
+    request_identity = {
+        "dataset_name": "source_server_time",
+        "downloader_schema_version": "BINANCE_PUBLIC_DOWNLOADER_V2",
+        "end_time_ms": None,
+        "interval": None,
+        "limit": None,
+        "normalized_params": {},
+        "path": "/fapi/v1/time",
+        "pair": None,
+        "start_time_ms": None,
+        "symbol": None,
+        "symbol_or_pair": None,
+    }
+    store.write_raw_page(
+        "source_server_time",
+        0,
+        {
+            "metadata": {
+                "downloaded_at_utc_ms": downloaded_at_utc_ms,
+                "first_timestamp": server_time,
+                "last_timestamp": server_time,
+                "next_start": None,
+                "page_index": 0,
+                "path": "/fapi/v1/time",
+                "request": {},
+                "request_identity": request_identity,
+                "request_identity_hash": _sha256_json(request_identity),
+                "retry_count": 0,
+                "row_count": 1,
+            },
+            "payload": response,
+            "request": {},
+        },
+    )
+    return server_time, raw_hash
+
+
 def _download_klines(
     *,
     downloader: DatasetDownloader,
@@ -57,7 +110,7 @@ def _download_klines(
     start_time_ms: int,
     end_time_ms: int,
     page_limit: int,
-    now_ms: int,
+    source_server_time_utc_ms: int,
     existing_data_policy: str,
 ) -> tuple[tuple[Kline, ...], dict[str, Any]]:
     if stream == "trade":
@@ -66,7 +119,10 @@ def _download_klines(
 
         def normalizer(row):
             return normalize_trade_kline(
-                row, symbol=symbol, interval=interval, now_ms=now_ms
+                row,
+                symbol=symbol,
+                interval=interval,
+                source_server_time_utc_ms=source_server_time_utc_ms,
             )
 
     elif stream == "mark":
@@ -75,7 +131,11 @@ def _download_klines(
 
         def normalizer(row):
             return normalize_price_kline(
-                row, stream="mark", symbol=symbol, interval=interval, now_ms=now_ms
+                row,
+                stream="mark",
+                symbol=symbol,
+                interval=interval,
+                source_server_time_utc_ms=source_server_time_utc_ms,
             )
 
     elif stream == "index":
@@ -84,7 +144,11 @@ def _download_klines(
 
         def normalizer(row):
             return normalize_price_kline(
-                row, stream="index", symbol=symbol, interval=interval, now_ms=now_ms
+                row,
+                stream="index",
+                symbol=symbol,
+                interval=interval,
+                source_server_time_utc_ms=source_server_time_utc_ms,
             )
     else:
         raise ValueError(f"Unsupported kline stream: {stream}")
@@ -109,7 +173,11 @@ def _download_klines(
         record_dicts,
         key_fields=("symbol", "open_time_utc_ms"),
     )
-    manifest = {**result.manifest, "dataset_content_hash": content_hash}
+    manifest = {
+        **result.manifest,
+        "canonical_schema_version": KLINE_SCHEMA_VERSION,
+        "dataset_content_hash": content_hash,
+    }
     manifest["acquisition_manifest_hash"] = acquisition_manifest_hash(manifest)
     store.write_json_atomic(f"manifests/{name}.json", manifest)
     return records, manifest
@@ -136,7 +204,9 @@ def _download_funding(
         timestamp_extractor=lambda row: int(row["fundingTime"]),
         existing_data_policy=existing_data_policy,
     )
-    records = tuple(normalize_funding_rate(row) for row in result.records)
+    records = tuple(
+        normalize_funding_rate(row, expected_symbol=symbol) for row in result.records
+    )
     record_dicts = [asdict(record) for record in records]
     content_hash = dataset_content_hash(
         record_dicts, key_fields=("symbol", "funding_time_utc_ms")
@@ -146,7 +216,11 @@ def _download_funding(
         record_dicts,
         key_fields=("symbol", "funding_time_utc_ms"),
     )
-    manifest = {**result.manifest, "dataset_content_hash": content_hash}
+    manifest = {
+        **result.manifest,
+        "canonical_schema_version": FUNDING_SCHEMA_VERSION,
+        "dataset_content_hash": content_hash,
+    }
     manifest["acquisition_manifest_hash"] = acquisition_manifest_hash(manifest)
     store.write_json_atomic(f"manifests/{name}.json", manifest)
     return records, manifest
@@ -165,8 +239,15 @@ def run_first_batch(
     existing_data_policy: str = "reject",
 ) -> dict[str, Any]:
     store = AtomicDatasetStore(output_dir)
+    acquisition_started_at_utc_ms = clock_ms()
+    source_server_time_utc_ms, source_server_time_raw_payload_sha256 = (
+        _capture_source_server_time(
+            client=client,
+            store=store,
+            downloaded_at_utc_ms=acquisition_started_at_utc_ms,
+        )
+    )
     downloader = DatasetDownloader(client, store, clock_ms=clock_ms)
-    now_ms = clock_ms()
     manifests: dict[str, dict[str, Any]] = {}
     content_hashes: list[dict[str, str]] = []
     gap_reports: dict[str, dict[str, dict[str, Any]]] = {}
@@ -182,7 +263,7 @@ def run_first_batch(
             start_time_ms=start_time_ms,
             end_time_ms=end_time_ms,
             page_limit=page_limit,
-            now_ms=now_ms,
+            source_server_time_utc_ms=source_server_time_utc_ms,
             existing_data_policy=existing_data_policy,
         )
         native_4h, manifest_4h = _download_klines(
@@ -194,7 +275,7 @@ def run_first_batch(
             start_time_ms=start_time_ms,
             end_time_ms=end_time_ms,
             page_limit=page_limit,
-            now_ms=now_ms,
+            source_server_time_utc_ms=source_server_time_utc_ms,
             existing_data_policy=existing_data_policy,
         )
         native_1d, manifest_1d = _download_klines(
@@ -206,7 +287,7 @@ def run_first_batch(
             start_time_ms=start_time_ms,
             end_time_ms=end_time_ms,
             page_limit=page_limit,
-            now_ms=now_ms,
+            source_server_time_utc_ms=source_server_time_utc_ms,
             existing_data_policy=existing_data_policy,
         )
         mark_1m, mark_manifest = _download_klines(
@@ -218,7 +299,7 @@ def run_first_batch(
             start_time_ms=start_time_ms,
             end_time_ms=end_time_ms,
             page_limit=page_limit,
-            now_ms=now_ms,
+            source_server_time_utc_ms=source_server_time_utc_ms,
             existing_data_policy=existing_data_policy,
         )
         funding, funding_manifest = _download_funding(
@@ -248,7 +329,7 @@ def run_first_batch(
                 start_time_ms=start_time_ms,
                 end_time_ms=end_time_ms,
                 page_limit=page_limit,
-                now_ms=now_ms,
+                source_server_time_utc_ms=source_server_time_utc_ms,
                 existing_data_policy=existing_data_policy,
             )
             symbol_manifests[f"{symbol}_index_1m"] = index_manifest
@@ -340,7 +421,7 @@ def run_first_batch(
         0,
         {
             "metadata": {
-                "downloaded_at_utc_ms": now_ms,
+                "downloaded_at_utc_ms": acquisition_started_at_utc_ms,
                 "first_timestamp": None,
                 "last_timestamp": None,
                 "next_start": None,
@@ -359,14 +440,14 @@ def run_first_batch(
     contract_validation = contract_rule_validation_snapshot(
         exchange_info,
         symbols=symbols,
-        acquired_at_utc_ms=now_ms,
+        acquired_at_utc_ms=acquisition_started_at_utc_ms,
         source_hash=exchange_hash,
     )
     try:
         contract_rules = normalize_contract_rules(
             exchange_info,
             symbols=symbols,
-            acquired_at_utc_ms=now_ms,
+            acquired_at_utc_ms=acquisition_started_at_utc_ms,
             source_hash=exchange_hash,
         )
     except ContractRuleValidationFailure as exc:
@@ -395,12 +476,29 @@ def run_first_batch(
     contract_content_hash = dataset_content_hash(
         contract_content_records, key_fields=("symbol",)
     )
+    contract_rule_dataset_manifest = {
+        "acquired_at_utc_ms": acquisition_started_at_utc_ms,
+        "canonical_schema_version": CONTRACT_RULE_SCHEMA_VERSION,
+        "dataset_content_hash": contract_content_hash,
+        "dataset_name": "contract_rules_current",
+        "record_count": len(contract_dicts),
+        "source_hash": exchange_hash,
+    }
+    contract_rule_dataset_manifest["acquisition_manifest_hash"] = (
+        acquisition_manifest_hash(contract_rule_dataset_manifest)
+    )
+    store.write_json_atomic(
+        "manifests/contract_rules_current.json", contract_rule_dataset_manifest
+    )
     content_hashes.append({"dataset": "contract_rules_current", "hash": contract_content_hash})
     global_content_hash = dataset_content_hash(
         content_hashes, key_fields=("dataset",)
     )
     acquisition_manifest = {
         "completed_at_utc_ms": clock_ms(),
+        "contract_rule_dataset_manifest_hash": contract_rule_dataset_manifest[
+            "acquisition_manifest_hash"
+        ],
         "dataset_content_hash": global_content_hash,
         "datasets": {name: manifest["acquisition_manifest_hash"] for name, manifest in manifests.items()},
         "dataset_page_hashes": {
@@ -411,12 +509,15 @@ def run_first_batch(
             "exchange_info": [
                 store.read_raw_pages("exchange_info")[0]["metadata"]["raw_payload_sha256"]
             ],
+            "source_server_time": [source_server_time_raw_payload_sha256],
         },
-        "exchange_info_acquired_at_utc_ms": now_ms,
+        "exchange_info_acquired_at_utc_ms": acquisition_started_at_utc_ms,
         "exchange_info_raw_payload_sha256": store.read_raw_pages("exchange_info")[0][
             "metadata"
         ]["raw_payload_sha256"],
         "exchange_info_request_identity_hash": exchange_identity_hash,
+        "source_server_time_raw_payload_sha256": source_server_time_raw_payload_sha256,
+        "source_server_time_utc_ms": source_server_time_utc_ms,
         "symbols": list(symbols),
     }
     global_acquisition_hash = acquisition_manifest_hash(acquisition_manifest)
@@ -426,9 +527,12 @@ def run_first_batch(
         "aggregation": aggregation,
         "contract_rules": contract_dicts,
         "contract_rule_snapshot": contract_validation_dict,
+        "contract_rule_dataset_manifest": contract_rule_dataset_manifest,
         "dataset_content_hash": global_content_hash,
         "dataset_manifests": manifests,
         "gap_reports": gap_reports,
+        "source_server_time_raw_payload_sha256": source_server_time_raw_payload_sha256,
+        "source_server_time_utc_ms": source_server_time_utc_ms,
     }
     store.write_json_atomic("acquisition_manifest.json", acquisition_manifest)
     store.write_json_atomic("summary.json", summary)

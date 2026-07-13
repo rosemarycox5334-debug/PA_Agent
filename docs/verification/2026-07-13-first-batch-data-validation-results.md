@@ -75,21 +75,21 @@ scripts/
 结果：
 
 ```text
-collected 101 items
+collected 116 items
 test_aggregation.py                    3 passed
 test_aggregation_validation.py       18 passed
 test_binance_public_security.py      16 passed
 test_canonical.py                     3 passed
-test_cli.py                           5 passed
-test_downloader_resume.py            15 passed
+test_cli.py                           8 passed
+test_downloader_resume.py            18 passed
 test_gaps.py                          7 passed
-test_hashing.py                       3 passed
+test_hashing.py                       4 passed
 test_models.py                        3 passed
 test_multi_page_resume.py             1 passed
-test_normalize.py                    19 passed
+test_normalize.py                    27 passed
 test_scope_guard.py                   4 passed
 test_storage.py                       4 passed
-101 passed in 15.14s
+116 passed in 17.32s
 ```
 
 ### 安全守卫单独验证
@@ -104,7 +104,7 @@ test_storage.py                       4 passed
 collected 20 items
 test_binance_public_security.py      16 passed
 test_scope_guard.py                   4 passed
-20 passed in 0.34s
+20 passed in 0.36s
 ```
 
 ### 静态检查
@@ -225,3 +225,95 @@ PR 初版报告曾把“保存 raw page”与“已保存并复核 raw page payl
 - 滑点、手续费、保证金和事件路径尚未实现。
 - 上游 PA_Agent 已安装完整依赖并完成 main/feature 离线同口径回归；两者存在相同的 43 个上游既有失败。完整集合中的 live integration/e2e 在两分支均触发 300 秒上限，因此没有完整集合通过结论。
 - 本次只完成获批的第一批数据与验证环境；不修复上游 43 个既有失败，也不扩展到第二批。
+
+## 8. PR #15 最后一轮四项完整性修复
+
+### 8.1 未收盘 K 线与确定性时间源
+
+- `run_first_batch` 的第一个公共请求为 `GET /fapi/v1/time`，仅使用响应中的 `serverTime` 判断 K 线是否闭合；本地 `clock_ms` 只记录采集时间。
+- 原始时间响应保存到 `raw/source_server_time/page-000000.json`；`source_server_time_utc_ms` 与 `source_server_time_raw_payload_sha256` 同时进入 acquisition manifest 和 summary。
+- trade、mark、index、原生 4H/1D 任一 K 线若 `close_time_utc_ms >= source_server_time_utc_ms`，立即产生 `UNCLOSED_BAR`，该数据集不会写入 Canonical 文件或 content hash。
+- 真实三天验证的恢复下载与干净下载取得不同 server time，但相同规范数据的 content hash 保持一致。
+
+### 8.2 Canonical Schema 身份
+
+以下固定版本字段已进入 dataclass、Canonical JSONL、dataset content hash 和 dataset manifest：
+
+```text
+Kline.schema_version=BINANCE_KLINE_V1_EXACT_12
+FundingRate.schema_version=BINANCE_FUNDING_V1
+ContractRuleSnapshot.schema_version=CONTRACT_RULE_SNAPSHOT_V1
+```
+
+回归测试确认：仅修改 Canonical `schema_version` 即会改变 dataset content hash。
+
+### 8.3 Funding 身份与数值校验
+
+`normalize_funding_rate` 现在必须接收 `expected_symbol`，并 fail closed 校验：
+
+- `returned symbol == expected symbol`；
+- `funding_time` 为非负整数；
+- `mark_price > 0`；
+- `funding_rate` 为有限 Decimal。
+
+错误币种或非法数值只能保留在 Raw 审计证据中，不能进入 Canonical funding 数据或 content hash。
+
+### 8.4 Raw 响应范围校验
+
+每页新响应在写入 Raw 前、恢复时读取既有 Raw 页后，均校验每条记录满足：
+
+```text
+original_start_time <= timestamp <= original_end_time
+timestamp >= page_request.startTime
+```
+
+违反时产生 `RAW_RECORD_OUT_OF_REQUEST_RANGE`。测试覆盖原始范围越界、后续分页起点越界，以及重算页哈希和 checkpoint 哈希后的恢复页越界，防止范围校验被完整性元数据替代。
+
+### 8.5 最终测试结果
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/research_data -v
+.\.venv\Scripts\python.exe -m pytest tests/research_data/test_binance_public_security.py tests/research_data/test_scope_guard.py -v
+.\.venv\Scripts\ruff.exe check pa_agent/research_data tests/research_data scripts/download_binance_research.py
+git diff --check origin/main...HEAD
+.\.venv\Scripts\python.exe -m compileall pa_agent/research_data
+```
+
+```text
+首批数据测试：116 passed in 17.32s
+安全与范围守卫：20 passed in 0.36s
+ruff：All checks passed!
+diff-check：exit 0
+compileall：exit 0
+```
+
+### 8.6 BTCUSDT/ETHUSDT 三天真实最终验证
+
+窗口：`2026-07-01T00:00:00Z` 至 `2026-07-03T23:59:59.999Z`，包含 trade、mark、index、funding、原生 4H/1D 和当前 contract rules。第 3 个分页请求故意中断，随后从 checkpoint 恢复，并与独立干净下载对照。
+
+```text
+BTCUSDT trade 1m pages=5
+ETHUSDT trade 1m pages=5
+RESUMED=True
+RESUMED_SOURCE_SERVER_TIME_UTC_MS=1783938166908
+CLEAN_SOURCE_SERVER_TIME_UTC_MS=1783938197290
+SOURCE_SERVER_TIME_RAW_HASH_PRESENT=True
+ALL_CANONICAL_KLINES_CLOSED=True
+SCHEMA_VERSIONS=BINANCE_KLINE_V1_EXACT_12,BINANCE_FUNDING_V1,CONTRACT_RULE_SNAPSHOT_V1
+FUNDING_SYMBOLS_MATCH=True
+ALL_RAW_RECORDS_IN_ORIGINAL_AND_PAGE_RANGES=True
+BTCUSDT/ETHUSDT 4H_VALID=True 1D_VALID=True
+BTCUSDT/ETHUSDT FUNDING=COMPLETE SCHEDULE=VERIFIED COVERAGE=COMPLETE
+DATASET_CONTENT_HASH_EQUAL=True
+DATASET_CONTENT_HASH=36a66639422fcc3bc739574c6c7c83227ae9b0c822db0d227b782fadb1f33286
+RESUMED_ACQUISITION_HASH=2991648944fe281a6041bc192e94d7999cfbeb5c7c0cc866c8c6e519bbdd4d7f
+CLEAN_ACQUISITION_HASH=591197da532c7f97a8a24351db4f6253ca83ea2e2089c8d9528acfd644929c9e
+ACQUISITION_HASH_DIFFERENT=True
+```
+
+运行时输出：
+
+- `research_data_output/live_3day_pr15_final_v2_resume/summary.json`
+- `research_data_output/live_3day_pr15_final_v2_clean/summary.json`
+
+本轮仍未实现任何指标、Candidate、ExecutionPlan、仓位、撮合、资金费结算、爆仓、账本、GUI、LLM、鉴权或交易接口；第二批仍未开始。

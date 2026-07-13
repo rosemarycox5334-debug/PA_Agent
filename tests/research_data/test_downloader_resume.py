@@ -1,8 +1,10 @@
+import hashlib
 import json
 
 import pytest
 
 from pa_agent.research_data.binance_public import PublicTransportError
+from pa_agent.research_data.canonical import canonical_dumps
 from pa_agent.research_data.downloader import DatasetDownloader
 from pa_agent.research_data.storage import AtomicDatasetStore
 
@@ -372,3 +374,88 @@ def test_identical_duplicate_primary_key_is_deduplicated(tmp_path):
         timestamp_extractor=lambda row: int(row[0]),
     )
     assert result.records == ([0, "same"],)
+
+
+def test_fresh_page_rejects_record_outside_original_request_range_before_raw_commit(
+    tmp_path,
+):
+    class Client:
+        def get_json(self, _path, _params):
+            return [[-1, "outside"]]
+
+    with pytest.raises(ValueError, match="RAW_RECORD_OUT_OF_REQUEST_RANGE"):
+        DatasetDownloader(
+            Client(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 1
+        ).download_pages(
+            dataset_name="outside_original_range",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=60_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+    assert not (tmp_path / "raw/outside_original_range/page-000000.json").exists()
+
+
+def test_later_page_rejects_record_before_its_request_start(tmp_path):
+    class Client:
+        def get_json(self, _path, params):
+            if params["startTime"] == 0:
+                return [[0, "a"], [60_000, "b"]]
+            return [[60_000, "overlap-not-requested"], [120_000, "c"]]
+
+    with pytest.raises(ValueError, match="RAW_RECORD_OUT_OF_REQUEST_RANGE"):
+        DatasetDownloader(
+            Client(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 1
+        ).download_pages(
+            dataset_name="outside_page_range",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+    assert not (tmp_path / "raw/outside_page_range/page-000001.json").exists()
+
+
+def test_resume_revalidates_restored_raw_records_against_original_range(tmp_path):
+    store = AtomicDatasetStore(tmp_path)
+    with pytest.raises(OSError, match="interrupted"):
+        DatasetDownloader(InterruptingClient(), store, clock_ms=lambda: 10).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+    page_path = tmp_path / "raw/btc_trade_1m/page-000000.json"
+    page = json.loads(page_path.read_text(encoding="utf-8"))
+    page["payload"][0][0] = -1
+    page["metadata"]["first_timestamp"] = -1
+    payload_hash = hashlib.sha256(
+        canonical_dumps(page["payload"]).encode("utf-8")
+    ).hexdigest()
+    page["metadata"]["raw_payload_sha256"] = payload_hash
+    page_path.write_text(json.dumps(page), encoding="utf-8")
+    checkpoint_path = tmp_path / "state/btc_trade_1m.checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["raw_page_hashes"] = [payload_hash]
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="RAW_RECORD_OUT_OF_REQUEST_RANGE"):
+        DatasetDownloader(ResumeClient(), store, clock_ms=lambda: 20).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
