@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from pa_agent.research_data.binance_public import PublicTransportError
 from pa_agent.research_data.downloader import DatasetDownloader
 from pa_agent.research_data.storage import AtomicDatasetStore
@@ -142,3 +146,229 @@ def test_nonretryable_public_error_is_not_retried(tmp_path):
     else:
         raise AssertionError("expected non-retryable error")
     assert sleeps == []
+
+
+def test_resume_rejects_changed_request_identity(tmp_path):
+    store = AtomicDatasetStore(tmp_path)
+    with pytest.raises(OSError, match="interrupted"):
+        DatasetDownloader(InterruptingClient(), store, clock_ms=lambda: 10).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+    with pytest.raises(ValueError, match="request identity"):
+        DatasetDownloader(ResumeClient(), store, clock_ms=lambda: 20).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "5m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+
+def test_raw_page_records_identity_payload_hash_and_page_chain(tmp_path):
+    store = AtomicDatasetStore(tmp_path)
+    with pytest.raises(OSError, match="interrupted"):
+        DatasetDownloader(InterruptingClient(), store, clock_ms=lambda: 10).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+    page = store.read_raw_pages("btc_trade_1m")[0]
+    metadata = page["metadata"]
+    assert len(metadata["raw_payload_sha256"]) == 64
+    assert len(metadata["request_identity_hash"]) == 64
+    assert metadata["request_identity"]["dataset_name"] == "btc_trade_1m"
+    assert metadata["first_timestamp"] == 0
+    assert metadata["last_timestamp"] == 60_000
+    assert metadata["next_start"] == 60_001
+    assert metadata["row_count"] == 2
+    assert metadata["page_index"] == 0
+
+
+def test_resume_rejects_tampered_raw_page(tmp_path):
+    store = AtomicDatasetStore(tmp_path)
+    with pytest.raises(OSError, match="interrupted"):
+        DatasetDownloader(InterruptingClient(), store, clock_ms=lambda: 10).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+    page_path = tmp_path / "raw/btc_trade_1m/page-000000.json"
+    page = json.loads(page_path.read_text(encoding="utf-8"))
+    page["payload"][0][1] = "tampered"
+    page_path.write_text(json.dumps(page), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="raw payload hash"):
+        DatasetDownloader(ResumeClient(), store, clock_ms=lambda: 20).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+
+def test_completed_directory_requires_explicit_reuse(tmp_path):
+    class Client:
+        def get_json(self, _path, _params):
+            return [[0, "same"]]
+
+    kwargs = dict(
+        dataset_name="completed",
+        path="/fapi/v1/klines",
+        params={"symbol": "BTCUSDT", "interval": "1m"},
+        start_time_ms=0,
+        end_time_ms=0,
+        limit=2,
+        timestamp_extractor=lambda row: int(row[0]),
+    )
+    DatasetDownloader(Client(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 1).download_pages(
+        **kwargs
+    )
+
+    with pytest.raises(ValueError, match="completed raw directory"):
+        DatasetDownloader(Client(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 2).download_pages(
+            **kwargs
+        )
+
+
+def test_conflicting_duplicate_primary_key_fails_closed(tmp_path):
+    class Client:
+        def get_json(self, _path, _params):
+            return [[0, "first"], [0, "conflict"]]
+
+    with pytest.raises(ValueError, match="ConflictingDuplicateRecord"):
+        DatasetDownloader(Client(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 1).download_pages(
+            dataset_name="conflict",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=0,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"end_time_ms": 180_000},
+        {"limit": 3},
+        {"path": "/fapi/v1/markPriceKlines"},
+    ],
+)
+def test_resume_rejects_changed_range_limit_or_path(tmp_path, changed):
+    store = AtomicDatasetStore(tmp_path)
+    base = dict(
+        dataset_name="btc_trade_1m",
+        path="/fapi/v1/klines",
+        params={"symbol": "BTCUSDT", "interval": "1m"},
+        start_time_ms=0,
+        end_time_ms=120_000,
+        limit=2,
+        timestamp_extractor=lambda row: int(row[0]),
+    )
+    with pytest.raises(OSError, match="interrupted"):
+        DatasetDownloader(InterruptingClient(), store, clock_ms=lambda: 10).download_pages(**base)
+    with pytest.raises(ValueError, match="request identity"):
+        DatasetDownloader(ResumeClient(), store, clock_ms=lambda: 20).download_pages(
+            **{**base, **changed}
+        )
+
+
+def test_resume_rejects_corrupt_checkpoint_page_hashes(tmp_path):
+    store = AtomicDatasetStore(tmp_path)
+    with pytest.raises(OSError, match="interrupted"):
+        DatasetDownloader(InterruptingClient(), store, clock_ms=lambda: 10).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+    checkpoint_path = tmp_path / "state/btc_trade_1m.checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["raw_page_hashes"] = ["0" * 64]
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Checkpoint raw page hashes"):
+        DatasetDownloader(ResumeClient(), store, clock_ms=lambda: 20).download_pages(
+            dataset_name="btc_trade_1m",
+            path="/fapi/v1/klines",
+            params={"symbol": "BTCUSDT", "interval": "1m"},
+            start_time_ms=0,
+            end_time_ms=120_000,
+            limit=2,
+            timestamp_extractor=lambda row: int(row[0]),
+        )
+
+
+def test_completed_directory_can_be_explicitly_reused_without_network(tmp_path):
+    class InitialClient:
+        def get_json(self, _path, _params):
+            return [[0, "same"]]
+
+    class NoNetworkClient:
+        def get_json(self, _path, _params):
+            raise AssertionError("explicit reuse must not download another raw page")
+
+    kwargs = dict(
+        dataset_name="completed",
+        path="/fapi/v1/klines",
+        params={"symbol": "BTCUSDT", "interval": "1m"},
+        start_time_ms=0,
+        end_time_ms=0,
+        limit=2,
+        timestamp_extractor=lambda row: int(row[0]),
+    )
+    DatasetDownloader(
+        InitialClient(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 1
+    ).download_pages(**kwargs)
+    reused = DatasetDownloader(
+        NoNetworkClient(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 2
+    ).download_pages(**kwargs, existing_data_policy="reuse")
+
+    assert reused.records == ([0, "same"],)
+    assert reused.manifest["reused_existing"] is True
+    assert len(reused.manifest["pages"]) == 1
+    assert all(len(page["raw_payload_sha256"]) == 64 for page in reused.manifest["pages"])
+
+
+def test_identical_duplicate_primary_key_is_deduplicated(tmp_path):
+    class Client:
+        def get_json(self, _path, _params):
+            return [[0, "same"], [0, "same"]]
+
+    result = DatasetDownloader(
+        Client(), AtomicDatasetStore(tmp_path), clock_ms=lambda: 1
+    ).download_pages(
+        dataset_name="identical_duplicate",
+        path="/fapi/v1/klines",
+        params={"symbol": "BTCUSDT", "interval": "1m"},
+        start_time_ms=0,
+        end_time_ms=0,
+        limit=2,
+        timestamp_extractor=lambda row: int(row[0]),
+    )
+    assert result.records == ([0, "same"],)

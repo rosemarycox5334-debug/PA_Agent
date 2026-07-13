@@ -4,11 +4,34 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from pa_agent.research_data.models import ContractRuleSnapshot, FundingRate, Kline
+from pa_agent.research_data.models import (
+    ContractRuleSnapshot,
+    ContractRuleValidationSnapshot,
+    FundingRate,
+    Kline,
+)
 
 
 class DataSchemaError(ValueError):
     pass
+
+
+class ContractRuleValidationFailure(DataSchemaError):
+    def __init__(self, snapshot: ContractRuleValidationSnapshot) -> None:
+        self.snapshot = snapshot
+        self.missing_symbols = snapshot.missing_symbols
+        super().__init__(
+            "ContractRuleValidationFailure: missing requested symbols: "
+            + ", ".join(snapshot.missing_symbols)
+        )
+
+
+KLINE_SCHEMA_VERSION = "BINANCE_KLINE_V1_EXACT_12"
+INTERVAL_MS = {
+    "1m": 60_000,
+    "4h": 4 * 60 * 60_000,
+    "1d": 24 * 60 * 60_000,
+}
 
 
 def _decimal(value: Any, field: str) -> Decimal:
@@ -21,19 +44,53 @@ def _decimal(value: Any, field: str) -> Decimal:
     return result
 
 
-def _validate_kline_row(row: Sequence[Any]) -> None:
-    if isinstance(row, (str, bytes)) or len(row) < 12:
-        raise DataSchemaError("Binance kline row must contain at least 12 fields")
+def _integer(value: Any, field: str) -> int:
+    number = _decimal(value, field)
+    if number != number.to_integral_value():
+        raise DataSchemaError(f"Non-integral integer field: {field}")
+    return int(number)
+
+
+def _nonnegative(value: Decimal, field: str) -> Decimal:
+    if value < 0:
+        raise DataSchemaError(f"Negative field: {field}")
+    return value
+
+
+def _validate_kline_row(row: Sequence[Any], *, interval: str) -> None:
+    if isinstance(row, (str, bytes)) or len(row) != 12:
+        raise DataSchemaError(
+            f"Binance kline {KLINE_SCHEMA_VERSION} must contain exactly 12 fields"
+        )
+    if interval not in INTERVAL_MS:
+        raise DataSchemaError(f"Unsupported kline interval: {interval}")
+
+
+def _validated_ohlc(row: Sequence[Any], *, interval: str) -> tuple[int, int, Decimal, Decimal, Decimal, Decimal]:
+    open_time = _integer(row[0], "open_time")
+    close_time = _integer(row[6], "close_time")
+    if open_time < 0 or close_time != open_time + INTERVAL_MS[interval] - 1:
+        raise DataSchemaError("Invalid kline open/close time or interval boundary")
+    open_price = _decimal(row[1], "open")
+    high = _decimal(row[2], "high")
+    low = _decimal(row[3], "low")
+    close = _decimal(row[4], "close")
+    if high < max(open_price, close) or low > min(open_price, close) or high < low:
+        raise DataSchemaError("Invalid OHLC relationship")
+    return open_time, close_time, open_price, high, low, close
 
 
 def normalize_trade_kline(
     row: Sequence[Any], *, symbol: str, interval: str, now_ms: int
 ) -> Kline:
-    _validate_kline_row(row)
+    _validate_kline_row(row, interval=interval)
     try:
-        open_time = int(row[0])
-        close_time = int(row[6])
-        trade_count = int(row[8])
+        open_time, close_time, open_price, high, low, close = _validated_ohlc(
+            row, interval=interval
+        )
+        trade_count = _integer(row[8], "trade_count")
+        if trade_count < 0:
+            raise DataSchemaError("Negative field: trade_count")
         return Kline(
             source="binance_fapi",
             stream="trade",
@@ -41,15 +98,19 @@ def normalize_trade_kline(
             interval=interval,
             open_time_utc_ms=open_time,
             close_time_utc_ms=close_time,
-            open=_decimal(row[1], "open"),
-            high=_decimal(row[2], "high"),
-            low=_decimal(row[3], "low"),
-            close=_decimal(row[4], "close"),
-            base_volume=_decimal(row[5], "base_volume"),
-            quote_volume=_decimal(row[7], "quote_volume"),
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+            base_volume=_nonnegative(_decimal(row[5], "base_volume"), "base_volume"),
+            quote_volume=_nonnegative(_decimal(row[7], "quote_volume"), "quote_volume"),
             trade_count=trade_count,
-            taker_buy_base_volume=_decimal(row[9], "taker_buy_base_volume"),
-            taker_buy_quote_volume=_decimal(row[10], "taker_buy_quote_volume"),
+            taker_buy_base_volume=_nonnegative(
+                _decimal(row[9], "taker_buy_base_volume"), "taker_buy_base_volume"
+            ),
+            taker_buy_quote_volume=_nonnegative(
+                _decimal(row[10], "taker_buy_quote_volume"), "taker_buy_quote_volume"
+            ),
             is_closed=close_time < now_ms,
         )
     except (IndexError, TypeError, ValueError) as exc:
@@ -61,12 +122,13 @@ def normalize_trade_kline(
 def normalize_price_kline(
     row: Sequence[Any], *, stream: str, symbol: str, interval: str, now_ms: int
 ) -> Kline:
-    _validate_kline_row(row)
+    _validate_kline_row(row, interval=interval)
     if stream not in {"mark", "index"}:
         raise DataSchemaError("Price kline stream must be mark or index")
     try:
-        open_time = int(row[0])
-        close_time = int(row[6])
+        open_time, close_time, open_price, high, low, close = _validated_ohlc(
+            row, interval=interval
+        )
         return Kline(
             source="binance_fapi",
             stream=stream,
@@ -74,10 +136,10 @@ def normalize_price_kline(
             interval=interval,
             open_time_utc_ms=open_time,
             close_time_utc_ms=close_time,
-            open=_decimal(row[1], "open"),
-            high=_decimal(row[2], "high"),
-            low=_decimal(row[3], "low"),
-            close=_decimal(row[4], "close"),
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
             base_volume=Decimal("0"),
             quote_volume=Decimal("0"),
             trade_count=0,
@@ -116,6 +178,14 @@ def normalize_contract_rules(
     acquired_at_utc_ms: int,
     source_hash: str,
 ) -> tuple[ContractRuleSnapshot, ...]:
+    validation = contract_rule_validation_snapshot(
+        payload,
+        symbols=symbols,
+        acquired_at_utc_ms=acquired_at_utc_ms,
+        source_hash=source_hash,
+    )
+    if validation.missing_symbols:
+        raise ContractRuleValidationFailure(validation)
     raw_symbols = payload.get("symbols")
     if not isinstance(raw_symbols, list):
         raise DataSchemaError("exchangeInfo symbols must be a list")
@@ -152,3 +222,35 @@ def normalize_contract_rules(
                 raise
             raise DataSchemaError(f"Invalid contract filters for {raw.get('symbol')}") from exc
     return tuple(sorted(rules, key=lambda rule: rule.symbol))
+
+
+def contract_rule_validation_snapshot(
+    payload: Mapping[str, Any],
+    *,
+    symbols: Sequence[str],
+    acquired_at_utc_ms: int,
+    source_hash: str,
+) -> ContractRuleValidationSnapshot:
+    raw_symbols = payload.get("symbols")
+    if not isinstance(raw_symbols, list):
+        raise DataSchemaError("exchangeInfo symbols must be a list")
+    requested = tuple(sorted(set(symbols)))
+    returned = tuple(
+        sorted(
+            {
+                str(item["symbol"])
+                for item in raw_symbols
+                if isinstance(item, dict) and item.get("symbol") in requested
+            }
+        )
+    )
+    missing = tuple(sorted(set(requested) - set(returned)))
+    return ContractRuleValidationSnapshot(
+        requested_symbols=requested,
+        returned_symbols=returned,
+        missing_symbols=missing,
+        source_hash=source_hash,
+        acquired_at_utc_ms=acquired_at_utc_ms,
+        validity="CURRENT_SNAPSHOT_ONLY",
+        review_status="VALIDATION_FAILED" if missing else "REVIEW_REQUIRED",
+    )

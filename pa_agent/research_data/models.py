@@ -46,6 +46,12 @@ class StreamGapReport:
     intervals: tuple[GapInterval, ...]
     schedule_version: str | None = None
     observed_steps_ms: tuple[int, ...] = ()
+    schedule_status: str | None = None
+    coverage_status: str | None = None
+
+    @property
+    def gap_intervals(self) -> tuple[GapInterval, ...]:
+        return self.intervals
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,3 +66,14 @@ class ContractRuleSnapshot:
     acquired_at_utc_ms: int
     source_hash: str
     validity: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContractRuleValidationSnapshot:
+    requested_symbols: tuple[str, ...]
+    returned_symbols: tuple[str, ...]
+    missing_symbols: tuple[str, ...]
+    source_hash: str
+    acquired_at_utc_ms: int
+    validity: str
+    review_status: str

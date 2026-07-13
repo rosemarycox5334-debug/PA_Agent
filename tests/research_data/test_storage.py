@@ -43,8 +43,16 @@ def test_atomic_write_removes_temporary_file_when_replace_fails(tmp_path, monkey
 
 def test_raw_pages_are_sorted_and_round_trip(tmp_path):
     store = AtomicDatasetStore(tmp_path)
-    store.write_raw_page("btc_trade_1m", 1, {"payload": [[2]], "request": {"startTime": 2}})
-    store.write_raw_page("btc_trade_1m", 0, {"payload": [[1]], "request": {"startTime": 1}})
+    store.write_raw_page(
+        "btc_trade_1m",
+        1,
+        {"metadata": {"page_index": 1}, "payload": [[2]], "request": {"startTime": 2}},
+    )
+    store.write_raw_page(
+        "btc_trade_1m",
+        0,
+        {"metadata": {"page_index": 0}, "payload": [[1]], "request": {"startTime": 1}},
+    )
 
     pages = store.read_raw_pages("btc_trade_1m")
 
@@ -52,3 +60,15 @@ def test_raw_pages_are_sorted_and_round_trip(tmp_path):
     assert json.loads((tmp_path / "raw/btc_trade_1m/page-000000.json").read_text())[
         "request"
     ] == {"startTime": 1}
+
+
+def test_write_raw_page_always_persists_payload_hash(tmp_path):
+    store = AtomicDatasetStore(tmp_path)
+    store.write_raw_page(
+        "dataset",
+        0,
+        {"metadata": {"page_index": 0}, "payload": [[1, "x"]], "request": {}},
+    )
+
+    page = store.read_raw_pages("dataset")[0]
+    assert len(page["metadata"]["raw_payload_sha256"]) == 64

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -71,9 +72,16 @@ class AtomicDatasetStore:
         self._write_text_atomic(relative, text)
 
     def write_raw_page(self, dataset_name: str, page_index: int, value: Any) -> None:
+        if not isinstance(value, Mapping) or "metadata" not in value or "payload" not in value:
+            raise ValueError("Raw page must contain metadata and payload")
+        metadata = dict(value["metadata"])
+        metadata["raw_payload_sha256"] = hashlib.sha256(
+            canonical_dumps(value["payload"]).encode("utf-8")
+        ).hexdigest()
+        page = {**value, "metadata": metadata}
         self.write_json_atomic(
             f"raw/{dataset_name}/page-{page_index:06d}.json",
-            value,
+            page,
         )
 
     def read_raw_pages(self, dataset_name: str) -> list[dict[str, Any]]:

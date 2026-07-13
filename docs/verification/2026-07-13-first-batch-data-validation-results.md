@@ -55,12 +55,13 @@ scripts/
 - Binance USDⓈ-M 固定主机、固定路径、无鉴权公共 GET 客户端。
 - 成交 1m/4H/1D、标记价 1m、可选指数价 1m、真实历史资金费率和当前 exchangeInfo 下载。
 - Raw page、Canonical JSONL、checkpoint、dataset manifest 和 summary 的原子保存。
-- 分页、边界重拉、主键去重、断点恢复、429/5xx/网络错误有界指数退避。
-- UTC 毫秒、Decimal 规范化和严格 schema 拒绝。
+- 每个分页任务使用不可变 request identity；checkpoint 与 raw page 同时保存 identity 和 SHA-256。每页保存 payload SHA-256、首末时间、next start、请求、重试、行数、页号与下载时间；恢复和最终提交前重新计算并验证全部 raw page。
+- 分页、边界重拉、仅完全相同记录可去重、冲突主键 fail closed、显式完成目录 reuse/reject、断点恢复、429/5xx/网络错误有界指数退避。
+- UTC 毫秒、Decimal 规范化和版本化严格 Kline V1 schema：恰好 12 字段，校验 OHLC、非负 volume/count、整数 trade_count、open/close 时间和周期边界。
 - Canonical JSON、稳定 dataset content hash、独立 acquisition manifest hash/run ID、独立 computational experiment ID 纯函数。
-- 当前 contract rule 保存为 `CURRENT_SNAPSHOT_ONLY`，不推断历史有效期。
-- 四类独立缺口区间和状态。
-- 1m 聚合 4H/1D，按 `AGG_VALIDATION_V1` 与 Binance 原生周期交叉验证。
+- 当前 contract rule 保存为 `CURRENT_SNAPSHOT_ONLY`，同时保存 requested/returned/missing symbols、source hash、采集时间和 review status；任一请求币种缺失产生 `ContractRuleValidationFailure`。
+- 四类独立缺口区间和状态；Funding 独立保存 schedule status、coverage status、gap intervals 和 observed steps。
+- 1m 聚合 4H/1D，按 `AGG_VALIDATION_V1` 与 Binance 原生周期做双向一对一交叉验证；空集合、额外/重复 native 和 partial edge bucket 均不能返回 valid。
 - 公共接口安全守卫、范围守卫、原子性、恢复、哈希、容差和 CLI 测试。
 
 ## 4. 测试命令与完整结果
@@ -74,21 +75,21 @@ scripts/
 结果：
 
 ```text
-collected 67 items
+collected 101 items
 test_aggregation.py                    3 passed
-test_aggregation_validation.py       13 passed
+test_aggregation_validation.py       18 passed
 test_binance_public_security.py      16 passed
 test_canonical.py                     3 passed
-test_cli.py                           3 passed
-test_downloader_resume.py             4 passed
-test_gaps.py                          4 passed
+test_cli.py                           5 passed
+test_downloader_resume.py            15 passed
+test_gaps.py                          7 passed
 test_hashing.py                       3 passed
 test_models.py                        3 passed
 test_multi_page_resume.py             1 passed
-test_normalize.py                     7 passed
+test_normalize.py                    19 passed
 test_scope_guard.py                   4 passed
-test_storage.py                       3 passed
-67 passed in 6.72s
+test_storage.py                       4 passed
+101 passed in 15.14s
 ```
 
 ### 安全守卫单独验证
@@ -103,7 +104,7 @@ test_storage.py                       3 passed
 collected 20 items
 test_binance_public_security.py      16 passed
 test_scope_guard.py                   4 passed
-20 passed in 0.32s
+20 passed in 0.34s
 ```
 
 ### 静态检查
@@ -140,8 +141,8 @@ python -m pytest tests/unit tests/property --tb=no --hypothesis-seed=20260713
 结果：
 
 ```text
-main:    43 failed, 659 passed in 24.06s
-feature: 43 failed, 659 passed in 21.94s
+main:    43 failed, 659 passed in 28.69s
+feature: 43 failed, 659 passed in 24.15s
 失败测试集合一致；feature 未新增上游离线测试失败。
 ```
 
@@ -187,36 +188,39 @@ ETHUSDT 4H_VALID=True 1D_VALID=True trade/mark/funding/index=COMPLETE
 - `research_data_output/live_resume_example/summary.json`
 - `research_data_output/live_clean_example/summary.json`
 
-### 3 天、多页、第 3 次请求中断的真实公共接口示例
+### 完整性修复后的 3 天、多页、第 3 次请求中断真实示例
 
 区间：`2026-07-01 00:00:00.000 UTC` 至 `2026-07-03 23:59:59.999 UTC`，BTCUSDT 与 ETHUSDT 各 4,320 根 1m 成交 K 线，分页上限 1,000。第 3 次真实公共请求前主动抛出中断，随后从 checkpoint 恢复；另在独立目录完成干净下载。
 
 ```text
-INTERRUPTED intentional live page-three interruption
-RESUMED_FLAG True
+INTERRUPTED intentional live page-three interruption final
 RESUMED_CONTENT_HASH 158959dcce3f0ef08271eeea7a6104a71f85d73bd10c24507ca7490df4ba145a
 CLEAN_CONTENT_HASH 158959dcce3f0ef08271eeea7a6104a71f85d73bd10c24507ca7490df4ba145a
 CONTENT_HASH_EQUAL True
-RESUMED_ACQUISITION_HASH 542caf6a350875ddeee28164db1c15000eadd2cd43cdc47d0d1856bdba51b3eb
-CLEAN_ACQUISITION_HASH bdd64e726b4ddb6b1b6dfb2b54f0dc7c9567d83c3561525e7d3780e399011362
+RESUMED_ACQUISITION_HASH 19738b1e329fb09e75dd4f4c1eb1177cc1354b3de7482d43bea492ef09c390a6
+CLEAN_ACQUISITION_HASH f8a2d02133f149b1fe671a47d461a4324218a5ce8dbd37d715596593b4885d9b
 ACQUISITION_HASH_DIFFERENT True
-BTCUSDT RECORD_COUNT=4320 TRADE/MARK/INDEX_GAPS=COMPLETE 4H_VALID=True 1D_VALID=True
-ETHUSDT RECORD_COUNT=4320 TRADE/MARK/INDEX_GAPS=COMPLETE 4H_VALID=True 1D_VALID=True
-BTCUSDT/ETHUSDT FUNDING=FUNDING_SCHEDULE_UNVERIFIED
+BTCUSDT ROWS=4320 PAGES=5 PAGE_EVIDENCE=True 4H_VALID=True 1D_VALID=True
+ETHUSDT ROWS=4320 PAGES=5 PAGE_EVIDENCE=True 4H_VALID=True 1D_VALID=True
+BTCUSDT/ETHUSDT FUNDING=COMPLETE SCHEDULE=VERIFIED COVERAGE=COMPLETE
 ```
 
-Funding 实际相邻时间差观测到 `28799993`、`28800000`、`28800007` ms，因此严格按照冻结语义输出 `FUNDING_SCHEDULE_UNVERIFIED`，没有将其解释成普通缺失，也没有阻断其他数据流或周期验证。成交记录数与三天应有分钟数一致，主键去重后无重复，trade/mark/index 缺口为空。
+Funding 实际结算时间存在毫秒级抖动，`FUNDING_SCHEDULE_ASSUMED_8H_V1` 现使用版本化 `±1000 ms` 结算容差；本区间 schedule 与 coverage 分别验证为 `VERIFIED` 和 `COMPLETE`。真实非 8 小时排程仍输出 `FUNDING_SCHEDULE_UNVERIFIED`，缺失结算槽位单独进入 coverage gaps，不再混为一类。每个 1m 数据集的 5 个 page 均通过 payload hash、request identity 与页链复核。
 
 运行时输出：
 
-- `research_data_output/live_3day_resume_example/summary.json`
-- `research_data_output/live_3day_clean_example/summary.json`
+- `research_data_output/live_3day_integrity_resume_final/summary.json`
+- `research_data_output/live_3day_integrity_clean_final/summary.json`
+
+### PR #15 原报告纠正
+
+PR 初版报告曾把“保存 raw page”与“已保存并复核 raw page payload hash”混写；初版实际没有逐页 `raw_payload_sha256`、request identity 和最终提交前复核。本轮已实现这些字段和 fail-closed 校验，并新增文件篡改、错误 checkpoint、范围/参数变化、完成目录重跑、等价复用和页链回归测试。旧运行目录属于 V1 证据格式，不能由 V2 静默恢复或追加。
 
 ## 7. 未完成项与已知限制
 
 - 未实现任何第二批内容：指标、Candidate、ExecutionPlan 业务、仓位、撮合、资金费结算、估算爆仓、账本、绩效、GUI 或 LLM。
 - 当前 contract rule 只是当前快照，不能用于历史执行计划；历史规则归档仍未建设。
-- Funding gap 的第一批事实检测使用 `FUNDING_SCHEDULE_ASSUMED_8H_V1`；观测到非 8 小时间隔时输出 `FUNDING_SCHEDULE_UNVERIFIED`，只记录事实，不解释为普通数据缺失。
+- Funding gap 使用 `FUNDING_SCHEDULE_ASSUMED_8H_V1` 与版本化毫秒容差；schedule verification 与 requested-range coverage 分开记录。该版本仍是研究假设，不代表交易所未来排程保证。
 - Index price 仅审计，不参与有效性判断。
 - 滑点、手续费、保证金和事件路径尚未实现。
 - 上游 PA_Agent 已安装完整依赖并完成 main/feature 离线同口径回归；两者存在相同的 43 个上游既有失败。完整集合中的 live integration/e2e 在两分支均触发 300 秒上限，因此没有完整集合通过结论。

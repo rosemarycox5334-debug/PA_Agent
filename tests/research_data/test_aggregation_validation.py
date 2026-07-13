@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from pa_agent.research_data.models import Kline
+from pa_agent.research_data.models import GapInterval, Kline
 from pa_agent.research_data.validation import (
     AGGREGATION_VALIDATION_VERSION,
     validate_native_bars,
@@ -85,3 +85,38 @@ def test_missing_native_bar_fails_validation():
 
     assert report.valid is False
     assert report.issues[0].field == "native_bar"
+
+
+def test_empty_aggregate_and_native_is_not_valid():
+    report = validate_native_bars([], [])
+    assert report.valid is False
+    assert report.compared_bars == 0
+    assert report.issues[0].field == "no_comparable_bars"
+
+
+def test_extra_native_bar_fails_validation():
+    report = validate_native_bars([], [bar()])
+    assert report.valid is False
+    assert report.issues[0].field == "extra_native_bar"
+
+
+def test_duplicate_native_bar_is_reported_not_silently_overwritten():
+    report = validate_native_bars([bar()], [bar(), bar()])
+    assert report.valid is False
+    assert any(issue.field == "duplicate_native_bar" for issue in report.issues)
+
+
+def test_duplicate_aggregated_bar_is_reported():
+    report = validate_native_bars([bar(), bar()], [bar()])
+    assert report.valid is False
+    assert any(issue.field == "duplicate_aggregated_bar" for issue in report.issues)
+
+
+def test_partial_edge_bucket_prevents_valid_cross_validation():
+    report = validate_native_bars(
+        [bar()],
+        [bar()],
+        incomplete_intervals=(GapInterval(14_400_000, 14_459_999),),
+    )
+    assert report.valid is False
+    assert any(issue.field == "partial_edge_bucket" for issue in report.issues)

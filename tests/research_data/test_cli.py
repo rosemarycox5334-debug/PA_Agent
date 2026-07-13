@@ -1,8 +1,12 @@
 
+import json
 import subprocess
 import sys
 
+import pytest
+
 from pa_agent.research_data.cli import run_first_batch
+from pa_agent.research_data.normalize import DataSchemaError
 
 MINUTE_MS = 60_000
 DAY_MS = 86_400_000
@@ -107,9 +111,29 @@ def test_first_batch_orchestration_writes_data_and_validates_native_periods(tmp_
     assert summary["aggregation"]["BTCUSDT"]["1d"]["valid"] is True
     assert summary["gap_reports"]["BTCUSDT"]["trade"]["status"] == "COMPLETE"
     assert summary["gap_reports"]["BTCUSDT"]["mark"]["status"] == "COMPLETE"
+    assert {
+        "schedule_status",
+        "coverage_status",
+        "gap_intervals",
+        "observed_steps_ms",
+    }.issubset(summary["gap_reports"]["BTCUSDT"]["funding"])
     assert summary["contract_rules"][0]["validity"] == "CURRENT_SNAPSHOT_ONLY"
+    snapshot = summary["contract_rule_snapshot"]
+    assert snapshot["requested_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert snapshot["returned_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert snapshot["missing_symbols"] == []
+    assert snapshot["validity"] == "CURRENT_SNAPSHOT_ONLY"
+    assert snapshot["review_status"] == "REVIEW_REQUIRED"
     assert (tmp_path / "canonical/BTCUSDT_trade_1m.jsonl").exists()
     assert (tmp_path / "summary.json").exists()
+    acquisition = json.loads(
+        (tmp_path / "acquisition_manifest.json").read_text(encoding="utf-8")
+    )
+    assert "exchange_info" in acquisition["dataset_page_hashes"]
+    assert all(
+        hashes and all(len(value) == 64 for value in hashes)
+        for hashes in acquisition["dataset_page_hashes"].values()
+    )
 
 
 def test_same_content_has_same_dataset_hash_but_different_acquisition_hash(tmp_path):
@@ -148,3 +172,52 @@ def test_wrapper_script_can_import_package_from_repo_root():
 
     assert result.returncode == 0, result.stderr
     assert "Download public Binance research data" in result.stdout
+
+
+def test_missing_requested_contract_symbol_raises_clear_validation_failure(tmp_path):
+    class MissingEthClient(FakeBinanceClient):
+        def get_json(self, path, params):
+            payload = super().get_json(path, params)
+            if path == "/fapi/v1/exchangeInfo":
+                payload["symbols"] = [
+                    item for item in payload["symbols"] if item["symbol"] == "BTCUSDT"
+                ]
+            return payload
+
+    with pytest.raises(DataSchemaError, match="ContractRuleValidationFailure") as exc_info:
+        run_first_batch(
+            client=MissingEthClient(),
+            output_dir=tmp_path,
+            symbols=("BTCUSDT", "ETHUSDT"),
+            start_time_ms=0,
+            end_time_ms=DAY_MS - 1,
+            page_limit=2_000,
+            include_index=False,
+            clock_ms=lambda: DAY_MS + 1,
+        )
+    assert exc_info.value.missing_symbols == ("ETHUSDT",)
+    failure = tmp_path / "contract_rule_validation_failure.json"
+    assert failure.exists()
+
+
+def test_completed_orchestration_requires_explicit_reuse_policy(tmp_path):
+    common = dict(
+        client=FakeBinanceClient(),
+        output_dir=tmp_path,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        start_time_ms=0,
+        end_time_ms=DAY_MS - 1,
+        page_limit=2_000,
+        include_index=False,
+        clock_ms=lambda: DAY_MS + 1,
+    )
+    first = run_first_batch(**common)
+    with pytest.raises(ValueError, match="completed raw directory"):
+        run_first_batch(**common)
+
+    reused = run_first_batch(**common, existing_data_policy="reuse")
+    assert reused["dataset_content_hash"] == first["dataset_content_hash"]
+    assert all(
+        manifest["reused_existing"]
+        for manifest in reused["dataset_manifests"].values()
+    )

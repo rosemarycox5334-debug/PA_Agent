@@ -117,7 +117,7 @@ def test_three_day_page_three_interruption_resumes_without_content_change(tmp_pa
         run_first_batch(
             client=PagingClient(interrupt_on_call=3, exchange_nonce=1),
             output_dir=interrupted_output,
-            clock_ms=lambda: 1,
+            clock_ms=lambda: THREE_DAYS_MS + 1,
             **common,
         )
     except OSError as exc:
@@ -128,13 +128,13 @@ def test_three_day_page_three_interruption_resumes_without_content_change(tmp_pa
     resumed = run_first_batch(
         client=PagingClient(exchange_nonce=2),
         output_dir=interrupted_output,
-        clock_ms=lambda: 2,
+        clock_ms=lambda: THREE_DAYS_MS + 2,
         **common,
     )
     clean = run_first_batch(
         client=PagingClient(exchange_nonce=3),
         output_dir=tmp_path / "clean",
-        clock_ms=lambda: 3,
+        clock_ms=lambda: THREE_DAYS_MS + 3,
         **common,
     )
 
