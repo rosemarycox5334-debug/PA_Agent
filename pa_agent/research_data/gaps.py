@@ -5,6 +5,9 @@ from itertools import pairwise
 
 from pa_agent.research_data.models import GapInterval, StreamGapReport
 
+FUNDING_SCHEDULE_VERSION = "FUNDING_SCHEDULE_ASSUMED_8H_V1"
+ASSUMED_FUNDING_STEP_MS = 8 * 60 * 60 * 1_000
+
 
 def detect_gap_intervals(
     *,
@@ -32,4 +35,31 @@ def detect_gap_intervals(
         stream=stream,
         status="GAPS_DETECTED" if gaps else "COMPLETE",
         intervals=tuple(gaps),
+    )
+
+
+def detect_funding_gap_intervals(timestamps: Iterable[int]) -> StreamGapReport:
+    ordered = sorted(set(timestamps))
+    if not ordered:
+        return StreamGapReport(
+            stream="funding",
+            status="EMPTY",
+            intervals=(),
+            schedule_version=FUNDING_SCHEDULE_VERSION,
+        )
+    observed_steps = tuple(sorted({current - previous for previous, current in pairwise(ordered)}))
+    if any(step != ASSUMED_FUNDING_STEP_MS for step in observed_steps):
+        return StreamGapReport(
+            stream="funding",
+            status="FUNDING_SCHEDULE_UNVERIFIED",
+            intervals=(),
+            schedule_version=FUNDING_SCHEDULE_VERSION,
+            observed_steps_ms=observed_steps,
+        )
+    return StreamGapReport(
+        stream="funding",
+        status="COMPLETE",
+        intervals=(),
+        schedule_version=FUNDING_SCHEDULE_VERSION,
+        observed_steps_ms=observed_steps,
     )

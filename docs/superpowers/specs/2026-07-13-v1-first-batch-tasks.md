@@ -58,7 +58,7 @@
 - [ ] 校验 UTC、K 线闭合、时间单调、主键唯一、OHLC 约束、重复和断档。
 - [ ] 将成交 1m 聚合为 4H/1D，与原生 4H/1D 逐根交叉验证。
 - [ ] 实现版本 `AGG_VALIDATION_V1`：四个 volume 字段使用文档冻结的绝对/相对 Decimal 容差 OR 规则；trade_count 精确求和；OHLC/UTC 精确一致。
-- [ ] 分别输出 `trade_gap_intervals`、`mark_gap_intervals`、`funding_gap_intervals`、`index_gap_intervals` 和独立状态，不在数据层判定整个实验 INVALID。
+- [ ] 分别输出 `trade_gap_intervals`、`mark_gap_intervals`、`funding_gap_intervals`、`index_gap_intervals` 和独立状态，不在数据层判定整个实验 INVALID。Funding 使用 `FUNDING_SCHEDULE_ASSUMED_8H_V1`；非 8 小时观测输出 `FUNDING_SCHEDULE_UNVERIFIED`。
 - [ ] 对指数价缺失只输出审计告警，不使必需数据集失败。
 - [ ] 校验 contract rule 的有效期覆盖语义；当前快照不能通过历史覆盖测试。
 - [ ] 对 schema 变化、未知字段语义和无法解析的 Decimal fail closed。

@@ -11,7 +11,7 @@ from pa_agent.research_data.aggregation import ONE_MINUTE_MS, aggregate_klines
 from pa_agent.research_data.binance_public import BinancePublicClient
 from pa_agent.research_data.canonical import canonical_dumps
 from pa_agent.research_data.downloader import DatasetDownloader, JsonClient
-from pa_agent.research_data.gaps import detect_gap_intervals
+from pa_agent.research_data.gaps import detect_funding_gap_intervals, detect_gap_intervals
 from pa_agent.research_data.hashing import (
     acquisition_manifest_hash,
     acquisition_run_id,
@@ -255,11 +255,7 @@ def run_first_batch(
                 )
             ),
             "funding": asdict(
-                detect_gap_intervals(
-                    stream="funding",
-                    timestamps=(item.funding_time_utc_ms for item in funding),
-                    expected_step_ms=8 * 60 * 60 * 1_000,
-                )
+                detect_funding_gap_intervals(item.funding_time_utc_ms for item in funding)
             ),
             "index": asdict(
                 detect_gap_intervals(

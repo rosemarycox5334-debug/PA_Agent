@@ -44,6 +44,8 @@ class StreamGapReport:
     stream: str
     status: str
     intervals: tuple[GapInterval, ...]
+    schedule_version: str | None = None
+    observed_steps_ms: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

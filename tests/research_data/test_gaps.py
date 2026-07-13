@@ -1,4 +1,8 @@
-from pa_agent.research_data.gaps import detect_gap_intervals
+from pa_agent.research_data.gaps import (
+    FUNDING_SCHEDULE_VERSION,
+    detect_funding_gap_intervals,
+    detect_gap_intervals,
+)
 
 
 def test_gap_detection_reports_missing_interval_without_global_invalidity():
@@ -40,3 +44,16 @@ def test_leading_and_trailing_expected_range_gaps_are_reported():
         (0, 59),
         (180, 239),
     ]
+
+
+def test_funding_schedule_is_versioned_and_non_8h_interval_is_unverified():
+    eight_hours = 8 * 60 * 60 * 1_000
+
+    verified = detect_funding_gap_intervals([0, eight_hours, 2 * eight_hours])
+    unverified = detect_funding_gap_intervals([0, four_hours := eight_hours // 2, eight_hours])
+
+    assert verified.schedule_version == FUNDING_SCHEDULE_VERSION
+    assert verified.status == "COMPLETE"
+    assert unverified.status == "FUNDING_SCHEDULE_UNVERIFIED"
+    assert unverified.intervals == ()
+    assert unverified.observed_steps_ms == (four_hours,)

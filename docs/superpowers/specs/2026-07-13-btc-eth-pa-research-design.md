@@ -141,7 +141,7 @@ Canonical 序列化规则：
 - 使用临时分片与原子提交，校验后才进入规范数据集。
 - 恢复时重新请求边界重叠页并去重。
 - 429/5xx 有上限指数退避；schema 变化立即停止。
-- 第一批数据层只输出独立、机器可读的 `trade_gap_intervals`、`mark_gap_intervals`、`funding_gap_intervals`、`index_gap_intervals` 和每条数据流状态，不把任何缺口直接解释为整个数据集或实验失败。
+- 第一批数据层只输出独立、机器可读的 `trade_gap_intervals`、`mark_gap_intervals`、`funding_gap_intervals`、`index_gap_intervals` 和每条数据流状态，不把任何缺口直接解释为整个数据集或实验失败。Funding 默认间隔假设版本固定为 `FUNDING_SCHEDULE_ASSUMED_8H_V1`；若观测到非 8 小时间隔，状态为 `FUNDING_SCHEDULE_UNVERIFIED`，记录观测间隔但不直接解释为普通数据缺失。
 
 ## 5. 指标数值规范
 
