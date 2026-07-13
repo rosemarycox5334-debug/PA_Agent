@@ -74,4 +74,3 @@ def aggregate_klines(bars: Iterable[Kline], *, interval_ms: int) -> AggregationR
             )
         )
     return AggregationResult(tuple(complete), tuple(incomplete))
-

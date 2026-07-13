@@ -81,4 +81,3 @@ class AtomicDatasetStore:
         if not folder.exists():
             return []
         return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(folder.glob("page-*.json"))]
-

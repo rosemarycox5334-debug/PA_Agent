@@ -91,4 +91,3 @@ def test_normalize_contract_rules_marks_current_snapshot_only():
 def test_malformed_kline_schema_is_rejected(row):
     with pytest.raises(DataSchemaError):
         normalize_trade_kline(row, symbol="BTCUSDT", interval="1m", now_ms=1)
-

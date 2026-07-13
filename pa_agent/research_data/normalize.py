@@ -152,4 +152,3 @@ def normalize_contract_rules(
                 raise
             raise DataSchemaError(f"Invalid contract filters for {raw.get('symbol')}") from exc
     return tuple(sorted(rules, key=lambda rule: rule.symbol))
-

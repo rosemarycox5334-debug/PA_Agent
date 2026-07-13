@@ -52,4 +52,3 @@ def test_raw_pages_are_sorted_and_round_trip(tmp_path):
     assert json.loads((tmp_path / "raw/btc_trade_1m/page-000000.json").read_text())[
         "request"
     ] == {"startTime": 1}
-

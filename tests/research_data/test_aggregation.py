@@ -28,7 +28,6 @@ def make_bar(index: int) -> Kline:
         is_closed=True,
     )
 
-
 def test_aggregate_1m_to_4h_uses_exact_utc_bucket_and_sums_fields():
     result = aggregate_klines([make_bar(i) for i in range(240)], interval_ms=FOUR_HOURS_MS)
 
@@ -66,4 +65,3 @@ def test_input_order_does_not_change_aggregation():
     assert aggregate_klines(bars, interval_ms=FOUR_HOURS_MS) == aggregate_klines(
         list(reversed(bars)), interval_ms=FOUR_HOURS_MS
     )
-

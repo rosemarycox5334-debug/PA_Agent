@@ -29,4 +29,3 @@ def test_canonical_records_sorts_by_declared_primary_key():
     result = canonical_records(records, key_fields=("symbol", "open_time_utc_ms"))
 
     assert [item["close"] for item in result] == [Decimal("1"), Decimal("3"), Decimal("2")]
-
