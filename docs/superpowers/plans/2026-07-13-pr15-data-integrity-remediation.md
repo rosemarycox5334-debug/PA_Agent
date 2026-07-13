@@ -249,4 +249,4 @@
 - [x] Add a failing orchestration test with Index data missing its first and last requested minute and assert two machine-readable boundary gaps.
 - [x] Pass expected start/end into Index gap detection and run the focused test to green.
 - [x] Run the complete first-batch, security/scope, ruff, diff-check, compileall, fixed-seed main/feature, and real three-day interrupted/resumed/clean validations.
-- [ ] Update the verification report, commit and fast-forward push the existing PR #15 branch, verify its remote head and actual CI state, then stop without merge or second-batch work.
+- [x] Update the verification report, commit and fast-forward push the existing PR #15 branch, verify its remote head and actual CI state, then stop without merge or second-batch work.
