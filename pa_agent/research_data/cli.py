@@ -5,21 +5,31 @@ import hashlib
 import time
 from dataclasses import asdict
 from pathlib import Path
+from time import sleep as system_sleep
 from typing import Any
 
 from pa_agent.research_data.aggregation import ONE_MINUTE_MS, aggregate_klines
 from pa_agent.research_data.binance_public import BinancePublicClient
 from pa_agent.research_data.canonical import canonical_dumps
-from pa_agent.research_data.downloader import DatasetDownloader, JsonClient
+from pa_agent.research_data.downloader import (
+    DatasetDownloader,
+    JsonClient,
+    PublicGetRetrier,
+)
 from pa_agent.research_data.gaps import (
     FUNDING_SCHEDULE_VERSION,
     detect_funding_gap_intervals,
     detect_gap_intervals,
 )
 from pa_agent.research_data.hashing import (
+    ACQUISITION_BUNDLE_CONTENT_VERSION,
+    AUDIT_DATA_CONTENT_VERSION,
+    EXECUTION_DATA_CONTENT_VERSION,
+    STRATEGY_DATA_CONTENT_VERSION,
     acquisition_manifest_hash,
     acquisition_run_id,
     dataset_content_hash,
+    versioned_content_bundle_hash,
 )
 from pa_agent.research_data.models import (
     CONTRACT_RULE_SCHEMA_VERSION,
@@ -53,10 +63,29 @@ def _gap_report_dict(report: StreamGapReport) -> dict[str, Any]:
     return result
 
 
+def _preflight_output_directory(
+    output_dir: Path | str, *, existing_data_policy: str
+) -> None:
+    if existing_data_policy not in {"reject", "reuse"}:
+        raise ValueError("existing_data_policy must be reject or reuse")
+    if existing_data_policy == "reuse":
+        return
+    root = Path(output_dir)
+    if (root / "summary.json").is_file() or (
+        root / "acquisition_manifest.json"
+    ).is_file():
+        raise ValueError(
+            "Existing completed raw directory requires explicit reuse or a new output directory"
+        )
+
+
 def _capture_source_server_time(
-    *, client: JsonClient, store: AtomicDatasetStore, downloaded_at_utc_ms: int
+    *,
+    requester: PublicGetRetrier,
+    store: AtomicDatasetStore,
+    downloaded_at_utc_ms: int,
 ) -> tuple[int, str]:
-    response = client.get_json("/fapi/v1/time", {})
+    response, retry_count = requester.get_json("/fapi/v1/time", {})
     if not isinstance(response, dict):
         raise TypeError("Binance server time must return an object")
     server_time = response.get("serverTime")
@@ -90,7 +119,7 @@ def _capture_source_server_time(
                 "request": {},
                 "request_identity": request_identity,
                 "request_identity_hash": _sha256_json(request_identity),
-                "retry_count": 0,
+                "retry_count": retry_count,
                 "row_count": 1,
             },
             "payload": response,
@@ -237,19 +266,36 @@ def run_first_batch(
     include_index: bool,
     clock_ms,
     existing_data_policy: str = "reject",
+    sleep=system_sleep,
+    max_retries: int = 3,
+    base_delay_seconds: float = 0.5,
 ) -> dict[str, Any]:
+    _preflight_output_directory(
+        output_dir, existing_data_policy=existing_data_policy
+    )
     store = AtomicDatasetStore(output_dir)
+    requester = PublicGetRetrier(
+        client,
+        sleep=sleep,
+        max_retries=max_retries,
+        base_delay_seconds=base_delay_seconds,
+    )
     acquisition_started_at_utc_ms = clock_ms()
     source_server_time_utc_ms, source_server_time_raw_payload_sha256 = (
         _capture_source_server_time(
-            client=client,
+            requester=requester,
             store=store,
             downloaded_at_utc_ms=acquisition_started_at_utc_ms,
         )
     )
-    downloader = DatasetDownloader(client, store, clock_ms=clock_ms)
+    downloader = DatasetDownloader(
+        client, store, clock_ms=clock_ms, requester=requester
+    )
     manifests: dict[str, dict[str, Any]] = {}
-    content_hashes: list[dict[str, str]] = []
+    acquisition_content_hashes: dict[str, str] = {}
+    strategy_content_hashes: dict[str, str] = {}
+    execution_content_hashes: dict[str, str] = {}
+    audit_content_hashes: dict[str, str] = {}
     gap_reports: dict[str, dict[str, dict[str, Any]]] = {}
     aggregation: dict[str, dict[str, dict[str, Any]]] = {}
 
@@ -334,10 +380,34 @@ def run_first_batch(
             )
             symbol_manifests[f"{symbol}_index_1m"] = index_manifest
         manifests.update(symbol_manifests)
-        content_hashes.extend(
-            {"dataset": name, "hash": manifest["dataset_content_hash"]}
+        symbol_content_hashes = {
+            name: manifest["dataset_content_hash"]
             for name, manifest in symbol_manifests.items()
+        }
+        acquisition_content_hashes.update(symbol_content_hashes)
+        strategy_content_hashes.update(
+            {
+                name: symbol_content_hashes[name]
+                for name in (
+                    f"{symbol}_trade_1m",
+                    f"{symbol}_trade_4h",
+                    f"{symbol}_trade_1d",
+                )
+            }
         )
+        execution_content_hashes.update(
+            {
+                name: symbol_content_hashes[name]
+                for name in (
+                    f"{symbol}_trade_1m",
+                    f"{symbol}_mark_1m",
+                    f"{symbol}_funding",
+                )
+            }
+        )
+        if include_index:
+            index_name = f"{symbol}_index_1m"
+            audit_content_hashes[index_name] = symbol_content_hashes[index_name]
 
         gap_reports[symbol] = {
             "trade": _gap_report_dict(
@@ -371,6 +441,8 @@ def run_first_batch(
                     stream="index",
                     timestamps=(bar.open_time_utc_ms for bar in index_1m),
                     expected_step_ms=ONE_MINUTE_MS,
+                    expected_start_ms=start_time_ms,
+                    expected_end_ms=end_time_ms - (end_time_ms % ONE_MINUTE_MS),
                 )
                 if include_index
                 else StreamGapReport("index", "NOT_REQUESTED", ())
@@ -398,7 +470,9 @@ def run_first_batch(
             "incomplete_1d": [asdict(item) for item in aggregated_1d.incomplete_intervals],
         }
 
-    exchange_info = client.get_json("/fapi/v1/exchangeInfo", {})
+    exchange_info, exchange_retry_count = requester.get_json(
+        "/fapi/v1/exchangeInfo", {}
+    )
     if not isinstance(exchange_info, dict):
         raise TypeError("exchangeInfo must return an object")
     exchange_hash = _sha256_json(exchange_info)
@@ -430,7 +504,7 @@ def run_first_batch(
                 "request": {},
                 "request_identity": exchange_identity,
                 "request_identity_hash": exchange_identity_hash,
-                "retry_count": 0,
+                "retry_count": exchange_retry_count,
                 "row_count": len(exchange_info.get("symbols", [])),
             },
             "payload": exchange_info,
@@ -490,16 +564,40 @@ def run_first_batch(
     store.write_json_atomic(
         "manifests/contract_rules_current.json", contract_rule_dataset_manifest
     )
-    content_hashes.append({"dataset": "contract_rules_current", "hash": contract_content_hash})
-    global_content_hash = dataset_content_hash(
-        content_hashes, key_fields=("dataset",)
+    acquisition_content_hashes["contract_rules_current"] = contract_content_hash
+    acquisition_bundle_content_hash = versioned_content_bundle_hash(
+        bundle_version=ACQUISITION_BUNDLE_CONTENT_VERSION,
+        dataset_hashes=acquisition_content_hashes,
     )
+    strategy_data_content_hash = versioned_content_bundle_hash(
+        bundle_version=STRATEGY_DATA_CONTENT_VERSION,
+        dataset_hashes=strategy_content_hashes,
+    )
+    execution_data_content_hash = versioned_content_bundle_hash(
+        bundle_version=EXECUTION_DATA_CONTENT_VERSION,
+        dataset_hashes=execution_content_hashes,
+    )
+    audit_data_content_hash = versioned_content_bundle_hash(
+        bundle_version=AUDIT_DATA_CONTENT_VERSION,
+        dataset_hashes=audit_content_hashes,
+    )
+    content_hash_versions = {
+        "acquisition_bundle": ACQUISITION_BUNDLE_CONTENT_VERSION,
+        "audit_data": AUDIT_DATA_CONTENT_VERSION,
+        "contract_rule": CONTRACT_RULE_SCHEMA_VERSION,
+        "execution_data": EXECUTION_DATA_CONTENT_VERSION,
+        "strategy_data": STRATEGY_DATA_CONTENT_VERSION,
+    }
     acquisition_manifest = {
+        "acquisition_bundle_content_hash": acquisition_bundle_content_hash,
+        "audit_data_content_hash": audit_data_content_hash,
         "completed_at_utc_ms": clock_ms(),
+        "content_hash_versions": content_hash_versions,
+        "contract_rule_content_hash": contract_content_hash,
         "contract_rule_dataset_manifest_hash": contract_rule_dataset_manifest[
             "acquisition_manifest_hash"
         ],
-        "dataset_content_hash": global_content_hash,
+        "dataset_content_hash": acquisition_bundle_content_hash,
         "datasets": {name: manifest["acquisition_manifest_hash"] for name, manifest in manifests.items()},
         "dataset_page_hashes": {
             **{
@@ -516,23 +614,31 @@ def run_first_batch(
             "metadata"
         ]["raw_payload_sha256"],
         "exchange_info_request_identity_hash": exchange_identity_hash,
+        "execution_data_content_hash": execution_data_content_hash,
         "source_server_time_raw_payload_sha256": source_server_time_raw_payload_sha256,
         "source_server_time_utc_ms": source_server_time_utc_ms,
+        "strategy_data_content_hash": strategy_data_content_hash,
         "symbols": list(symbols),
     }
     global_acquisition_hash = acquisition_manifest_hash(acquisition_manifest)
     summary = {
+        "acquisition_bundle_content_hash": acquisition_bundle_content_hash,
         "acquisition_manifest_hash": global_acquisition_hash,
         "acquisition_run_id": acquisition_run_id(acquisition_manifest),
         "aggregation": aggregation,
+        "audit_data_content_hash": audit_data_content_hash,
+        "content_hash_versions": content_hash_versions,
+        "contract_rule_content_hash": contract_content_hash,
         "contract_rules": contract_dicts,
         "contract_rule_snapshot": contract_validation_dict,
         "contract_rule_dataset_manifest": contract_rule_dataset_manifest,
-        "dataset_content_hash": global_content_hash,
+        "dataset_content_hash": acquisition_bundle_content_hash,
         "dataset_manifests": manifests,
+        "execution_data_content_hash": execution_data_content_hash,
         "gap_reports": gap_reports,
         "source_server_time_raw_payload_sha256": source_server_time_raw_payload_sha256,
         "source_server_time_utc_ms": source_server_time_utc_ms,
+        "strategy_data_content_hash": strategy_data_content_hash,
     }
     store.write_json_atomic("acquisition_manifest.json", acquisition_manifest)
     store.write_json_atomic("summary.json", summary)

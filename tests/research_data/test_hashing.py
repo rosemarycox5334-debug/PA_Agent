@@ -45,7 +45,10 @@ def test_acquisition_hash_changes_when_download_process_changes():
 
 def test_computational_id_is_independent_of_acquisition_metadata():
     kwargs = {
-        "dataset_content_hash_value": "content",
+        "content_dependency_hashes": {
+            "strategy_data@STRATEGY_DATA_CONTENT_V1": "strategy-content"
+        },
+        "experiment_scope": "candidate",
         "sample_start_utc_ms": 1,
         "sample_end_utc_ms": 2,
         "strategy_version": "strategy-v1",
@@ -60,3 +63,46 @@ def test_computational_id_is_independent_of_acquisition_metadata():
     assert result.startswith("exp_")
     with pytest.raises(TypeError):
         computational_experiment_id(**kwargs, acquisition_manifest_hash="forbidden")
+
+
+def test_candidate_experiment_id_uses_only_explicit_versioned_dependencies():
+    common = {
+        "experiment_scope": "candidate",
+        "sample_start_utc_ms": 1,
+        "sample_end_utc_ms": 2,
+        "strategy_version": "strategy-v1",
+        "execution_version": "candidate-only",
+        "cost_version": "not-applicable",
+        "code_commit": "abc",
+        "dependency_lock_version": "lock",
+    }
+    strategy_dependencies = {
+        "strategy_data@STRATEGY_DATA_CONTENT_V1": "same-strategy-hash"
+    }
+
+    without_optional_data = computational_experiment_id(
+        content_dependency_hashes=strategy_dependencies,
+        **common,
+    )
+    after_unrelated_index_and_contract_change = computational_experiment_id(
+        content_dependency_hashes=dict(strategy_dependencies),
+        **common,
+    )
+
+    assert without_optional_data == after_unrelated_index_and_contract_change
+    with pytest.raises(ValueError, match="versioned"):
+        computational_experiment_id(
+            content_dependency_hashes={"strategy_data": "unversioned"},
+            **common,
+        )
+    with pytest.raises(ValueError, match="non-empty"):
+        computational_experiment_id(content_dependency_hashes={}, **common)
+    with pytest.raises(ValueError, match="Candidate"):
+        computational_experiment_id(
+            content_dependency_hashes={
+                **strategy_dependencies,
+                "audit_data@AUDIT_DATA_CONTENT_V1": "index-hash",
+                "contract_rule@CONTRACT_RULE_SNAPSHOT_V1": "contract-hash",
+            },
+            **common,
+        )

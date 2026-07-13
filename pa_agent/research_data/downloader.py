@@ -32,6 +32,36 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(canonical_dumps(value).encode("utf-8")).hexdigest()
 
 
+class PublicGetRetrier:
+    def __init__(
+        self,
+        client: JsonClient,
+        *,
+        sleep: Callable[[float], None] = system_sleep,
+        max_retries: int = 3,
+        base_delay_seconds: float = 0.5,
+    ) -> None:
+        if max_retries < 0 or base_delay_seconds < 0:
+            raise ValueError("Retry settings must be non-negative")
+        self._client = client
+        self._sleep = sleep
+        self._max_retries = max_retries
+        self._base_delay_seconds = base_delay_seconds
+
+    def get_json(
+        self, path: str, params: Mapping[str, Any]
+    ) -> tuple[dict[str, Any] | list[Any], int]:
+        retry_count = 0
+        while True:
+            try:
+                return self._client.get_json(path, params), retry_count
+            except PublicTransportError as exc:
+                if not exc.retryable or retry_count >= self._max_retries:
+                    raise
+                self._sleep(self._base_delay_seconds * (2**retry_count))
+                retry_count += 1
+
+
 def _request_identity(
     *,
     dataset_name: str,
@@ -177,26 +207,18 @@ class DatasetDownloader:
         sleep: Callable[[float], None] = system_sleep,
         max_retries: int = 3,
         base_delay_seconds: float = 0.5,
+        requester: PublicGetRetrier | None = None,
     ) -> None:
         if max_retries < 0 or base_delay_seconds < 0:
             raise ValueError("Retry settings must be non-negative")
-        self._client = client
         self._store = store
         self._clock_ms = clock_ms
-        self._sleep = sleep
-        self._max_retries = max_retries
-        self._base_delay_seconds = base_delay_seconds
-
-    def _get_page(self, path: str, params: Mapping[str, Any]) -> tuple[dict[str, Any] | list[Any], int]:
-        retry_count = 0
-        while True:
-            try:
-                return self._client.get_json(path, params), retry_count
-            except PublicTransportError as exc:
-                if not exc.retryable or retry_count >= self._max_retries:
-                    raise
-                self._sleep(self._base_delay_seconds * (2**retry_count))
-                retry_count += 1
+        self._requester = requester or PublicGetRetrier(
+            client,
+            sleep=sleep,
+            max_retries=max_retries,
+            base_delay_seconds=base_delay_seconds,
+        )
 
     def download_pages(
         self,
@@ -263,7 +285,7 @@ class DatasetDownloader:
             request_params.update(
                 {"endTime": end_time_ms, "limit": limit, "startTime": current_start}
             )
-            payload, retry_count = self._get_page(path, request_params)
+            payload, retry_count = self._requester.get_json(path, request_params)
             if not isinstance(payload, list):
                 raise TypeError("Paginated endpoint must return a list")
             downloaded_at = self._clock_ms()

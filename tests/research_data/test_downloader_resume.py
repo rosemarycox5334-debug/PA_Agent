@@ -5,7 +5,7 @@ import pytest
 
 from pa_agent.research_data.binance_public import PublicTransportError
 from pa_agent.research_data.canonical import canonical_dumps
-from pa_agent.research_data.downloader import DatasetDownloader
+from pa_agent.research_data.downloader import DatasetDownloader, PublicGetRetrier
 from pa_agent.research_data.storage import AtomicDatasetStore
 
 
@@ -147,6 +147,50 @@ def test_nonretryable_public_error_is_not_retried(tmp_path):
         assert str(exc) == "bad request"
     else:
         raise AssertionError("expected non-retryable error")
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("message", ["429", "503", "network"])
+def test_shared_public_get_retrier_handles_retryable_public_failures(message):
+    class Client:
+        attempts = 0
+
+        def get_json(self, _path, _params):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise PublicTransportError(message, retryable=True)
+            return {"ok": True}
+
+    client = Client()
+    sleeps = []
+    result, retry_count = PublicGetRetrier(
+        client,
+        sleep=sleeps.append,
+        max_retries=3,
+        base_delay_seconds=0.5,
+    ).get_json("/fapi/v1/time", {})
+
+    assert result == {"ok": True}
+    assert retry_count == 2
+    assert sleeps == [0.5, 1.0]
+
+
+def test_shared_public_get_retrier_does_not_retry_nonretryable_failure():
+    class Client:
+        attempts = 0
+
+        def get_json(self, _path, _params):
+            self.attempts += 1
+            raise PublicTransportError("400", retryable=False)
+
+    client = Client()
+    sleeps = []
+    with pytest.raises(PublicTransportError, match="400"):
+        PublicGetRetrier(client, sleep=sleeps.append).get_json(
+            "/fapi/v1/exchangeInfo", {}
+        )
+
+    assert client.attempts == 1
     assert sleeps == []
 
 

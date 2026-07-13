@@ -37,9 +37,9 @@
 ## C. Canonical 序列化与双哈希
 
 - [ ] 实现 UTF-8、键排序、无空白、UTC int64、Decimal 字符串、负零规范和主键排序。
-- [ ] 实现独立 `dataset_content_hash`。
+- [ ] 实现版本化 `acquisition_bundle_content_hash`、`strategy_data_content_hash`、`execution_data_content_hash`、`audit_data_content_hash` 与 `contract_rule_content_hash`；旧 `dataset_content_hash` 仅为完整包别名。
 - [ ] 实现独立 `acquisition_manifest_hash` 与 `acquisition_run_id`，包含 content hash、请求页、时间、重试、断点和采集器版本。
-- [ ] 定义 `computational_experiment_id` 纯函数，只接受 content hash、样本区间、策略/执行/成本版本、代码和依赖版本；明确拒绝 acquisition 字段。
+- [ ] 定义 `computational_experiment_id` 纯函数，只接受显式版本化 dependency hashes、experiment scope、样本区间、策略/执行/成本版本、代码和依赖版本；明确拒绝 acquisition 字段，并禁止 Candidate scope 绑定 audit、Index 或 contract-rule 内容。
 - [ ] 测试同内容不同分页/下载时间产生相同 content hash、不同 acquisition hash。
 - [ ] 测试字段顺序、Decimal 表示、CRLF/LF 和运行平台不改变 Canonical content hash。
 

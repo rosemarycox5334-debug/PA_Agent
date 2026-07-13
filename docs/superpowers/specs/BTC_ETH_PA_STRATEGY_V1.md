@@ -91,7 +91,7 @@ True Range：
 
 ### 4.5 Candidate 内容
 
-Candidate 保存方向、市场原因、decision time、下一 4H open、冻结 ATR、决策 close、趋势/突破阈值以及数据/配置/代码/指标版本和哈希。不得保存 stop、TP、quantity、fill-dependent cost、contract rule 或 maintenance margin 版本。
+Candidate 保存方向、市场原因、decision time、下一 4H open、冻结 ATR、决策 close、趋势/突破阈值以及数据/配置/代码/指标版本和哈希。Candidate 的数据身份只能绑定 `strategy_data_content_hash` 及其冻结 bundle version；不得绑定可选 Index、`audit_data_content_hash`、当前 `contract_rule_content_hash` 或完整 acquisition bundle。不得保存 stop、TP、quantity、fill-dependent cost、contract rule 或 maintenance margin 版本。
 
 历史 contract rule 缺失不能抹掉 LONG/SHORT Candidate。执行层需要 tick/step/minimum/maintenance margin 时才解析相应版本；缺失则产生 `ExecutionRejection/CONTRACT_RULE_UNAVAILABLE`。
 

@@ -317,3 +317,86 @@ ACQUISITION_HASH_DIFFERENT=True
 - `research_data_output/live_3day_pr15_final_v2_clean/summary.json`
 
 本轮仍未实现任何指标、Candidate、ExecutionPlan、仓位、撮合、资金费结算、爆仓、账本、GUI、LLM、鉴权或交易接口；第二批仍未开始。
+
+## 9. PR #15 最后四项合并阻塞复验（2026-07-13）
+
+### 9.1 编排预检与统一公共 GET 重试
+
+- `run_first_batch` 在创建存储对象、读取时钟和发起网络请求前执行只读 preflight；默认 `reject` 遇到已完成目录时立即拒绝。
+- 测试对完成目录中每个文件计算 SHA-256，重入前后文件集合与哈希完全一致，并确认客户端调用数和时钟调用数均为 0。
+- 分页、`/fapi/v1/time` 与 `/fapi/v1/exchangeInfo` 共用 `PublicGetRetrier`；默认最多重试 3 次、指数退避基数 0.5 秒。
+- Raw metadata 保存每次请求的 `retry_count`；测试覆盖 429、5xx、网络异常和不可重试异常。
+
+### 9.2 版本化数据依赖哈希
+
+冻结以下互相独立的内容身份：
+
+```text
+acquisition_bundle_content_hash@ACQUISITION_BUNDLE_CONTENT_V1
+strategy_data_content_hash@STRATEGY_DATA_CONTENT_V1
+execution_data_content_hash@EXECUTION_DATA_CONTENT_V1
+audit_data_content_hash@AUDIT_DATA_CONTENT_V1
+contract_rule_content_hash@CONTRACT_RULE_SNAPSHOT_V1
+```
+
+旧 `dataset_content_hash` 是完整 acquisition bundle 的兼容别名。`computational_experiment_id` 只接收调用方明确给出的版本化依赖；`candidate` scope 只允许 `strategy_data@<version>`，因此可选 Index 和当前 contract rule 不会改变 Candidate 实验身份。
+
+### 9.3 Index 请求区间边界
+
+Index gap 检测现在与 trade/mark 一样接收请求的 `expected_start_ms` 与按分钟对齐的 `expected_end_ms`。测试覆盖首分钟和末分钟同时缺失，并输出两个机器可读边界缺口；第一批仍只记录事实，不解释交易影响。
+
+### 9.4 最终本地验证
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/research_data -v
+.\.venv\Scripts\python.exe -m pytest tests/research_data/test_binance_public_security.py tests/research_data/test_scope_guard.py -v
+.\.venv\Scripts\ruff.exe check pa_agent/research_data tests/research_data scripts/download_binance_research.py
+git diff --check
+.\.venv\Scripts\python.exe -m compileall pa_agent/research_data
+```
+
+```text
+首批数据测试：125 passed in 22.98s
+安全与范围守卫：20 passed in 0.35s
+ruff：All checks passed!
+diff-check：exit 0（仅 Git 的 LF/CRLF 提示）
+compileall：exit 0
+```
+
+使用固定 Hypothesis seed `20260713` 分别在 `origin/main@33170ab` 和当前 feature worktree 执行 `tests/unit tests/property`。两边均为 43 个失败，失败节点集合逐项完全相同，因此没有引入新的上游离线失败；这不是把该组测试描述为通过。
+
+### 9.5 BTCUSDT/ETHUSDT 三日真实下载、恢复与哈希隔离
+
+窗口仍为 `2026-07-01T00:00:00Z` 至 `2026-07-03T23:59:59.999Z`。在第 3 个分页调用前故意中断（已持久化 2 页），随后恢复同一目录，并与独立干净目录对照：
+
+```text
+RESUMED=True
+PREFLIGHT_ZERO_CLIENT_CALLS=True
+PREFLIGHT_ZERO_CLOCK_CALLS=True
+PREFLIGHT_DIRECTORY_HASHES_UNCHANGED=True
+ALL_CANONICAL_KLINES_CLOSED=True
+FUNDING_SYMBOLS_MATCH=True
+ALL_RAW_RECORDS_IN_ORIGINAL_AND_PAGE_RANGES=True
+BTCUSDT/ETHUSDT 4H_VALID=True 1D_VALID=True
+TRADE/MARK/INDEX/FUNDING_GAP_STATUS=COMPLETE
+FUNDING_SCHEDULE=VERIFIED COVERAGE=COMPLETE
+
+acquisition_bundle_content_hash=8ecac760f7d37ef5d6a6e9f621b072f3a1ea13b5eca659625298be2348b52265
+strategy_data_content_hash=5132ce4a5d1340d219a2b8da3ac5047afce46f8fe00e43ef1edaa2d2b0a8c608
+execution_data_content_hash=d672bb8714d725fbabd91152de1d456cd32fd13114d110c1093e34c5c0eecc20
+audit_data_content_hash=e05fe4743587fc63e38f8f79d390c030f79d2fcec8baf595826eafc414681b13
+contract_rule_content_hash=304e132a1ab2d93af64ca61b55b18b7ac76a4257ce26fede2d053f2aa2adfa45
+ALL_FIVE_CONTENT_HASHES_EQUAL=True
+
+RESUMED_ACQUISITION_MANIFEST_HASH=fe2ecaeb12beeb5dc15d52afff75291b22eb72df32730c83dc7470dda85f01b9
+CLEAN_ACQUISITION_MANIFEST_HASH=b4c9da52cf237ce49826aa4550e0cf69034eb3ecdd856fe4801e73305eb2caae
+ACQUISITION_MANIFEST_HASH_DIFFERENT=True
+CANDIDATE_COMPUTATIONAL_EXPERIMENT_ID_EQUAL=True
+```
+
+运行时输出：
+
+- `research_data_output/live_3day_pr15_hashsplit_resume/summary.json`
+- `research_data_output/live_3day_pr15_hashsplit_clean/summary.json`
+
+范围守卫复核：没有新增指标、Candidate 生成、ExecutionPlan 业务逻辑、仓位、撮合、资金费结算、爆仓、账本、GUI、LLM、API Key、鉴权或交易接口。第二批未开始。

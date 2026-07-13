@@ -15,8 +15,8 @@
 - First batch must contain no indicators, Candidate generation, ExecutionPlan business logic, positions, matching, funding settlement, liquidation, ledger, performance, GUI, or LLM code.
 - Index price is audit-only; every stream reports independent gap intervals and status.
 - `AGG_VALIDATION_V1` uses frozen Decimal absolute/relative tolerances; OHLC/UTC/trade_count remain exact.
-- `dataset_content_hash` is independent from acquisition metadata; `acquisition_manifest_hash` and `acquisition_run_id` may differ for identical content.
-- `computational_experiment_id` must not accept acquisition fields.
+- Versioned acquisition/strategy/execution/audit/contract content hashes are independent from acquisition metadata; legacy `dataset_content_hash` aliases the complete acquisition bundle hash.
+- `computational_experiment_id` must not accept acquisition fields; Candidate scope accepts only the explicit versioned strategy-data dependency.
 
 ---
 
@@ -46,11 +46,11 @@
 
 **Interfaces:**
 - Consumes: `canonical_dumps`.
-- Produces: `dataset_content_hash(records, key)`, `acquisition_manifest_hash(manifest)`, `acquisition_run_id(manifest)`, `computational_experiment_id(...)`.
+- Produces: per-dataset content hashes, versioned acquisition/strategy/execution/audit/contract bundle hashes, `acquisition_manifest_hash(manifest)`, `acquisition_run_id(manifest)`, and explicit-dependency `computational_experiment_id(...)`.
 
 - [ ] Write failing tests showing identical normalized records with different order/download metadata yield the same content hash; different acquisition metadata yields different acquisition hashes; computational IDs reject acquisition arguments.
 - [ ] Run the test and verify failures are due to missing functions.
-- [ ] Implement SHA-256 over Canonical UTF-8 bytes. Make the computational function signature accept only dataset hash, sample range, strategy version, execution version, cost version, code commit, and dependency lock version.
+- [ ] Implement SHA-256 over Canonical UTF-8 bytes. Make the computational function signature accept only explicit versioned dependency hashes, experiment scope, sample range, strategy version, execution version, cost version, code commit, and dependency lock version.
 - [ ] Re-run tests and ruff.
 
 ### Task 3: Security-constrained Binance public client

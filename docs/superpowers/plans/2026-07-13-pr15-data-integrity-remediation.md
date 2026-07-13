@@ -184,3 +184,69 @@
 - [ ] Run all first-batch, security/scope, ruff, diff-check, and compileall commands.
 - [ ] Run a real BTCUSDT/ETHUSDT three-day interrupted/resumed/clean comparison and record server time, closure, funding identity, raw-range, aggregation, and dual-hash evidence.
 - [ ] Update the PR report, commit/push the existing feature branch, verify PR #15 status, and stop without merging or starting second batch.
+
+### Task 11: Read-only orchestration preflight
+
+**Files:**
+- Modify: `pa_agent/research_data/cli.py`
+- Modify: `tests/research_data/test_cli.py`
+
+**Interfaces:**
+- Produces: fail-fast rejection of a completed output directory before `clock_ms`, network access, or filesystem writes when `existing_data_policy="reject"`.
+
+- [x] Add a failing test that completes a run, hashes every file, reruns with a zero-call client and a forbidden local clock, and verifies the complete directory hash map is unchanged.
+- [x] Run the focused test and confirm the first unexpected action is the `/fapi/v1/time` call.
+- [x] Add a read-only preflight at the first executable line of `run_first_batch`; identify completion by committed output markers and reject with the existing completed-directory error family.
+- [x] Run focused orchestration tests to green.
+
+### Task 12: Unified public GET retry component
+
+**Files:**
+- Modify: `pa_agent/research_data/downloader.py`
+- Modify: `pa_agent/research_data/cli.py`
+- Modify: `tests/research_data/test_downloader_resume.py`
+- Modify: `tests/research_data/test_cli.py`
+
+**Interfaces:**
+- Produces: `PublicGetRetrier.get_json(path, params) -> (payload, retry_count)` used by paginated pages, `/fapi/v1/time`, and `/fapi/v1/exchangeInfo`.
+
+- [x] Add failing tests for retryable 429/5xx/network-equivalent `PublicTransportError`, bounded exponential backoff, non-retryable immediate failure, and persisted retry counts on source-time and exchange-info raw metadata.
+- [x] Run focused tests and confirm one-off requests bypass current page-only retry logic.
+- [x] Extract the existing retry loop into `PublicGetRetrier`; inject one shared instance into `DatasetDownloader` and both one-off capture functions.
+- [x] Expose orchestration retry/sleep injection only for deterministic tests; retain defaults of three retries and 0.5-second exponential base delay.
+- [x] Run focused retry and orchestration tests to green.
+
+### Task 13: Versioned content-dependency hashes
+
+**Files:**
+- Modify: `pa_agent/research_data/hashing.py`
+- Modify: `pa_agent/research_data/cli.py`
+- Modify: `tests/research_data/test_hashing.py`
+- Modify: `tests/research_data/test_cli.py`
+
+**Interfaces:**
+- Produces: `acquisition_bundle_content_hash`, `strategy_data_content_hash`, `execution_data_content_hash`, `audit_data_content_hash`, and `contract_rule_content_hash` with frozen bundle versions.
+- Produces: `computational_experiment_id(content_dependency_hashes=...)`, where callers provide only the explicitly versioned dependencies relevant to that experiment.
+
+- [x] Add failing tests proving optional Index changes only audit/full bundle identity, current contract-rule changes only contract/full bundle identity, and strategy identity remains stable.
+- [x] Add a failing Candidate-ID test using only the versioned strategy dependency and prove unrelated audit/contract hashes cannot change it unless explicitly supplied.
+- [x] Run focused tests and confirm the current global content hash couples all data.
+- [x] Define frozen membership: strategy=`trade_1m,trade_4h,trade_1d`; execution=`trade_1m,mark_1m,funding`; audit=`index_1m`; acquisition bundle=all unique datasets plus contract rules.
+- [x] Hash each bundle as Canonical records containing its version, dataset name, and dataset content hash; keep legacy `dataset_content_hash` as an alias of the acquisition bundle hash.
+- [x] Replace the single computational dataset hash argument with a non-empty canonical mapping of explicit versioned dependency names to hashes.
+- [x] Run focused hashing/orchestration tests to green.
+
+### Task 14: Index requested-range gap boundaries and release verification
+
+**Files:**
+- Modify: `pa_agent/research_data/cli.py`
+- Modify: `tests/research_data/test_cli.py`
+- Modify: `docs/verification/2026-07-13-first-batch-data-validation-results.md`
+
+**Interfaces:**
+- Produces: Index gap detection with the same requested UTC minute start/end boundaries as trade and mark streams.
+
+- [x] Add a failing orchestration test with Index data missing its first and last requested minute and assert two machine-readable boundary gaps.
+- [x] Pass expected start/end into Index gap detection and run the focused test to green.
+- [x] Run the complete first-batch, security/scope, ruff, diff-check, compileall, fixed-seed main/feature, and real three-day interrupted/resumed/clean validations.
+- [ ] Update the verification report, commit and fast-forward push the existing PR #15 branch, verify its remote head and actual CI state, then stop without merge or second-batch work.
