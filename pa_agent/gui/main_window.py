@@ -404,6 +404,10 @@ class MainWindow(QMainWindow):
             _last_ds = normalize_data_source_kind(
                 getattr(_settings.general, "last_data_source", "mt5")
             )
+        # 如果上次保存的数据源不在 UI 可选列表中, 强制回退 MT5
+        _ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
+        if _last_ds not in _ui_kinds:
+            _last_ds = "mt5"
         self._active_data_source_kind = _last_ds
 
         ctrl_layout.addWidget(QLabel("数据来源:"))
