@@ -40,6 +40,9 @@ experience/**/*
 trade_records/*
 !trade_records/.gitkeep
 
+# Public research-data runtime output (raw pages, canonical data, checkpoints)
+research_data_output/
+
 # ── 本地临时 / 解包产物（WorkBuddy、网关调试等）──────────────────────────────
 _tmp_wb_asar/
 _tmp_auth.js
