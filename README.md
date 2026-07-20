@@ -51,6 +51,25 @@ python -m pa_agent.main
 
 > 若需运行测试（pytest）或代码格式化（ruff/black），额外安装：`pip install -e ".[dev]"`。
 
+### uv 隔离环境（可选）
+
+项目也支持使用 [uv](https://docs.astral.sh/uv/) 进行环境隔离，依赖版本通过 `uv.lock` 锁定，保证可复现安装，且不会污染系统 Python。
+
+```cmd
+# 1. 安装 uv（仅需一次）
+pip install uv
+# 或官方脚本：curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. 首次运行或依赖变更时，make 自动创建 .venv 并同步依赖
+make uv-run
+
+# 3. 之后每次启动
+make uv-run
+# 或手动：uv run python -m pa_agent.main
+```
+
+> 运行测试：`make uv-test`，代码检查：`make uv-lint`。
+
 ---
 
 ## 详细说明
