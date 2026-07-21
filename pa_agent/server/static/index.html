@@ -160,6 +160,9 @@
           <label>轮巡间隔（分钟）
             <input v-model.number="cfg.general.watch_round_interval_min" type="number" min="0" max="1440">
           </label>
+          <label>同时分析品种数（1-8）
+            <input v-model.number="cfg.general.watch_concurrency" type="number" min="1" max="8">
+          </label>
           <label>分析 K 线根数
             <input v-model.number="cfg.general.analysis_bar_count" type="number" min="2" max="5000">
           </label>

@@ -98,6 +98,8 @@ class GeneralSettings(BaseModel):
     watch_symbols: str = ""
     #: 多品种轮巡监控：一轮全部品种分析完后，等待多少分钟再开始下一轮
     watch_round_interval_min: int = Field(default=10, ge=0, le=1440)
+    #: 多品种轮巡监控：同时分析的品种数（服务端并发池大小）
+    watch_concurrency: int = Field(default=2, ge=1, le=8)
 
     @field_validator("last_data_source", mode="before")
     @classmethod
