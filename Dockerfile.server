@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 TZ=Asia/Shanghai
+WORKDIR /app
+
+# git: tvdatafeed 为 git 依赖；tzdata: 时区
+RUN apt-get update && apt-get install -y --no-install-recommends git tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY pa_agent ./pa_agent
+COPY prompt_engineering ./prompt_engineering
+
+# 服务端代码不 import Qt，装完后卸载 PyQt6 系瘦身镜像
+RUN pip install --no-cache-dir uv \
+    && uv pip install --system --no-cache ".[server]" \
+    && (pip uninstall -y PyQt6 PyQt6-Qt6 PyQt6-sip pyqtgraph || true)
+
+EXPOSE 8688
+CMD ["python", "-m", "pa_agent.server"]

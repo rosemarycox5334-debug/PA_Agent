@@ -87,3 +87,6 @@ docs/changelog/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 服务端 Docker 数据目录
+data/
