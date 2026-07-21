@@ -165,6 +165,39 @@ def test_watch_start_without_symbols_400(client):
     assert r.status_code == 400 and "监控列表" in r.json()["error"]
 
 
+def test_live_endpoint(client):
+    c, _, _ = client
+    assert c.get("/api/live/XAUUSD").status_code == 404
+    st = c.app.state.server_state
+    st.reset_live("XAUUSD")
+    st.append_live("XAUUSD", "stage1", "reasoning", "推理片段")
+    body = c.get("/api/live/XAUUSD").json()
+    assert body["stage1_reasoning"] == "推理片段"
+    assert body["seq"] == 1 and body["running"] is False
+
+
+def test_records_latest_shortcut(client):
+    c, pending, _ = client
+    _write_record(pending, "20260722_100000_XAUUSD_15m.json")
+    _write_record(pending, "20260722_110000_XAUUSD_15m.json")
+    assert c.get("/api/records", params={"latest": 1}).status_code == 400
+    body = c.get("/api/records", params={"latest": 1, "symbol": "XAUUSD"}).json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["name"].startswith("20260722_110000")
+
+
+def test_analyze_pool_busy_409(client, monkeypatch):
+    """数据源池借不到实例时手动分析返回 409 而非挂起."""
+    c, _, _ = client
+
+    def busy_acquire(timeout=30):
+        raise TimeoutError("数据源池繁忙")
+
+    monkeypatch.setattr(c.app.state.ds_pool, "acquire", busy_acquire)
+    r = c.post("/api/analyze", json={"symbol": "XAUUSD"})
+    assert r.status_code == 409 and "繁忙" in r.json()["error"]
+
+
 def test_feishu_test_uses_form_values(client, monkeypatch):
     """测试按钮直接用表单传来的 webhook（未保存配置也能测通）."""
     c, _, _ = client

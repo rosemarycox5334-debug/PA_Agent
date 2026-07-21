@@ -14,11 +14,8 @@ from fastapi.staticfiles import StaticFiles
 
 from pa_agent.config.paths import RECORDS_PENDING_DIR  # noqa: F401  (供测试 patch)
 from pa_agent.notify.order_opportunity import has_order_opportunity
-from pa_agent.server.bootstrap import (
-    ServerContext,
-    rebuild_data_source,
-    rebuild_engine,
-)
+from pa_agent.server.bootstrap import ServerContext, rebuild_engine
+from pa_agent.server.ds_pool import DataSourcePool
 from pa_agent.server.scheduler import WatchScheduler
 from pa_agent.server.service import run_symbol_analysis
 from pa_agent.server.state import ServerState
@@ -163,11 +160,13 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
 
     save_path = settings_path or SETTINGS_JSON_PATH
     state = ServerState()
-    scheduler = WatchScheduler(ctx, state)
+    ds_pool = DataSourcePool(ctx.settings, size=8)
+    scheduler = WatchScheduler(ctx, state, ds_pool)
     app = FastAPI(title="PA Agent 服务端", docs_url=None, redoc_url=None)
     app.state.ctx = ctx
     app.state.server_state = state
     app.state.scheduler = scheduler
+    app.state.ds_pool = ds_pool
     # 手动分析持有此锁直到分析结束；轮巡启动也短暂持有 —— 二者互斥收敛于此
     analysis_lock = threading.Lock()
     settings_lock = threading.Lock()
@@ -219,11 +218,19 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
             str(body.get("timeframe") or "").strip()
             or getattr(ctx.settings.general, "last_timeframe", "15m")
         )
+        try:
+            ds = ds_pool.acquire(timeout=5)
+        except TimeoutError as exc:
+            analysis_lock.release()
+            return JSONResponse(
+                status_code=409, content={"ok": False, "error": str(exc)}
+            )
 
         def _run() -> None:
             try:
-                run_symbol_analysis(ctx, state, symbol, timeframe)
+                run_symbol_analysis(ctx, state, symbol, timeframe, data_source=ds)
             finally:
+                ds_pool.release(ds)
                 analysis_lock.release()
 
         threading.Thread(target=_run, name=f"manual-{symbol}", daemon=True).start()
@@ -273,9 +280,9 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
                 ctx.logger.warning("引擎组件重建失败: %s", exc)
             if ds_changed:
                 try:
-                    rebuild_data_source(ctx)
+                    ds_pool.rebuild(new_settings)
                 except Exception as exc:  # noqa: BLE001
-                    ctx.logger.warning("数据源重建失败: %s", exc)
+                    ctx.logger.warning("数据源池重建失败: %s", exc)
             state.add_event("配置已更新" + ("（数据源已切换）" if ds_changed else ""))
             return JSONResponse(content={"ok": True})
 
@@ -291,8 +298,23 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
         )
         return {"ok": ok, "detail": detail}
 
+    @app.get("/api/live/{symbol}")
+    def api_live(symbol: str) -> dict[str, Any]:
+        live = state.get_live(symbol)
+        if live is None:
+            raise HTTPException(status_code=404, detail="该品种尚无分析活动")
+        return live
+
     @app.get("/api/records")
-    def api_records(symbol: str = "", limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    def api_records(
+        symbol: str = "", limit: int = 50, offset: int = 0, latest: int = 0
+    ) -> dict[str, Any]:
+        if latest:
+            if not symbol.strip():
+                raise HTTPException(
+                    status_code=400, detail="latest=1 时必须携带 symbol 参数"
+                )
+            limit, offset = 1, 0
         pending_dir: Path = RECORDS_PENDING_DIR
         # 只 stat 排序 + 按文件名过滤品种，仅对当前页的文件做 JSON 解析，
         # 记录量增长后列表接口的开销保持 O(页大小)
