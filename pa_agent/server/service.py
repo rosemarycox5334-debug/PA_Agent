@@ -23,6 +23,8 @@ DATA_READY_TIMEOUT_S = 120
 ANALYSIS_TIMEOUT_S = 1800
 #: 数据就绪轮询间隔秒数
 _WAIT_POLL_S = 3.0
+#: matplotlib pyplot 非线程安全：并发下出图必须串行
+_CHART_LOCK = threading.Lock()
 
 _EVENT_LABELS = {  # 与 GUI _AnalysisWorker 一致的中文文案
     OrchestratorEvent.Stage1Started: "阶段一分析中",
@@ -46,6 +48,7 @@ def run_symbol_analysis(
     timeframe: str,
     *,
     cancel_token: CancelToken | None = None,
+    data_source: Any = None,
     round_num: int = 1,
     idx: int = 0,
     total: int = 1,
@@ -53,9 +56,12 @@ def run_symbol_analysis(
     """阻塞执行一次完整单品种分析，返回结果摘要（异常不外抛）.
 
     摘要键：``ts, ok, direction, order_type, confidence, has_order, error``。
-    执行中通过 *state* 更新阶段与事件日志，结束时写入 symbol result。
+    *data_source* 传入时使用之（并发路径，每任务独立实例）；None 回落
+    ``ctx.data_source``。执行中通过 *state* 更新阶段、实时推理流与事件日志，
+    结束时写入 symbol result 并从 current 中移除。
     """
     cancel_token = cancel_token or CancelToken()
+    ds = data_source if data_source is not None else ctx.data_source
     summary: dict[str, Any] = {
         "ts": time.time(),
         "ok": False,
@@ -69,13 +75,14 @@ def run_symbol_analysis(
         settings = ctx.settings
         bar_count = int(getattr(settings.general, "analysis_bar_count", 100))
 
-        state.set_current(symbol, "waiting_data", round_num, idx, total)
+        state.reset_live(symbol)
+        state.set_symbol_phase(symbol, "waiting_data", round_num)
         state.add_event(f"{symbol} 等待数据就绪")
-        frame = _wait_frame(ctx, symbol, timeframe, bar_count, cancel_token)
+        frame = _wait_frame(ds, symbol, timeframe, bar_count, cancel_token)
 
-        state.set_current(symbol, "stage1", round_num, idx, total)
+        state.set_symbol_phase(symbol, "stage1", round_num)
         record = _submit_with_watchdog(
-            ctx, state, frame, cancel_token, symbol, round_num, idx, total
+            ctx, state, frame, cancel_token, symbol, round_num
         )
 
         record_exc = getattr(record, "exception", None)
@@ -99,7 +106,7 @@ def run_symbol_analysis(
         summary["ok"] = True
 
         if summary["has_order"]:
-            state.set_current(symbol, "notifying", round_num, idx, total)
+            state.set_symbol_phase(symbol, "notifying", round_num)
             state.add_event(
                 f"{symbol} 发现下单机会（{inner.get('order_direction') or '—'} "
                 f"{inner.get('order_type') or '—'}），推送通知"
@@ -107,7 +114,6 @@ def run_symbol_analysis(
             _notify_order(
                 ctx, inner, stage2_full, symbol, timeframe, frame, record, state
             )
-        state.set_current(symbol, "done", round_num, idx, total)
         state.add_event(f"{symbol} 分析完成")
     except Exception as exc:  # noqa: BLE001 — 单品种失败不得中断轮巡
         summary["error"] = str(exc)
@@ -116,11 +122,12 @@ def run_symbol_analysis(
     finally:
         summary["ts"] = time.time()
         state.set_symbol_result(symbol, summary)
+        state.clear_symbol(symbol)
     return summary
 
 
 def _wait_frame(
-    ctx: Any,
+    ds: Any,
     symbol: str,
     timeframe: str,
     bar_count: int,
@@ -130,7 +137,6 @@ def _wait_frame(
     from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS, build_display_frame
     from pa_agent.util.timefmt import now_local_ms
 
-    ds = ctx.data_source
     if ds is None:
         raise RuntimeError("数据源未初始化")
     if not getattr(ds, "_connected", False):
@@ -168,8 +174,6 @@ def _submit_with_watchdog(
     cancel_token: CancelToken,
     symbol: str,
     round_num: int,
-    idx: int,
-    total: int,
 ) -> Any:
     """在内层线程执行 orchestrator.submit，超时则取消并抛 TimeoutError."""
     orch = build_orchestrator(ctx)
@@ -179,13 +183,29 @@ def _submit_with_watchdog(
         label = _EVENT_LABELS.get(event, str(event))
         state.add_event(f"{symbol} {label}")
         if event == OrchestratorEvent.Stage1Started:
-            state.set_current(symbol, "stage1", round_num, idx, total)
+            state.set_symbol_phase(symbol, "stage1", round_num)
         elif event == OrchestratorEvent.Stage2Started:
-            state.set_current(symbol, "stage2", round_num, idx, total)
+            state.set_symbol_phase(symbol, "stage2", round_num)
 
     def _run() -> None:
         try:
-            result_box["record"] = orch.submit(frame, cancel_token, on_event)
+            result_box["record"] = orch.submit(
+                frame,
+                cancel_token,
+                on_event,
+                on_stage1_reasoning=lambda c: state.append_live(
+                    symbol, "stage1", "reasoning", c
+                ),
+                on_stage1_content=lambda c: state.append_live(
+                    symbol, "stage1", "content", c
+                ),
+                on_stage2_reasoning=lambda c: state.append_live(
+                    symbol, "stage2", "reasoning", c
+                ),
+                on_stage2_content=lambda c: state.append_live(
+                    symbol, "stage2", "content", c
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 — 转交外层线程重新抛出
             result_box["exc"] = exc
 
@@ -223,19 +243,23 @@ def _notify_order(
     try:
         from pa_agent.records.trade_logger import save_trade_record
 
-        save_trade_record(
-            decision_inner=inner,
-            stage2_full=stage2_full,
-            stage1_diagnosis=stage1_diag if isinstance(stage1_diag, dict) else None,
-            frame=frame,
-            meta_symbol=symbol,
-            meta_timeframe=timeframe,
-            decision_stance=getattr(settings.general, "decision_stance", "") or "",
-            model_name=getattr(settings.provider, "model", "") or "",
-            structure_flip_cooldown_bars=int(
-                getattr(settings.general, "structure_flip_cooldown_bars", 3) or 3
-            ),
-        )
+        with _CHART_LOCK:
+            save_trade_record(
+                decision_inner=inner,
+                stage2_full=stage2_full,
+                stage1_diagnosis=stage1_diag
+                if isinstance(stage1_diag, dict)
+                else None,
+                frame=frame,
+                meta_symbol=symbol,
+                meta_timeframe=timeframe,
+                decision_stance=getattr(settings.general, "decision_stance", "")
+                or "",
+                model_name=getattr(settings.provider, "model", "") or "",
+                structure_flip_cooldown_bars=int(
+                    getattr(settings.general, "structure_flip_cooldown_bars", 3) or 3
+                ),
+            )
     except Exception as exc:  # noqa: BLE001
         ctx.logger.warning("交易记录落盘失败: %s", exc)
 

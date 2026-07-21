@@ -140,6 +140,79 @@ def test_confidence_threshold_blocks_notify(monkeypatch):
     assert summary["ok"] and not summary["has_order"] and "x" not in called
 
 
+def test_injected_data_source_used(monkeypatch):
+    """传入 data_source 时必须用它而非 ctx.data_source（并发隔离路径）."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from pa_agent.server import service
+    from pa_agent.server.state import ServerState
+
+    ctx = _fake_ctx([])  # ctx.data_source 永远无数据
+    inj = _fake_ctx(_mk_bars(60)).data_source  # 注入的有数据
+    record = SimpleNamespace(
+        stage2_decision={"decision": {"order_type": "观望"}}, exception=None
+    )
+    with patch(
+        "pa_agent.server.service.build_orchestrator",
+        return_value=SimpleNamespace(submit=lambda *a, **k: record),
+    ):
+        summary = service.run_symbol_analysis(
+            ctx, ServerState(), "XAUUSD", "15m", data_source=inj
+        )
+    assert summary["ok"] and inj.subscribed == ("XAUUSD", "15m")
+
+
+def test_live_stream_callbacks(monkeypatch):
+    """orchestrator 的流式回调必须写入 state 实时缓冲."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from pa_agent.server import service
+    from pa_agent.server.state import ServerState
+
+    ctx = _fake_ctx(_mk_bars(60))
+    state = ServerState()
+
+    def fake_submit(frame, token, on_event, **kw):
+        kw["on_stage1_reasoning"]("思考中")
+        kw["on_stage2_content"]("结论")
+        return SimpleNamespace(
+            stage2_decision={"decision": {"order_type": "观望"}}, exception=None
+        )
+
+    with patch(
+        "pa_agent.server.service.build_orchestrator",
+        return_value=SimpleNamespace(submit=fake_submit),
+    ):
+        service.run_symbol_analysis(ctx, state, "XAUUSD", "15m")
+    live = state.get_live("XAUUSD")
+    assert live["stage1_reasoning"] == "思考中"
+    assert live["stage2_content"] == "结论"
+    assert live["seq"] == 2
+
+
+def test_current_cleared_after_analysis(monkeypatch):
+    """分析结束（成功或失败）后 current 中不得残留该品种."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from pa_agent.server import service
+    from pa_agent.server.state import ServerState
+
+    ctx = _fake_ctx(_mk_bars(60))
+    state = ServerState()
+    record = SimpleNamespace(
+        stage2_decision={"decision": {"order_type": "观望"}}, exception=None
+    )
+    with patch(
+        "pa_agent.server.service.build_orchestrator",
+        return_value=SimpleNamespace(submit=lambda *a, **k: record),
+    ):
+        service.run_symbol_analysis(ctx, state, "XAUUSD", "15m")
+    assert "XAUUSD" not in state.snapshot()["current"]
+
+
 def test_cancel_interrupts_data_wait(monkeypatch):
     """stop 期间的数据等待必须立即被 cancel_token 打断，而非等满 120s."""
     import threading
