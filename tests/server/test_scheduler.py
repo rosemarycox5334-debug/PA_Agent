@@ -26,6 +26,73 @@ def _fake_pool():
     )
 
 
+def test_parse_trading_hours():
+    from pa_agent.server.scheduler import parse_trading_hours
+
+    assert parse_trading_hours("09:30-12:00, 13:00-16:00") == [
+        (570, 720),
+        (780, 960),
+    ]
+    assert parse_trading_hours("bad, 25:00-26:00, 09:30-08:00") == []  # 非法段忽略
+    assert parse_trading_hours("") == []
+
+
+def test_in_trading_hours():
+    from datetime import datetime
+
+    from pa_agent.server.scheduler import in_trading_hours, parse_trading_hours
+
+    win = parse_trading_hours("09:30-11:30, 13:00-15:00")
+    # 2026-07-22 是周三
+    assert in_trading_hours(win, datetime(2026, 7, 22, 10, 0)) is True
+    assert in_trading_hours(win, datetime(2026, 7, 22, 12, 0)) is False  # 午休
+    assert in_trading_hours(win, datetime(2026, 7, 22, 20, 0)) is False  # 收盘后
+    assert in_trading_hours(win, datetime(2026, 7, 25, 10, 0)) is False  # 周六
+    assert in_trading_hours([], datetime(2026, 7, 25, 10, 0)) is True  # 空=不限
+
+
+def test_next_trading_open():
+    from datetime import datetime
+
+    from pa_agent.server.scheduler import next_trading_open, parse_trading_hours
+
+    win = parse_trading_hours("09:30-11:30, 13:00-15:00")
+    # 周三午休 → 当天 13:00
+    nxt = next_trading_open(win, datetime(2026, 7, 22, 12, 0))
+    assert datetime.fromtimestamp(nxt) == datetime(2026, 7, 22, 13, 0)
+    # 周五收盘后 → 下周一 09:30
+    nxt = next_trading_open(win, datetime(2026, 7, 24, 16, 0))
+    assert datetime.fromtimestamp(nxt) == datetime(2026, 7, 27, 9, 30)
+
+
+def test_market_closed_suspends_round(monkeypatch):
+    """开关开启且休市时不执行分析，state 标记休市恢复时间."""
+    import time as _time
+
+    from pa_agent.server import scheduler as sched_mod
+    from pa_agent.server.state import ServerState
+
+    calls = []
+    monkeypatch.setattr(
+        sched_mod, "run_symbol_analysis", lambda *a, **k: calls.append(1) or {"ok": True}
+    )
+    monkeypatch.setattr(sched_mod, "in_trading_hours", lambda w, now=None: False)
+    monkeypatch.setattr(
+        sched_mod, "next_trading_open", lambda w, now=None: _time.time() + 3600
+    )
+    ctx = _ctx(symbols="AAA", interval=0)
+    ctx.settings.general.watch_trading_hours_only = True
+    ctx.settings.general.watch_trading_hours = "09:30-11:30"
+    state = ServerState()
+    s = sched_mod.WatchScheduler(ctx, state, _fake_pool())
+    s.start()
+    _time.sleep(0.5)
+    snap = state.snapshot()
+    s.stop()
+    assert calls == []  # 休市：没有执行任何分析
+    assert snap["market_closed_until"] is not None
+
+
 def test_parse_watch_symbols():
     from pa_agent.server.scheduler import parse_watch_symbols
 

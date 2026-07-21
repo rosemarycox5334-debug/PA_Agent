@@ -84,6 +84,24 @@
   第几轮），点击卡片进入详情页。
 - 状态徽标显示「并发 x/N」。
 
+## 子项目 A2：仅交易时段轮巡（节省 token）
+
+- `GeneralSettings` 新增：`watch_trading_hours_only: bool = False`（开关）、
+  `watch_trading_hours: str = "09:30-12:00, 13:00-16:00"`（逗号分隔的
+  HH:MM-HH:MM 时段串，北京时间，周一至周五生效；默认为 A 股+港股并集）。
+- `scheduler.py` 纯函数：`parse_trading_hours(raw) -> list[(start_min, end_min)]`
+  （非法段忽略）；`in_trading_hours(windows, now=None) -> bool`（周六日 False；
+  windows 空 → True）；`next_trading_open(windows, now=None) -> float`（下一个
+  开盘时刻 epoch，供前端倒计时）。
+- 调度循环：开关开启且当前不在时段 → `state.set_market_closed(next_open)` +
+  事件日志（每次进入休市只记一条），以 ≤60s 粒度 `stop_evt.wait` 等待，恢复
+  后 `set_market_closed(None)` 继续轮巡；stop 随时可打断。
+- `state` 新增 `market_closed_until: float | None`（snapshot 输出同名键）。
+- 前端：监控页休市卡片（「休市中，HH:MM 恢复轮巡」倒计时）；配置页开关 +
+  时段输入框。手动分析（/api/analyze）不受时段限制。
+- 节假日不做日历判定（YAGNI）：节假日跑一轮只会重复分析旧 K 线，配合本
+  功能的周末+时段过滤已消除绝大部分空耗。
+
 ## 子项目 B：品种详情页
 
 ### 数据来源

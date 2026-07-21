@@ -54,6 +54,10 @@
         </div>
       </div>
     </section>
+    <section class="card" v-else-if="status.market_closed_until">
+      <h2>休市中</h2>
+      <div class="countdown">{{ marketClosedText }}</div>
+    </section>
     <section class="card" v-else-if="countdown !== null">
       <h2>等待下一轮</h2>
       <div class="countdown">{{ countdownText }}</div>
@@ -228,6 +232,14 @@
           </label>
           <label>推送置信度阈值（0-100，0=不限制）
             <input v-model.number="cfg.general.decision_confidence_threshold" type="number" min="0" max="100">
+          </label>
+          <label class="check">
+            <input type="checkbox" v-model="cfg.general.watch_trading_hours_only">
+            仅交易时段轮巡（休市自动挂起，节省 token）
+          </label>
+          <label class="full" v-if="cfg.general.watch_trading_hours_only">
+            交易时段（HH:MM-HH:MM 逗号分隔，北京时间，周一至周五生效）
+            <input v-model="cfg.general.watch_trading_hours" placeholder="09:30-12:00, 13:00-16:00">
           </label>
         </div>
       </section>

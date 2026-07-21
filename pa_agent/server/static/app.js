@@ -96,6 +96,13 @@ createApp({
       const s = Math.max(0, Math.floor(this.countdown));
       return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")} 后开始下一轮`;
     },
+    marketClosedText() {
+      const until = this.status.market_closed_until;
+      if (!until) return "";
+      const dt = new Date(until * 1000);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())} 恢复轮巡`;
+    },
     detailDecision() {
       return decisionOf(this.detail);
     },

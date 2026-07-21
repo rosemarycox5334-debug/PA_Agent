@@ -34,6 +34,7 @@ class ServerState:
         self._error: str | None = None
         self._current: dict[str, dict[str, Any]] = {}
         self._round_wait_eta: float | None = None
+        self._market_closed_until: float | None = None
         self._results: dict[str, dict[str, Any]] = {}
         self._events: deque[dict[str, Any]] = deque(maxlen=EVENT_CAPACITY)
         self._live: dict[str, dict[str, Any]] = {}
@@ -48,6 +49,10 @@ class ServerState:
     def set_round_wait(self, eta_epoch: float | None) -> None:
         with self._lock:
             self._round_wait_eta = eta_epoch
+
+    def set_market_closed(self, until_epoch: float | None) -> None:
+        with self._lock:
+            self._market_closed_until = until_epoch
 
     # ── 进行中品种（并发字典）────────────────────────────────────────────────
 
@@ -123,6 +128,7 @@ class ServerState:
                     "scheduler": {"running": self._running, "error": self._error},
                     "current": self._current,
                     "round_wait_eta": self._round_wait_eta,
+                    "market_closed_until": self._market_closed_until,
                     "results": self._results,
                     "events": list(self._events),
                 }

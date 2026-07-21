@@ -100,6 +100,10 @@ class GeneralSettings(BaseModel):
     watch_round_interval_min: int = Field(default=10, ge=0, le=1440)
     #: 多品种轮巡监控：同时分析的品种数（服务端并发池大小）
     watch_concurrency: int = Field(default=2, ge=1, le=8)
+    #: 仅交易时段轮巡（周一至周五 + 下方时段；休市时挂起，节省 token）
+    watch_trading_hours_only: bool = False
+    #: 交易时段串（HH:MM-HH:MM 逗号分隔，北京时间；默认 A股+港股并集）
+    watch_trading_hours: str = "09:30-12:00, 13:00-16:00"
 
     @field_validator("last_data_source", mode="before")
     @classmethod

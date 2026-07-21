@@ -12,11 +12,63 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
+from datetime import datetime, timedelta
 from typing import Any
 
 from pa_agent.server.service import run_symbol_analysis  # noqa: F401  (供测试 patch)
 from pa_agent.server.state import ServerState
 from pa_agent.util.threading import CancelToken
+
+
+def parse_trading_hours(raw: str) -> list[tuple[int, int]]:
+    """解析 "HH:MM-HH:MM, HH:MM-HH:MM" 为分钟窗口列表；非法段忽略."""
+    windows: list[tuple[int, int]] = []
+    for part in (raw or "").replace("，", ",").split(","):
+        part = part.strip()
+        if not part or "-" not in part:
+            continue
+        try:
+            start_s, end_s = part.split("-", 1)
+            sh, sm = (int(x) for x in start_s.strip().split(":", 1))
+            eh, em = (int(x) for x in end_s.strip().split(":", 1))
+        except ValueError:
+            continue
+        start, end = sh * 60 + sm, eh * 60 + em
+        if 0 <= start < end <= 24 * 60:
+            windows.append((start, end))
+    return sorted(windows)
+
+
+def in_trading_hours(
+    windows: list[tuple[int, int]], now: datetime | None = None
+) -> bool:
+    """是否处于交易时段（周一至周五 + 任一窗口内）；windows 空 = 不限制."""
+    if not windows:
+        return True
+    now = now or datetime.now()
+    if now.weekday() >= 5:
+        return False
+    minute = now.hour * 60 + now.minute
+    return any(start <= minute < end for start, end in windows)
+
+
+def next_trading_open(
+    windows: list[tuple[int, int]], now: datetime | None = None
+) -> float:
+    """下一个开盘时刻（epoch 秒）；用于休市倒计时展示."""
+    now = now or datetime.now()
+    for day_offset in range(0, 8):
+        day = now + timedelta(days=day_offset)
+        if day.weekday() >= 5:
+            continue
+        minute_now = now.hour * 60 + now.minute if day_offset == 0 else -1
+        for start, _end in windows:
+            if start > minute_now:
+                open_dt = day.replace(
+                    hour=start // 60, minute=start % 60, second=0, microsecond=0
+                )
+                return open_dt.timestamp()
+    return (now + timedelta(days=1)).timestamp()  # windows 为空时的兜底
 
 
 def parse_watch_symbols(raw: str) -> list[str]:
@@ -136,6 +188,29 @@ class WatchScheduler:
             with self._lock:
                 self._tokens.pop(symbol, None)
 
+    def _wait_for_market_open(self) -> None:
+        """开关开启且休市时挂起（≤60s 粒度醒来检查 stop 与配置变更）."""
+        announced = False
+        while not self._stop_evt.is_set():
+            settings = self._ctx.settings
+            if not getattr(settings.general, "watch_trading_hours_only", False):
+                break
+            windows = parse_trading_hours(
+                getattr(settings.general, "watch_trading_hours", "") or ""
+            )
+            if in_trading_hours(windows):
+                break
+            nxt = next_trading_open(windows)
+            self._state.set_market_closed(nxt)
+            if not announced:
+                announced = True
+                self._state.add_event(
+                    f"休市中，{datetime.fromtimestamp(nxt):%m-%d %H:%M} 恢复轮巡"
+                )
+            if self._stop_evt.wait(min(60.0, max(1.0, nxt - time.time()))):
+                break
+        self._state.set_market_closed(None)
+
     def _loop(
         self, symbols: list[str], timeframe: str, interval_s: float, concurrency: int
     ) -> None:
@@ -145,6 +220,9 @@ class WatchScheduler:
                 max_workers=concurrency, thread_name_prefix="watch-worker"
             ) as pool:
                 while not self._stop_evt.is_set():
+                    self._wait_for_market_open()
+                    if self._stop_evt.is_set():
+                        break
                     self._state.set_round_wait(None)
                     futures = [
                         pool.submit(
