@@ -178,8 +178,13 @@ def _submit_with_watchdog(
     """在内层线程执行 orchestrator.submit，超时则取消并抛 TimeoutError."""
     orch = build_orchestrator(ctx)
     result_box: dict[str, Any] = {}
+    # watchdog 放弃后遗弃线程可能在几分钟后仍产出回调；置 True 后全部静默，
+    # 避免早已结束的品种突然冒出错序事件/推理片段
+    abandoned = threading.Event()
 
     def on_event(event: OrchestratorEvent) -> None:
+        if abandoned.is_set():
+            return
         label = _EVENT_LABELS.get(event, str(event))
         state.add_event(f"{symbol} {label}")
         if event == OrchestratorEvent.Stage1Started:
@@ -187,24 +192,23 @@ def _submit_with_watchdog(
         elif event == OrchestratorEvent.Stage2Started:
             state.set_symbol_phase(symbol, "stage2", round_num)
 
+    def _live(stage: str, kind: str):
+        def _cb(chunk: str) -> None:
+            if not abandoned.is_set():
+                state.append_live(symbol, stage, kind, chunk)
+
+        return _cb
+
     def _run() -> None:
         try:
             result_box["record"] = orch.submit(
                 frame,
                 cancel_token,
                 on_event,
-                on_stage1_reasoning=lambda c: state.append_live(
-                    symbol, "stage1", "reasoning", c
-                ),
-                on_stage1_content=lambda c: state.append_live(
-                    symbol, "stage1", "content", c
-                ),
-                on_stage2_reasoning=lambda c: state.append_live(
-                    symbol, "stage2", "reasoning", c
-                ),
-                on_stage2_content=lambda c: state.append_live(
-                    symbol, "stage2", "content", c
-                ),
+                on_stage1_reasoning=_live("stage1", "reasoning"),
+                on_stage1_content=_live("stage1", "content"),
+                on_stage2_reasoning=_live("stage2", "reasoning"),
+                on_stage2_content=_live("stage2", "content"),
             )
         except Exception as exc:  # noqa: BLE001 — 转交外层线程重新抛出
             result_box["exc"] = exc
@@ -217,6 +221,7 @@ def _submit_with_watchdog(
     if worker.is_alive():
         cancel_token.set()
         worker.join(30)
+        abandoned.set()
         raise TimeoutError(f"分析超时（>{ANALYSIS_TIMEOUT_S}s），已请求取消")
     if "exc" in result_box:
         raise result_box["exc"]

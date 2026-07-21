@@ -279,7 +279,11 @@ def load_settings(path: Path | None = None) -> "Settings":
 
 
 def save_settings(settings: "Settings", path: Path | None = None) -> None:
-    """Persist settings to *path* (default: SETTINGS_JSON_PATH)."""
+    """Persist settings to *path* (default: SETTINGS_JSON_PATH).
+
+    Atomic: writes to a temp file then os.replace, so concurrent writers
+    can never leave a torn/corrupt JSON on disk.
+    """
     from pa_agent.config.paths import SETTINGS_JSON_PATH
 
     path = path or SETTINGS_JSON_PATH
@@ -287,4 +291,8 @@ def save_settings(settings: "Settings", path: Path | None = None) -> None:
 
     data = settings.model_dump()
 
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    os.replace(tmp_path, path)

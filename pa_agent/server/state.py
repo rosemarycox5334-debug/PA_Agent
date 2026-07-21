@@ -11,6 +11,8 @@ from typing import Any
 EVENT_CAPACITY = 200
 #: 每品种每条实时推理流的最大字符数（超出丢头部保尾部）
 LIVE_CAP = 16384
+#: results / live 字典的品种条目上限（超出淘汰最早写入且不在分析中的）
+SYMBOL_CAPACITY = 50
 
 _LIVE_STREAM_KEYS = (
     "stage1_reasoning",
@@ -79,6 +81,15 @@ class ServerState:
     def set_symbol_result(self, symbol: str, summary: dict[str, Any]) -> None:
         with self._lock:
             self._results[symbol] = dict(summary)
+            self._evict_locked(self._results)
+
+    def _evict_locked(self, store: dict[str, Any]) -> None:
+        """容量淘汰：dict 保序，删最早写入且不在分析中的键（持锁调用）."""
+        while len(store) > SYMBOL_CAPACITY:
+            victim = next(
+                (k for k in store if k not in self._current), next(iter(store))
+            )
+            store.pop(victim, None)
 
     def add_event(self, text: str) -> None:
         with self._lock:
@@ -93,6 +104,7 @@ class ServerState:
                 "seq": 0,
                 **{k: "" for k in _LIVE_STREAM_KEYS},
             }
+            self._evict_locked(self._live)
 
     def append_live(self, symbol: str, stage: str, kind: str, chunk: str) -> None:
         key = f"{stage}_{kind}"

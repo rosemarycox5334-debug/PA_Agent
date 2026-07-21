@@ -233,7 +233,15 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
                 ds_pool.release(ds)
                 analysis_lock.release()
 
-        threading.Thread(target=_run, name=f"manual-{symbol}", daemon=True).start()
+        try:
+            threading.Thread(target=_run, name=f"manual-{symbol}", daemon=True).start()
+        except RuntimeError as exc:  # 线程资源耗尽：必须归还锁与实例，否则永久卡死
+            ds_pool.release(ds)
+            analysis_lock.release()
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": f"无法启动分析线程：{exc}"},
+            )
         return JSONResponse(content={"ok": True, "message": f"已开始分析 {symbol}"})
 
     @app.get("/api/settings")
@@ -263,28 +271,64 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
                 or getattr(old.general, "last_tradingview_exchange", "")
                 != getattr(new_settings.general, "last_tradingview_exchange", "")
             )
-            # 数据源被正在运行的分析线程持有引用，运行中热切换会把它踢下线
-            if ds_changed and (scheduler.running or analysis_lock.locked()):
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "ok": False,
-                        "error": "分析进行中无法切换数据源，请先停止轮巡（或等手动分析结束）再保存",
-                    },
-                )
-            save_settings(new_settings, save_path)
-            ctx.settings = new_settings
-            try:
-                rebuild_engine(ctx)
-            except Exception as exc:  # noqa: BLE001
-                ctx.logger.warning("引擎组件重建失败: %s", exc)
+            # 数据源被正在运行的分析线程持有引用，运行中热切换会把它踢下线。
+            # 必须持 analysis_lock 完成整个 rebuild，封住「检查通过后分析
+            # 恰好启动、借走旧配置实例」的窗口（analyze/watch_start 均过此锁）
+            held_analysis_lock = False
             if ds_changed:
+                if not analysis_lock.acquire(blocking=False):
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "ok": False,
+                            "error": "手动分析进行中无法切换数据源，请稍后再保存",
+                        },
+                    )
+                held_analysis_lock = True
+                if scheduler.running:
+                    analysis_lock.release()
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "ok": False,
+                            "error": "轮巡运行中无法切换数据源，请先停止轮巡再保存",
+                        },
+                    )
+            try:
+                save_settings(new_settings, save_path)
+                ctx.settings = new_settings
                 try:
-                    ds_pool.rebuild(new_settings)
+                    rebuild_engine(ctx)
                 except Exception as exc:  # noqa: BLE001
-                    ctx.logger.warning("数据源池重建失败: %s", exc)
-            state.add_event("配置已更新" + ("（数据源已切换）" if ds_changed else ""))
-            return JSONResponse(content={"ok": True})
+                    ctx.logger.warning("引擎组件重建失败: %s", exc)
+                if ds_changed:
+                    try:
+                        ds_pool.rebuild(new_settings)
+                    except Exception as exc:  # noqa: BLE001
+                        ctx.logger.warning("数据源池重建失败: %s", exc)
+            finally:
+                if held_analysis_lock:
+                    analysis_lock.release()
+            # 轮巡启动时冻结这些参数：运行中改动需重启轮巡才生效
+            watch_param_keys = (
+                "watch_symbols",
+                "last_timeframe",
+                "watch_round_interval_min",
+                "watch_concurrency",
+            )
+            watch_changed = any(
+                getattr(old.general, k, None) != getattr(new_settings.general, k, None)
+                for k in watch_param_keys
+            )
+            hint = ""
+            if watch_changed and scheduler.running:
+                hint = "监控品种/周期/间隔/并发的改动需停止并重新启动轮巡后生效"
+                state.add_event(f"配置已更新（{hint}）")
+            else:
+                state.add_event(
+                    "配置已更新" + ("（数据源已切换）" if ds_changed else "")
+                )
+            return JSONResponse(content={"ok": True, "hint": hint})
 
     @app.post("/api/feishu/test")
     def api_feishu_test(

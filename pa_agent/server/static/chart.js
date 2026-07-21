@@ -34,9 +34,11 @@ export function renderKlineChart(el, klineData, decision) {
     width: el.clientWidth || 640,
     height: 360,
   });
-  // seq=1 最新 → 图表需要 oldest-first；time 用秒
+  // seq=1 最新 → 图表需要 oldest-first；time 用秒。
+  // lightweight-charts 按 UTC 渲染刻度：加本地时区偏移使轴显示本地钟点
+  const tzOff = -new Date().getTimezoneOffset() * 60;
   const bars = [...klineData].reverse().map((b) => ({
-    time: Math.floor(b.ts_open / 1000),
+    time: Math.floor(b.ts_open / 1000) + tzOff,
     open: b.open,
     high: b.high,
     low: b.low,

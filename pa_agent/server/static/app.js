@@ -77,6 +77,8 @@ createApp({
       _tickTimer: null,
       _liveTimer: null,
       _liveSeq: -1,
+      _liveBusy: false,
+      _detailRecordName: "",
       _chart: null,          // 详情页图表句柄
       _drawerChart: null,    // 抽屉图表句柄
     };
@@ -147,7 +149,13 @@ createApp({
       setTimeout(() => (this.toast = null), 4000);
     },
     switchTab(key) {
-      if (this.tab === "detail" && key !== "detail") this.stopLivePoll();
+      if (this.tab === "detail" && key !== "detail") {
+        this.stopLivePoll();
+        if (this._chart) {
+          this._chart.destroy();
+          this._chart = null;
+        }
+      }
       this.tab = key;
       if (key === "config" && !this.cfg) this.loadConfig();
       if (key === "history") this.loadRecords();
@@ -184,15 +192,20 @@ createApp({
       this.detailRecord = null;
       this.live = null;
       this._liveSeq = -1;
+      this._detailRecordName = "";
       this.tab = "detail";
       try {
         const list = await api(
           `/api/records?latest=1&symbol=${encodeURIComponent(symbol)}`
         );
+        // 用户可能已切换品种或离开详情页：过期响应直接丢弃
+        if (this.detailSymbol !== symbol || this.tab !== "detail") return;
         if (list.items.length) {
-          this.detailRecord = await api(
+          const rec = await api(
             `/api/records/${encodeURIComponent(list.items[0].name)}`
           );
+          if (this.detailSymbol !== symbol || this.tab !== "detail") return;
+          this.detailRecord = rec;
           await nextTick();
           this.renderDetailChart();
         }
@@ -222,25 +235,29 @@ createApp({
     startLivePoll() {
       this.stopLivePoll();
       const tick = async () => {
-        if (this.tab !== "detail" || document.hidden) return;
+        if (this.tab !== "detail" || document.hidden || this._liveBusy) return;
+        const sym = this.detailSymbol;
+        this._liveBusy = true;
         try {
-          const live = await api(
-            `/api/live/${encodeURIComponent(this.detailSymbol)}`
-          );
+          const live = await api(`/api/live/${encodeURIComponent(sym)}`);
+          // 品种已切换/页面已离开：过期响应丢弃，防止串台
+          if (sym !== this.detailSymbol || this.tab !== "detail") return;
           if (live.seq !== this._liveSeq) {
-            const wasRunning = this.live && this.live.running;
             this._liveSeq = live.seq;
             this.live = live;
             await nextTick();
             this.scrollLive();
-            // 分析刚结束：刷新记录与图表
-            if (wasRunning && !live.running) this.refreshDetailRecord();
+            // 有新内容且分析已结束：刷新记录与图表
+            // （覆盖「页面隐藏期间整个分析开始并完成」的场景）
+            if (!live.running) this.refreshDetailRecord();
           } else if (this.live && this.live.running !== live.running) {
             this.live = live;
             if (!live.running) this.refreshDetailRecord();
           }
         } catch {
           /* 404 = 尚无分析活动，忽略 */
+        } finally {
+          this._liveBusy = false;
         }
       };
       tick();
@@ -258,14 +275,22 @@ createApp({
       }
     },
     async refreshDetailRecord() {
+      const sym = this.detailSymbol;
       try {
         const list = await api(
-          `/api/records?latest=1&symbol=${encodeURIComponent(this.detailSymbol)}`
+          `/api/records?latest=1&symbol=${encodeURIComponent(sym)}`
         );
+        if (sym !== this.detailSymbol || this.tab !== "detail") return;
         if (list.items.length) {
-          this.detailRecord = await api(
+          // 记录没变就不重复拉全量/重画
+          if (this.detailRecord && this._detailRecordName === list.items[0].name)
+            return;
+          const rec = await api(
             `/api/records/${encodeURIComponent(list.items[0].name)}`
           );
+          if (sym !== this.detailSymbol || this.tab !== "detail") return;
+          this.detailRecord = rec;
+          this._detailRecordName = list.items[0].name;
           await nextTick();
           this.renderDetailChart();
         }

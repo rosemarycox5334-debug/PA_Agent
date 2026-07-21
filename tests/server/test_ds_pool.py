@@ -57,6 +57,23 @@ def test_rebuild_closes_and_recreates():
         assert b is not a and not b.closed
 
 
+def test_stale_release_after_rebuild_discarded():
+    """rebuild 前借出的实例归还时必须被丢弃，不得污染新池."""
+    from pa_agent.server.ds_pool import DataSourcePool
+
+    with patch(
+        "pa_agent.server.ds_pool._create_data_source_from_settings",
+        side_effect=lambda s: _FakeDS(),
+    ):
+        pool = DataSourcePool(_settings(), size=1)
+        old = pool.acquire()  # 借出中
+        pool.rebuild(_settings())
+        pool.release(old)  # 跨代际归还
+        assert old.closed  # 被断开丢弃
+        fresh = pool.acquire()  # 新代际实例，而非旧实例
+        assert fresh is not old and not fresh.closed
+
+
 def test_close_all_swallow_errors():
     from pa_agent.server.ds_pool import DataSourcePool
 
