@@ -8,7 +8,7 @@ def test_snapshot_roundtrip():
 
     st = ServerState()
     st.set_scheduler(True)
-    st.set_current("XAUUSD", "stage1", round_num=1, idx=0, total=2)
+    st.set_symbol_phase("XAUUSD", "stage1", 1)
     st.set_symbol_result(
         "XAUUSD",
         {
@@ -24,8 +24,7 @@ def test_snapshot_roundtrip():
     st.add_event("测试事件")
     snap = st.snapshot()
     assert snap["scheduler"]["running"] is True
-    assert snap["current"]["symbol"] == "XAUUSD"
-    assert snap["current"]["phase"] == "stage1"
+    assert snap["current"]["XAUUSD"]["phase"] == "stage1"
     assert snap["results"]["XAUUSD"]["has_order"] is True
     assert snap["events"][-1]["text"] == "测试事件"
     # snapshot 是拷贝：改动不回渗
@@ -33,19 +32,63 @@ def test_snapshot_roundtrip():
     assert st.snapshot()["results"]["XAUUSD"]["ok"] is True
 
 
-def test_round_wait_and_clear_current():
+def test_multi_current_and_live():
     from pa_agent.server.state import ServerState
 
     st = ServerState()
-    st.set_current("BTCUSD", "stage2", round_num=3, idx=1, total=2)
+    st.set_symbol_phase("AAA", "stage1", 1)
+    st.set_symbol_phase("BBB", "waiting_data", 1)
+    snap = st.snapshot()
+    assert set(snap["current"]) == {"AAA", "BBB"}
+    assert snap["current"]["AAA"]["phase"] == "stage1"
+    started = snap["current"]["AAA"]["started_ts"]
+    st.set_symbol_phase("AAA", "stage2", 1)
+    assert st.snapshot()["current"]["AAA"]["started_ts"] == started  # 不重置
+    st.clear_symbol("AAA")
+    assert "AAA" not in st.snapshot()["current"]
+    st.clear_all_current()
+    assert st.snapshot()["current"] == {}
+
+
+def test_live_buffer_cap_and_seq():
+    from pa_agent.server import state as state_mod
+    from pa_agent.server.state import ServerState
+
+    st = ServerState()
+    st.reset_live("AAA")
+    st.append_live("AAA", "stage1", "reasoning", "abc")
+    st.append_live("AAA", "stage2", "content", "x" * 20000)
+    live = st.get_live("AAA")
+    assert live["stage"] == "stage2"
+    assert live["stage1_reasoning"] == "abc"
+    assert len(live["stage2_content"]) == state_mod.LIVE_CAP  # 丢头部保尾部
+    assert live["stage2_content"].endswith("x")
+    assert live["seq"] == 2
+    assert live["running"] is False
+    assert st.get_live("NOPE") is None
+
+
+def test_live_running_flag_follows_current():
+    from pa_agent.server.state import ServerState
+
+    st = ServerState()
+    st.reset_live("AAA")
+    st.append_live("AAA", "stage1", "content", "hi")
+    st.set_symbol_phase("AAA", "stage1", 1)
+    assert st.get_live("AAA")["running"] is True
+    st.clear_symbol("AAA")
+    assert st.get_live("AAA")["running"] is False
+
+
+def test_round_wait_none_clears():
+    from pa_agent.server.state import ServerState
+
+    st = ServerState()
     eta = time.time() + 600
     st.set_round_wait(eta)
-    st.clear_current()
-    snap = st.snapshot()
-    assert snap["current"] is None
-    assert snap["round_wait_eta"] == eta
-    st.set_current("BTCUSD", "switching", round_num=4, idx=0, total=2)
-    assert st.snapshot()["round_wait_eta"] is None  # 进入新品种后清除倒计时
+    assert st.snapshot()["round_wait_eta"] == eta
+    st.set_round_wait(None)
+    assert st.snapshot()["round_wait_eta"] is None
 
 
 def test_scheduler_error_state():
