@@ -90,3 +90,6 @@ Desktop.ini
 
 # 服务端 Docker 数据目录
 data/
+
+# 镜像导出包
+*.tar.gz

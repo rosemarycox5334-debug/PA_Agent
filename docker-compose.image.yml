@@ -1,0 +1,18 @@
+# 镜像直载部署（无需源码构建）：先 docker load 导入镜像包，再 up -d
+#   docker load -i pa-agent-server-amd64.tar.gz
+#   docker compose -f docker-compose.image.yml up -d
+services:
+  pa-agent-server:
+    image: pa-agent-server:nas-amd64
+    container_name: pa-agent-server
+    ports:
+      - "8688:8688"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data/config:/app/config
+      - ./data/records:/app/records
+      - ./data/experience:/app/experience
+      - ./data/trade_records:/app/trade_records
+      - ./data/logs:/app/logs
+    restart: unless-stopped
