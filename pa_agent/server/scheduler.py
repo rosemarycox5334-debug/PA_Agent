@@ -1,17 +1,17 @@
-"""多品种轮巡调度器（服务端版）.
+"""多品种轮巡调度器（服务端并发版）.
 
-对应 GUI 侧 `gui/watch_rotation.py` 的状态机，但不驱动窗口控件，
-直接调用 :func:`pa_agent.server.service.run_symbol_analysis`：
+每轮把全部品种投入 ``ThreadPoolExecutor``（并发数 =
+``general.watch_concurrency``），每个任务从数据源池借独立实例执行
+:func:`pa_agent.server.service.run_symbol_analysis`，轮内全部完成后统一等待
+``watch_round_interval_min`` 分钟再开始下一轮。
 
-    逐品种：切换 → 等数据 → 两阶段分析 → （命中时）推送 → 下一个
-    一轮完成后等待 ``watch_round_interval_min`` 分钟再开始下一轮。
-
-任一品种失败只记事件日志并跳过，不会中断轮巡。
+任一品种失败只记事件日志并跳过；stop() 会取消全部进行中分析并跳过未开始的。
 """
 from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
 from pa_agent.server.service import run_symbol_analysis  # noqa: F401  (供测试 patch)
@@ -33,15 +33,16 @@ def parse_watch_symbols(raw: str) -> list[str]:
 
 
 class WatchScheduler:
-    """单后台线程轮巡状态机；start/stop 线程安全."""
+    """并发轮巡状态机；start/stop 线程安全."""
 
-    def __init__(self, ctx: Any, state: ServerState) -> None:
+    def __init__(self, ctx: Any, state: ServerState, ds_pool: Any) -> None:
         self._ctx = ctx
         self._state = state
+        self._ds_pool = ds_pool
         self._lock = threading.Lock()
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
-        self._cancel_token: CancelToken | None = None
+        self._tokens: dict[str, CancelToken] = {}
 
     @property
     def running(self) -> bool:
@@ -67,27 +68,36 @@ class WatchScheduler:
                 max(0, int(getattr(settings.general, "watch_round_interval_min", 10)))
                 * 60.0
             )
+            concurrency = max(
+                1,
+                min(
+                    int(getattr(settings.general, "watch_concurrency", 2) or 2),
+                    len(symbols),
+                    8,
+                ),
+            )
             self._stop_evt.clear()
+            self._tokens.clear()
             self._thread = threading.Thread(
                 target=self._loop,
-                args=(symbols, timeframe, interval_s),
+                args=(symbols, timeframe, interval_s, concurrency),
                 name="watch-scheduler",
                 daemon=True,
             )
             self._state.set_scheduler(True)
             self._state.add_event(
-                f"轮巡启动：{'、'.join(symbols)}（周期 {timeframe}，"
+                f"轮巡启动：{'、'.join(symbols)}（周期 {timeframe}，并发 {concurrency}，"
                 f"轮间隔 {interval_s / 60:.0f} 分钟）"
             )
             self._thread.start()
             return None
 
     def stop(self, timeout: float = 35.0) -> None:
-        """请求停止并等待线程退出（打断数据等待/轮间隔等待/当前分析）."""
+        """请求停止：取消全部进行中分析、跳过未开始的、打断轮间隔等待."""
         self._stop_evt.set()
         with self._lock:
-            token = self._cancel_token
-        if token is not None:
+            tokens = list(self._tokens.values())
+        for token in tokens:
             token.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
@@ -95,50 +105,71 @@ class WatchScheduler:
 
     # ── 主循环 ───────────────────────────────────────────────────────────────
 
-    def _loop(self, symbols: list[str], timeframe: str, interval_s: float) -> None:
+    def _run_one(self, symbol: str, timeframe: str, round_num: int, total: int) -> None:
+        """线程池任务：借数据源 → 分析 → 归还（异常已在 service 内消化）."""
+        # 换 token 与 stop() 读 token 用同一把锁：要么 stop 看到 token 能取消，
+        # 要么本任务看到 stop 位不再启动
+        with self._lock:
+            if self._stop_evt.is_set():
+                return
+            token = CancelToken()
+            self._tokens[symbol] = token
+        ds = None
+        try:
+            ds = self._ds_pool.acquire(timeout=30)
+            run_symbol_analysis(
+                self._ctx,
+                self._state,
+                symbol,
+                timeframe,
+                cancel_token=token,
+                data_source=ds,
+                round_num=round_num,
+                total=total,
+            )
+        except Exception as exc:  # noqa: BLE001 — 兜底（如池借用超时）
+            self._state.add_event(f"{symbol} 分析异常跳过：{exc}")
+            self._state.clear_symbol(symbol)
+        finally:
+            if ds is not None:
+                self._ds_pool.release(ds)
+            with self._lock:
+                self._tokens.pop(symbol, None)
+
+    def _loop(
+        self, symbols: list[str], timeframe: str, interval_s: float, concurrency: int
+    ) -> None:
         round_num = 1
         try:
-            while not self._stop_evt.is_set():
-                for idx, sym in enumerate(symbols):
-                    # 换 token 与 stop() 读 token 用同一把锁：要么 stop 看到新
-                    # token 能取消本次分析，要么本迭代看到 stop 位不再启动
-                    with self._lock:
-                        if self._stop_evt.is_set():
-                            break
-                        self._cancel_token = token = CancelToken()
-                    self._state.set_current(
-                        sym, "switching", round_num, idx, len(symbols)
-                    )
-                    try:
-                        run_symbol_analysis(
-                            self._ctx,
-                            self._state,
-                            sym,
-                            timeframe,
-                            cancel_token=token,
-                            round_num=round_num,
-                            idx=idx,
-                            total=len(symbols),
+            with ThreadPoolExecutor(
+                max_workers=concurrency, thread_name_prefix="watch-worker"
+            ) as pool:
+                while not self._stop_evt.is_set():
+                    self._state.set_round_wait(None)
+                    futures = [
+                        pool.submit(
+                            self._run_one, sym, timeframe, round_num, len(symbols)
                         )
-                    except Exception as exc:  # noqa: BLE001 — 兜底：service 已消化常规错误
-                        self._state.add_event(f"{sym} 分析异常跳过：{exc}")
-                if self._stop_evt.is_set():
-                    break
-                if interval_s > 0:
-                    self._state.clear_current()
-                    self._state.set_round_wait(time.time() + interval_s)
-                    self._state.add_event(
-                        f"第 {round_num} 轮完成，等待 {interval_s / 60:.0f} 分钟"
-                    )
-                    if self._stop_evt.wait(interval_s):
+                        for sym in symbols
+                    ]
+                    wait(futures)  # 轮 barrier：全部完成才进入下一步
+                    if self._stop_evt.is_set():
                         break
-                round_num += 1
+                    if interval_s > 0:
+                        self._state.set_round_wait(time.time() + interval_s)
+                        self._state.add_event(
+                            f"第 {round_num} 轮完成，等待 {interval_s / 60:.0f} 分钟"
+                        )
+                        if self._stop_evt.wait(interval_s):
+                            break
+                    round_num += 1
         except Exception as exc:  # noqa: BLE001 — 线程崩溃兜底
             self._ctx.logger.error("轮巡线程异常退出: %s", exc, exc_info=True)
             self._state.set_scheduler(False, error=str(exc))
-            self._state.clear_current()
+            self._state.clear_all_current()
             self._state.add_event(f"轮巡异常终止：{exc}")
             return
         self._state.set_scheduler(False)
-        self._state.clear_current()
+        self._state.clear_all_current()
+        self._state.set_round_wait(None)
         self._state.add_event("轮巡已停止")
