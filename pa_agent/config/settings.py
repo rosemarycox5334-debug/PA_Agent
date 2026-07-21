@@ -62,12 +62,12 @@ class GeneralSettings(BaseModel):
     analysis_bar_count: int = Field(default=100, ge=2, le=5000)
     refresh_interval_ms: int = 1000
     context_warning_threshold_pct: float = 80.0
-    last_data_source: DataSourceKind = "mt5"
+    last_data_source: DataSourceKind = "tradingview"
     #: A-share K-line adjust for East Money / Baostock (qfq=前复权)
     kline_adjust: Literal["qfq", "hfq", "none"] = "qfq"
     #: TradingView 交易所；空字符串 =（自动）依次探测预设列表
     last_tradingview_exchange: str = ""
-    last_symbol: str = "XAUUSDm"
+    last_symbol: str = "XAUUSD"
     last_timeframe: str = "15m"
     decision_flow_auto_play: bool = True
     decision_flow_play_seconds: int = 50
@@ -94,6 +94,16 @@ class GeneralSettings(BaseModel):
     enable_next_bar_prediction: bool = False
     #: 同一结构位 entry 相差≤3跳时，禁止反向新方案的冷却 K 线根数（已收盘）
     structure_flip_cooldown_bars: int = Field(default=3, ge=1, le=50)
+    #: 多品种轮巡监控：逗号分隔的品种列表（空 = 未配置）
+    watch_symbols: str = ""
+    #: 多品种轮巡监控：一轮全部品种分析完后，等待多少分钟再开始下一轮
+    watch_round_interval_min: int = Field(default=10, ge=0, le=1440)
+    #: 多品种轮巡监控：同时分析的品种数（服务端并发池大小）
+    watch_concurrency: int = Field(default=2, ge=1, le=8)
+    #: 仅交易时段轮巡（周一至周五 + 下方时段；休市时挂起，节省 token）
+    watch_trading_hours_only: bool = False
+    #: 交易时段串（HH:MM-HH:MM 逗号分隔，北京时间；默认 A股+港股并集）
+    watch_trading_hours: str = "09:30-12:00, 13:00-16:00"
 
     @field_validator("last_data_source", mode="before")
     @classmethod
@@ -269,7 +279,11 @@ def load_settings(path: Path | None = None) -> "Settings":
 
 
 def save_settings(settings: "Settings", path: Path | None = None) -> None:
-    """Persist settings to *path* (default: SETTINGS_JSON_PATH)."""
+    """Persist settings to *path* (default: SETTINGS_JSON_PATH).
+
+    Atomic: writes to a temp file then os.replace, so concurrent writers
+    can never leave a torn/corrupt JSON on disk.
+    """
     from pa_agent.config.paths import SETTINGS_JSON_PATH
 
     path = path or SETTINGS_JSON_PATH
@@ -277,4 +291,8 @@ def save_settings(settings: "Settings", path: Path | None = None) -> None:
 
     data = settings.model_dump()
 
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    os.replace(tmp_path, path)

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PA Agent 控制台</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./vendor/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">PA</span>
+      <h1>PA Agent 控制台</h1>
+    </div>
+    <div class="sched-ctl">
+      <span class="badge" :class="running ? 'badge-on' : 'badge-off'">
+        {{ running ? '轮巡运行中 · 并发 ' + activeCount : '轮巡未运行' }}
+      </span>
+      <button class="btn" :class="running ? 'btn-danger' : 'btn-primary'"
+              @click="toggleWatch" :disabled="busy.watch">
+        {{ running ? '停止轮巡' : '启动轮巡' }}
+      </button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button v-for="t in tabs" :key="t.key" class="tab"
+            :class="{active: tab === t.key}" @click="switchTab(t.key)">
+      {{ t.label }}
+    </button>
+  </nav>
+
+  <!-- ══ 监控页 ══ -->
+  <main v-show="tab === 'monitor'" class="page">
+    <div v-if="status.scheduler.error" class="alert alert-error">
+      调度器异常：{{ status.scheduler.error }}
+    </div>
+
+    <section class="card" v-if="activeCount">
+      <h2>当前分析（{{ activeCount }} 个进行中，点击卡片看详情）</h2>
+      <div class="grid">
+        <div v-for="(cur, sym) in status.current" :key="sym"
+             class="symbol-card running-card" @click="openDetail(sym)">
+          <div class="sym-head">
+            <span class="sym-name">{{ sym }}</span>
+            <span class="sym-time">第 {{ cur.round }} 轮</span>
+          </div>
+          <div class="sym-body">
+            <span class="cur-phase">{{ phaseLabel(cur.phase) }}</span>
+            <span class="sym-time">{{ relTime(cur.started_ts) }}开始</span>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="card" v-else-if="status.market_closed_until">
+      <h2>休市中</h2>
+      <div class="countdown">{{ marketClosedText }}</div>
+    </section>
+    <section class="card" v-else-if="countdown !== null">
+      <h2>等待下一轮</h2>
+      <div class="countdown">{{ countdownText }}</div>
+    </section>
+    <section class="card muted-card" v-else>
+      <h2>当前分析</h2>
+      <p class="muted">{{ running ? '准备中…' : '轮巡未运行。在「配置」页设置监控品种后点右上角「启动轮巡」。' }}</p>
+    </section>
+
+    <section class="card">
+      <h2>品种结果（点击卡片看详情）</h2>
+      <p class="muted" v-if="!Object.keys(status.results).length">暂无分析结果</p>
+      <div class="grid">
+        <div v-for="(r, sym) in status.results" :key="sym"
+             class="symbol-card clickable"
+             :class="{'has-order': r.has_order, 'has-error': r.error}"
+             @click="openDetail(sym)">
+          <div class="sym-head">
+            <span class="sym-name">{{ sym }}</span>
+            <span class="sym-time">{{ relTime(r.ts) }}</span>
+          </div>
+          <template v-if="r.ok">
+            <div class="sym-body">
+              <span class="direction" :class="dirClass(r.direction)">{{ r.direction || '—' }}</span>
+              <span>{{ r.order_type || '—' }}</span>
+              <span v-if="r.confidence !== null">信心 {{ r.confidence }}</span>
+            </div>
+            <div v-if="r.has_order" class="order-flag">⚡ 下单机会</div>
+          </template>
+          <div v-else class="sym-error">{{ r.error || '分析失败' }}</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>事件日志</h2>
+      <p class="muted" v-if="!status.events.length">暂无事件</p>
+      <ul class="events">
+        <li v-for="(e, i) in eventsDesc" :key="i">
+          <span class="ev-time">{{ fmtTime(e.ts) }}</span>
+          <span class="ev-text">{{ e.text }}</span>
+        </li>
+      </ul>
+    </section>
+  </main>
+
+  <!-- ══ 详情页 ══ -->
+  <main v-show="tab === 'detail'" class="page">
+    <div class="detail-head">
+      <button class="btn btn-ghost" @click="closeDetail">← 返回</button>
+      <h2>{{ detailSymbol }}
+        <span class="muted" v-if="detailRecord"> {{ detailRecord.meta.timeframe }}</span>
+      </h2>
+      <span class="muted" v-if="detailRecord">最近分析 {{ detailRecord.meta.timestamp_local_iso }}</span>
+    </div>
+
+    <section class="card">
+      <h2>K 线与决策价位</h2>
+      <div ref="chartEl" class="chart-box" v-show="detailRecord"></div>
+      <p class="muted" v-if="!detailRecord">等待首次分析完成…（分析结束后自动出现 K 线图）</p>
+    </section>
+
+    <section class="card" v-if="live">
+      <h2>实时推理
+        <span v-if="live.running" class="live-dot" title="分析进行中"></span>
+        <span v-else class="muted" style="font-size:12px">（最近一次）</span>
+      </h2>
+      <details :open="live.stage === 'stage1'">
+        <summary>阶段一 · 思考</summary>
+        <pre class="live-pre" data-live="s1r">{{ live.stage1_reasoning || '（无）' }}</pre>
+      </details>
+      <details :open="live.stage === 'stage1'">
+        <summary>阶段一 · 输出</summary>
+        <pre class="live-pre" data-live="s1c">{{ live.stage1_content || '（无）' }}</pre>
+      </details>
+      <details :open="live.stage === 'stage2'">
+        <summary>阶段二 · 思考</summary>
+        <pre class="live-pre" data-live="s2r">{{ live.stage2_reasoning || '（无）' }}</pre>
+      </details>
+      <details :open="live.stage === 'stage2'">
+        <summary>阶段二 · 输出</summary>
+        <pre class="live-pre" data-live="s2c">{{ live.stage2_content || '（无）' }}</pre>
+      </details>
+    </section>
+
+    <section class="card" v-if="detailDecision2">
+      <h2>最近一次决策</h2>
+      <table class="kv-table">
+        <tr v-for="row in decisionRows2" :key="row[0]">
+          <th>{{ row[0] }}</th><td>{{ row[1] }}</td>
+        </tr>
+      </table>
+      <div v-if="detailDecision2.reasoning" class="reasoning">
+        <p>{{ detailDecision2.reasoning }}</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- ══ 配置页 ══ -->
+  <main v-show="tab === 'config'" class="page">
+    <form v-if="cfg" @submit.prevent="saveConfig">
+      <section class="card">
+        <h2>AI 模型</h2>
+        <div class="form-grid">
+          <label>接口地址 base_url
+            <input v-model="cfg.provider.base_url" placeholder="https://api.deepseek.com">
+          </label>
+          <label>模型 model
+            <input v-model="cfg.provider.model" placeholder="deepseek-chat">
+          </label>
+          <label>API Key
+            <input v-model="cfg.provider.api_key" type="password"
+                   :placeholder="masked.api_key ? '已配置：' + masked.api_key + '（留空不修改）' : '未配置'">
+          </label>
+          <label>推理力度 reasoning_effort
+            <select v-model="cfg.provider.reasoning_effort">
+              <option value="low">low</option><option value="medium">medium</option>
+              <option value="high">high</option><option value="max">max</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" v-model="cfg.provider.thinking"> 思考模式 thinking</label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>飞书通知</h2>
+        <div class="form-grid">
+          <label class="check"><input type="checkbox" v-model="cfg.feishu.enabled"> 启用飞书推送</label>
+          <label class="check"><input type="checkbox" v-model="cfg.feishu.notify_on_order_only"> 仅下单机会时推送</label>
+          <label class="full">Webhook 地址
+            <input v-model="cfg.feishu.webhook_url" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…">
+          </label>
+          <label>签名密钥 secret
+            <input v-model="cfg.feishu.secret" type="password"
+                   :placeholder="masked.feishu_secret ? '已配置（留空不修改）' : '未配置（可选）'">
+          </label>
+          <label>App ID（图片上传，可选）
+            <input v-model="cfg.feishu.app_id" placeholder="cli_xxx">
+          </label>
+          <label>App Secret
+            <input v-model="cfg.feishu.app_secret" type="password"
+                   :placeholder="masked.app_secret ? '已配置（留空不修改）' : '未配置（可选）'">
+          </label>
+        </div>
+        <button type="button" class="btn btn-ghost" @click="testFeishu" :disabled="busy.feishu">
+          {{ busy.feishu ? '发送中…' : '发送测试消息' }}
+        </button>
+        <span v-if="feishuTestResult" class="test-result" :class="feishuTestResult.ok ? 'ok' : 'err'">
+          {{ feishuTestResult.ok ? '✅ 发送成功' : '❌ ' + feishuTestResult.detail }}
+        </span>
+      </section>
+
+      <section class="card">
+        <h2>监控设置</h2>
+        <div class="form-grid">
+          <label class="full">监控品种列表（逗号分隔，如 XAUUSD, BTCUSD, EURUSD）
+            <input v-model="cfg.general.watch_symbols" placeholder="XAUUSD, BTCUSD">
+          </label>
+          <label>K 线周期
+            <select v-model="cfg.general.last_timeframe">
+              <option v-for="tf in ['5m','15m','30m','1h','4h','1d']" :value="tf">{{ tf }}</option>
+            </select>
+          </label>
+          <label>轮巡间隔（分钟）
+            <input v-model.number="cfg.general.watch_round_interval_min" type="number" min="0" max="1440">
+          </label>
+          <label>同时分析品种数（1-8）
+            <input v-model.number="cfg.general.watch_concurrency" type="number" min="1" max="8">
+          </label>
+          <label>分析 K 线根数
+            <input v-model.number="cfg.general.analysis_bar_count" type="number" min="2" max="5000">
+          </label>
+          <label>推送置信度阈值（0-100，0=不限制）
+            <input v-model.number="cfg.general.decision_confidence_threshold" type="number" min="0" max="100">
+          </label>
+          <label class="check">
+            <input type="checkbox" v-model="cfg.general.watch_trading_hours_only">
+            仅交易时段轮巡（休市自动挂起，节省 token）
+          </label>
+          <label class="full" v-if="cfg.general.watch_trading_hours_only">
+            交易时段（HH:MM-HH:MM 逗号分隔，北京时间，周一至周五生效）
+            <input v-model="cfg.general.watch_trading_hours" placeholder="09:30-12:00, 13:00-16:00">
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>数据源</h2>
+        <div class="form-grid">
+          <label>数据源
+            <select v-model="cfg.general.last_data_source">
+              <option value="tradingview">TradingView</option>
+              <option value="eastmoney">东方财富（A股）</option>
+              <option value="eastmoney_futures">东方财富（期货）</option>
+              <option value="akshare">AkShare（A股）</option>
+              <option value="tushare">Tushare</option>
+            </select>
+          </label>
+          <label v-if="cfg.general.last_data_source === 'tradingview'">TradingView 交易所（留空自动探测）
+            <input v-model="cfg.general.last_tradingview_exchange" placeholder="如 OANDA / BINANCE">
+          </label>
+          <label v-if="cfg.general.last_data_source === 'tushare'">Tushare Token
+            <input v-model="cfg.tushare.token" type="password"
+                   :placeholder="masked.tushare_token ? '已配置（留空不修改）' : '未配置'">
+          </label>
+        </div>
+        <p class="muted">提示：服务器端不支持 MT5（仅 Windows 桌面版可用）。</p>
+      </section>
+
+      <div class="save-bar">
+        <button type="submit" class="btn btn-primary" :disabled="busy.save">
+          {{ busy.save ? '保存中…' : '保存配置' }}
+        </button>
+        <span v-if="saveMsg" class="save-msg" :class="saveMsg.ok ? 'ok' : 'err'">{{ saveMsg.text }}</span>
+      </div>
+    </form>
+    <p v-else class="muted">配置加载中…</p>
+  </main>
+
+  <!-- ══ 历史页 ══ -->
+  <main v-show="tab === 'history'" class="page">
+    <section class="card">
+      <div class="hist-toolbar">
+        <h2>分析历史</h2>
+        <input v-model="histFilter" placeholder="按品种筛选，如 XAUUSD"
+               @keyup.enter="loadRecords" class="hist-filter">
+        <button class="btn btn-ghost" @click="loadRecords">刷新</button>
+      </div>
+      <p class="muted" v-if="!records.length">暂无记录</p>
+      <table v-else class="hist-table">
+        <thead>
+          <tr><th>时间</th><th>品种</th><th>周期</th><th>方向</th><th>方式</th><th>信心</th><th>状态</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in records" :key="r.name" @click="openRecord(r.name)"
+              :class="{'row-order': r.has_order, 'row-error': !r.ok}">
+            <td>{{ fmtTs(r.ts_ms) }}</td>
+            <td>{{ r.symbol }}</td>
+            <td>{{ r.timeframe }}</td>
+            <td><span :class="dirClass(r.direction)">{{ r.direction || '—' }}</span></td>
+            <td>{{ r.order_type || '—' }}</td>
+            <td>{{ r.confidence ?? '—' }}</td>
+            <td>{{ r.ok ? (r.has_order ? '⚡ 下单机会' : '完成') : '失败' }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- 记录详情抽屉 -->
+  <div v-if="detail" class="drawer-mask" @click.self="closeDrawer">
+    <div class="drawer">
+      <div class="drawer-head">
+        <h2>{{ detail.meta?.symbol }} {{ detail.meta?.timeframe }} · {{ detail.meta?.timestamp_local_iso }}</h2>
+        <button class="btn btn-ghost" @click="closeDrawer">关闭</button>
+      </div>
+      <div class="drawer-body">
+        <div ref="drawerChartEl" class="chart-box"
+             v-show="detail.kline_data && detail.kline_data.length"></div>
+        <template v-if="detailDecision">
+          <h3>阶段二决策</h3>
+          <table class="kv-table">
+            <tr v-for="row in decisionRows" :key="row[0]">
+              <th>{{ row[0] }}</th><td>{{ row[1] }}</td>
+            </tr>
+          </table>
+          <div v-if="detailDecision.reasoning" class="reasoning">
+            <h3>决策理由</h3>
+            <p>{{ detailDecision.reasoning }}</p>
+          </div>
+        </template>
+        <div v-if="detail.exception" class="alert alert-error">
+          异常：{{ JSON.stringify(detail.exception) }}
+        </div>
+        <details>
+          <summary>阶段一诊断（JSON）</summary>
+          <pre>{{ pretty(detail.stage1_diagnosis) }}</pre>
+        </details>
+        <details>
+          <summary>阶段二完整输出（JSON）</summary>
+          <pre>{{ pretty(detail.stage2_decision) }}</pre>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="toast" class="toast" :class="toast.ok ? 'toast-ok' : 'toast-err'">{{ toast.text }}</div>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

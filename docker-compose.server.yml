@@ -1,0 +1,17 @@
+services:
+  pa-agent-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: pa-agent-server
+    ports:
+      - "8688:8688"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data/config:/app/config
+      - ./data/records:/app/records
+      - ./data/experience:/app/experience
+      - ./data/trade_records:/app/trade_records
+      - ./data/logs:/app/logs
+    restart: unless-stopped

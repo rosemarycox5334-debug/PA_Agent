@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+records/
+trade_records/
+logs/
+config/settings.json

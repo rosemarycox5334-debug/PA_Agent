@@ -30,7 +30,7 @@ def _ms_to_local_datetime(ms: int) -> datetime:
 def _build_basename(record: AnalysisRecord) -> str:
     """Build the filename stem (without extension) for a record."""
     dt = _ms_to_local_datetime(record.meta.timestamp_local_ms)
-    ts_str = dt.strftime("%Y-%m-%d_%H-%m-%S")
+    ts_str = dt.strftime("%Y-%m-%d_%H-%M-%S")
     symbol = record.meta.symbol
     timeframe = record.meta.timeframe
     return f"{ts_str}_{symbol}_{timeframe}"
