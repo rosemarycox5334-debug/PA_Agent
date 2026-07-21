@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PA Agent 控制台</title>
   <link rel="stylesheet" href="./style.css">
+  <script src="./vendor/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 <div id="app" v-cloak>
@@ -15,7 +16,7 @@
     </div>
     <div class="sched-ctl">
       <span class="badge" :class="running ? 'badge-on' : 'badge-off'">
-        {{ running ? '轮巡运行中' : '轮巡未运行' }}
+        {{ running ? '轮巡运行中 · 并发 ' + activeCount : '轮巡未运行' }}
       </span>
       <button class="btn" :class="running ? 'btn-danger' : 'btn-primary'"
               @click="toggleWatch" :disabled="busy.watch">
@@ -37,15 +38,20 @@
       调度器异常：{{ status.scheduler.error }}
     </div>
 
-    <section class="card" v-if="status.current">
-      <h2>当前分析</h2>
-      <div class="current-row">
-        <span class="cur-symbol">{{ status.current.symbol }}</span>
-        <span class="cur-phase">{{ phaseLabel(status.current.phase) }}</span>
-        <span class="cur-progress">
-          第 {{ status.current.round }} 轮 ·
-          {{ status.current.idx + 1 }}/{{ status.current.total }}
-        </span>
+    <section class="card" v-if="activeCount">
+      <h2>当前分析（{{ activeCount }} 个进行中，点击卡片看详情）</h2>
+      <div class="grid">
+        <div v-for="(cur, sym) in status.current" :key="sym"
+             class="symbol-card running-card" @click="openDetail(sym)">
+          <div class="sym-head">
+            <span class="sym-name">{{ sym }}</span>
+            <span class="sym-time">第 {{ cur.round }} 轮</span>
+          </div>
+          <div class="sym-body">
+            <span class="cur-phase">{{ phaseLabel(cur.phase) }}</span>
+            <span class="sym-time">{{ relTime(cur.started_ts) }}开始</span>
+          </div>
+        </div>
       </div>
     </section>
     <section class="card" v-else-if="countdown !== null">
@@ -58,11 +64,13 @@
     </section>
 
     <section class="card">
-      <h2>品种结果</h2>
+      <h2>品种结果（点击卡片看详情）</h2>
       <p class="muted" v-if="!Object.keys(status.results).length">暂无分析结果</p>
       <div class="grid">
         <div v-for="(r, sym) in status.results" :key="sym"
-             class="symbol-card" :class="{'has-order': r.has_order, 'has-error': r.error}">
+             class="symbol-card clickable"
+             :class="{'has-order': r.has_order, 'has-error': r.error}"
+             @click="openDetail(sym)">
           <div class="sym-head">
             <span class="sym-name">{{ sym }}</span>
             <span class="sym-time">{{ relTime(r.ts) }}</span>
@@ -89,6 +97,58 @@
           <span class="ev-text">{{ e.text }}</span>
         </li>
       </ul>
+    </section>
+  </main>
+
+  <!-- ══ 详情页 ══ -->
+  <main v-show="tab === 'detail'" class="page">
+    <div class="detail-head">
+      <button class="btn btn-ghost" @click="closeDetail">← 返回</button>
+      <h2>{{ detailSymbol }}
+        <span class="muted" v-if="detailRecord"> {{ detailRecord.meta.timeframe }}</span>
+      </h2>
+      <span class="muted" v-if="detailRecord">最近分析 {{ detailRecord.meta.timestamp_local_iso }}</span>
+    </div>
+
+    <section class="card">
+      <h2>K 线与决策价位</h2>
+      <div ref="chartEl" class="chart-box" v-show="detailRecord"></div>
+      <p class="muted" v-if="!detailRecord">等待首次分析完成…（分析结束后自动出现 K 线图）</p>
+    </section>
+
+    <section class="card" v-if="live">
+      <h2>实时推理
+        <span v-if="live.running" class="live-dot" title="分析进行中"></span>
+        <span v-else class="muted" style="font-size:12px">（最近一次）</span>
+      </h2>
+      <details :open="live.stage === 'stage1'">
+        <summary>阶段一 · 思考</summary>
+        <pre class="live-pre" data-live="s1r">{{ live.stage1_reasoning || '（无）' }}</pre>
+      </details>
+      <details :open="live.stage === 'stage1'">
+        <summary>阶段一 · 输出</summary>
+        <pre class="live-pre" data-live="s1c">{{ live.stage1_content || '（无）' }}</pre>
+      </details>
+      <details :open="live.stage === 'stage2'">
+        <summary>阶段二 · 思考</summary>
+        <pre class="live-pre" data-live="s2r">{{ live.stage2_reasoning || '（无）' }}</pre>
+      </details>
+      <details :open="live.stage === 'stage2'">
+        <summary>阶段二 · 输出</summary>
+        <pre class="live-pre" data-live="s2c">{{ live.stage2_content || '（无）' }}</pre>
+      </details>
+    </section>
+
+    <section class="card" v-if="detailDecision2">
+      <h2>最近一次决策</h2>
+      <table class="kv-table">
+        <tr v-for="row in decisionRows2" :key="row[0]">
+          <th>{{ row[0] }}</th><td>{{ row[1] }}</td>
+        </tr>
+      </table>
+      <div v-if="detailDecision2.reasoning" class="reasoning">
+        <p>{{ detailDecision2.reasoning }}</p>
+      </div>
     </section>
   </main>
 
@@ -236,13 +296,15 @@
   </main>
 
   <!-- 记录详情抽屉 -->
-  <div v-if="detail" class="drawer-mask" @click.self="detail = null">
+  <div v-if="detail" class="drawer-mask" @click.self="closeDrawer">
     <div class="drawer">
       <div class="drawer-head">
         <h2>{{ detail.meta?.symbol }} {{ detail.meta?.timeframe }} · {{ detail.meta?.timestamp_local_iso }}</h2>
-        <button class="btn btn-ghost" @click="detail = null">关闭</button>
+        <button class="btn btn-ghost" @click="closeDrawer">关闭</button>
       </div>
       <div class="drawer-body">
+        <div ref="drawerChartEl" class="chart-box"
+             v-show="detail.kline_data && detail.kline_data.length"></div>
         <template v-if="detailDecision">
           <h3>阶段二决策</h3>
           <table class="kv-table">

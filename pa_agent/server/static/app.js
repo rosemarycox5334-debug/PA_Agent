@@ -1,5 +1,6 @@
 /* PA Agent 控制台前端（Vue 3 无构建单页） */
-import { createApp } from "./vendor/vue.esm-browser.prod.js";
+import { createApp, nextTick } from "./vendor/vue.esm-browser.prod.js";
+import { renderKlineChart } from "./chart.js";
 
 const PHASE_LABELS = {
   switching: "切换品种",
@@ -19,6 +20,15 @@ const DECISION_FIELDS = [
   ["止盈 TP2", "take_profit_price_2"],
   ["信心", "trade_confidence"],
 ];
+
+function decisionOf(record) {
+  return (record && record.stage2_decision && record.stage2_decision.decision) || null;
+}
+
+function rowsOf(decision) {
+  if (!decision) return [];
+  return DECISION_FIELDS.map(([label, key]) => [label, decision[key] ?? "—"]);
+}
 
 async function api(path, opts = {}) {
   const resp = await fetch(path, {
@@ -49,24 +59,34 @@ createApp({
         { key: "history", label: "历史" },
       ],
       tab: "monitor",
-      status: { scheduler: { running: false, error: null }, current: null, round_wait_eta: null, results: {}, events: [] },
+      status: { scheduler: { running: false, error: null }, current: {}, round_wait_eta: null, results: {}, events: [] },
       countdown: null,
       cfg: null,
       masked: {},
       records: [],
       histFilter: "",
-      detail: null,
+      detail: null,          // 历史抽屉的完整记录
+      detailSymbol: "",      // 详情页品种
+      detailRecord: null,    // 详情页最新记录
+      live: null,            // 详情页实时推理
       feishuTestResult: null,
       saveMsg: null,
       toast: null,
       busy: { watch: false, save: false, feishu: false },
       _pollTimer: null,
       _tickTimer: null,
+      _liveTimer: null,
+      _liveSeq: -1,
+      _chart: null,          // 详情页图表句柄
+      _drawerChart: null,    // 抽屉图表句柄
     };
   },
   computed: {
     running() {
       return this.status.scheduler.running;
+    },
+    activeCount() {
+      return Object.keys(this.status.current || {}).length;
     },
     eventsDesc() {
       return [...this.status.events].reverse();
@@ -77,12 +97,16 @@ createApp({
       return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")} 后开始下一轮`;
     },
     detailDecision() {
-      return (this.detail && this.detail.stage2_decision && this.detail.stage2_decision.decision) || null;
+      return decisionOf(this.detail);
     },
     decisionRows() {
-      const d = this.detailDecision;
-      if (!d) return [];
-      return DECISION_FIELDS.map(([label, key]) => [label, d[key] ?? "—"]);
+      return rowsOf(this.detailDecision);
+    },
+    detailDecision2() {
+      return decisionOf(this.detailRecord);
+    },
+    decisionRows2() {
+      return rowsOf(this.detailDecision2);
     },
   },
   methods: {
@@ -116,11 +140,13 @@ createApp({
       setTimeout(() => (this.toast = null), 4000);
     },
     switchTab(key) {
+      if (this.tab === "detail" && key !== "detail") this.stopLivePoll();
       this.tab = key;
       if (key === "config" && !this.cfg) this.loadConfig();
       if (key === "history") this.loadRecords();
     },
 
+    /* ── 状态轮询 ── */
     async pollStatus() {
       try {
         this.status = await api("/api/status");
@@ -145,6 +171,103 @@ createApp({
       }
     },
 
+    /* ── 详情页 ── */
+    async openDetail(symbol) {
+      this.detailSymbol = symbol;
+      this.detailRecord = null;
+      this.live = null;
+      this._liveSeq = -1;
+      this.tab = "detail";
+      try {
+        const list = await api(
+          `/api/records?latest=1&symbol=${encodeURIComponent(symbol)}`
+        );
+        if (list.items.length) {
+          this.detailRecord = await api(
+            `/api/records/${encodeURIComponent(list.items[0].name)}`
+          );
+          await nextTick();
+          this.renderDetailChart();
+        }
+      } catch (e) {
+        this.showToast("记录加载失败：" + e.message, false);
+      }
+      this.startLivePoll();
+    },
+    closeDetail() {
+      this.stopLivePoll();
+      if (this._chart) {
+        this._chart.destroy();
+        this._chart = null;
+      }
+      this.tab = "monitor";
+    },
+    renderDetailChart() {
+      const el = this.$refs.chartEl;
+      if (!el || !this.detailRecord || !this.detailRecord.kline_data) return;
+      if (this._chart) this._chart.destroy();
+      this._chart = renderKlineChart(
+        el,
+        this.detailRecord.kline_data,
+        decisionOf(this.detailRecord)
+      );
+    },
+    startLivePoll() {
+      this.stopLivePoll();
+      const tick = async () => {
+        if (this.tab !== "detail" || document.hidden) return;
+        try {
+          const live = await api(
+            `/api/live/${encodeURIComponent(this.detailSymbol)}`
+          );
+          if (live.seq !== this._liveSeq) {
+            const wasRunning = this.live && this.live.running;
+            this._liveSeq = live.seq;
+            this.live = live;
+            await nextTick();
+            this.scrollLive();
+            // 分析刚结束：刷新记录与图表
+            if (wasRunning && !live.running) this.refreshDetailRecord();
+          } else if (this.live && this.live.running !== live.running) {
+            this.live = live;
+            if (!live.running) this.refreshDetailRecord();
+          }
+        } catch {
+          /* 404 = 尚无分析活动，忽略 */
+        }
+      };
+      tick();
+      this._liveTimer = setInterval(tick, 1000);
+    },
+    stopLivePoll() {
+      if (this._liveTimer) {
+        clearInterval(this._liveTimer);
+        this._liveTimer = null;
+      }
+    },
+    scrollLive() {
+      for (const pre of document.querySelectorAll(".live-pre")) {
+        pre.scrollTop = pre.scrollHeight;
+      }
+    },
+    async refreshDetailRecord() {
+      try {
+        const list = await api(
+          `/api/records?latest=1&symbol=${encodeURIComponent(this.detailSymbol)}`
+        );
+        if (list.items.length) {
+          this.detailRecord = await api(
+            `/api/records/${encodeURIComponent(list.items[0].name)}`
+          );
+          await nextTick();
+          this.renderDetailChart();
+        }
+      } catch {
+        /* 忽略刷新失败 */
+      }
+    },
+
+    /* ── 配置 ── */
     async loadConfig() {
       const data = await api("/api/settings");
       this.masked = {
@@ -192,6 +315,7 @@ createApp({
       }
     },
 
+    /* ── 历史 ── */
     async loadRecords() {
       try {
         const q = this.histFilter.trim() ? `?symbol=${encodeURIComponent(this.histFilter.trim())}` : "";
@@ -203,9 +327,26 @@ createApp({
     async openRecord(name) {
       try {
         this.detail = await api(`/api/records/${encodeURIComponent(name)}`);
+        await nextTick();
+        const el = this.$refs.drawerChartEl;
+        if (el && this.detail.kline_data && this.detail.kline_data.length) {
+          if (this._drawerChart) this._drawerChart.destroy();
+          this._drawerChart = renderKlineChart(
+            el,
+            this.detail.kline_data,
+            decisionOf(this.detail)
+          );
+        }
       } catch (e) {
         this.showToast("记录读取失败：" + e.message, false);
       }
+    },
+    closeDrawer() {
+      if (this._drawerChart) {
+        this._drawerChart.destroy();
+        this._drawerChart = null;
+      }
+      this.detail = null;
     },
   },
   mounted() {
@@ -220,5 +361,6 @@ createApp({
   beforeUnmount() {
     clearInterval(this._pollTimer);
     clearInterval(this._tickTimer);
+    this.stopLivePoll();
   },
 }).mount("#app");
