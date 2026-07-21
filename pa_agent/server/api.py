@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from fastapi import Body as FastAPIBody
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -80,13 +81,23 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _send_feishu_test(settings: Any) -> tuple[bool, str]:
-    """向飞书 webhook 发送一条测试文本消息."""
+def _send_feishu_test(
+    settings: Any,
+    *,
+    webhook_override: str | None = None,
+    secret_override: str | None = None,
+) -> tuple[bool, str]:
+    """向飞书 webhook 发送一条测试文本消息.
+
+    override 参数来自前端表单当前值（未保存也可测试）；为空时回落到已保存配置。
+    """
     import time as _time
 
-    webhook = (getattr(settings.feishu, "webhook_url", "") or "").strip()
+    webhook = (
+        webhook_override or getattr(settings.feishu, "webhook_url", "") or ""
+    ).strip()
     if not webhook:
-        return False, "未配置 webhook_url"
+        return False, "未填写 Webhook 地址"
     try:
         import requests
 
@@ -94,7 +105,9 @@ def _send_feishu_test(settings: Any) -> tuple[bool, str]:
             "msg_type": "text",
             "content": {"text": "✅ PA Agent 服务端测试消息：飞书通知配置正常。"},
         }
-        secret = (getattr(settings.feishu, "secret", "") or "").strip()
+        secret = (
+            secret_override or getattr(settings.feishu, "secret", "") or ""
+        ).strip()
         if secret:
             from pa_agent.notify.feishu_notifier import _gen_sign
 
@@ -267,8 +280,15 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
             return JSONResponse(content={"ok": True})
 
     @app.post("/api/feishu/test")
-    def api_feishu_test() -> dict[str, Any]:
-        ok, detail = _send_feishu_test(ctx.settings)
+    def api_feishu_test(
+        body: dict[str, Any] | None = FastAPIBody(default=None),
+    ) -> dict[str, Any]:
+        body = body or {}
+        ok, detail = _send_feishu_test(
+            ctx.settings,
+            webhook_override=str(body.get("webhook_url") or "").strip() or None,
+            secret_override=str(body.get("secret") or "").strip() or None,
+        )
         return {"ok": ok, "detail": detail}
 
     @app.get("/api/records")

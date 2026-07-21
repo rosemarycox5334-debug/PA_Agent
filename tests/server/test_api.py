@@ -165,6 +165,34 @@ def test_watch_start_without_symbols_400(client):
     assert r.status_code == 400 and "监控列表" in r.json()["error"]
 
 
+def test_feishu_test_uses_form_values(client, monkeypatch):
+    """测试按钮直接用表单传来的 webhook（未保存配置也能测通）."""
+    c, _, _ = client
+    captured = {}
+
+    class _FakeResp:
+        def json(self):
+            return {"code": 0, "msg": "success"}
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        return _FakeResp()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    r = c.post(
+        "/api/feishu/test",
+        json={"webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test-x"},
+    )
+    assert r.json()["ok"] is True
+    assert captured["url"].endswith("/hook/test-x")
+
+
+def test_feishu_test_without_webhook_reports_missing(client):
+    c, _, _ = client
+    r = c.post("/api/feishu/test")
+    assert r.json()["ok"] is False and "Webhook" in r.json()["detail"]
+
+
 def test_settings_put_garbage_section_ignored(client):
     """段位传标量（如 provider: 'haha'）不得整段覆盖或 500."""
     c, _, sp = client

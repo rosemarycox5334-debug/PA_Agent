@@ -177,7 +177,14 @@ createApp({
       this.busy.feishu = true;
       this.feishuTestResult = null;
       try {
-        this.feishuTestResult = await api("/api/feishu/test", { method: "POST" });
+        // 直接用表单当前值测试（不必先保存）；secret 留空时后端回落已保存值
+        this.feishuTestResult = await api("/api/feishu/test", {
+          method: "POST",
+          body: JSON.stringify({
+            webhook_url: this.cfg.feishu.webhook_url,
+            secret: this.cfg.feishu.secret,
+          }),
+        });
       } catch (e) {
         this.feishuTestResult = { ok: false, detail: e.message };
       } finally {
