@@ -9,6 +9,12 @@ services:
       - "8688:8688"
     environment:
       - TZ=Asia/Shanghai
+      # ── TradingView 连接超时时启用代理（改成你的代理地址后去掉 # ）──
+      # 地址写代理所在机器的局域网 IP（容器里 127.0.0.1 指容器自身，不要用）；
+      # 用 http:// 形式端口（如 Clash 的 7890 混合端口），不要写 socks5://
+      # - HTTPS_PROXY=http://192.168.1.100:7890
+      # - HTTP_PROXY=http://192.168.1.100:7890
+      # - NO_PROXY=localhost,127.0.0.1,api.deepseek.com,.eastmoney.com,.feishu.cn,open.feishu.cn
     volumes:
       - ./data/config:/app/config
       - ./data/records:/app/records
