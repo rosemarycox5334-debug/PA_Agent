@@ -32,6 +32,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+]
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",
