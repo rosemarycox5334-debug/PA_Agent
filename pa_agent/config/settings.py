@@ -62,12 +62,12 @@ class GeneralSettings(BaseModel):
     analysis_bar_count: int = Field(default=100, ge=2, le=5000)
     refresh_interval_ms: int = 1000
     context_warning_threshold_pct: float = 80.0
-    last_data_source: DataSourceKind = "mt5"
+    last_data_source: DataSourceKind = "tradingview"
     #: A-share K-line adjust for East Money / Baostock (qfq=前复权)
     kline_adjust: Literal["qfq", "hfq", "none"] = "qfq"
     #: TradingView 交易所；空字符串 =（自动）依次探测预设列表
     last_tradingview_exchange: str = ""
-    last_symbol: str = "XAUUSDm"
+    last_symbol: str = "XAUUSD"
     last_timeframe: str = "15m"
     decision_flow_auto_play: bool = True
     decision_flow_play_seconds: int = 50
@@ -94,6 +94,10 @@ class GeneralSettings(BaseModel):
     enable_next_bar_prediction: bool = False
     #: 同一结构位 entry 相差≤3跳时，禁止反向新方案的冷却 K 线根数（已收盘）
     structure_flip_cooldown_bars: int = Field(default=3, ge=1, le=50)
+    #: 多品种轮巡监控：逗号分隔的品种列表（空 = 未配置）
+    watch_symbols: str = ""
+    #: 多品种轮巡监控：一轮全部品种分析完后，等待多少分钟再开始下一轮
+    watch_round_interval_min: int = Field(default=10, ge=0, le=1440)
 
     @field_validator("last_data_source", mode="before")
     @classmethod
