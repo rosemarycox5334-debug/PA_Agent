@@ -140,6 +140,53 @@ def test_confidence_threshold_blocks_notify(monkeypatch):
     assert summary["ok"] and not summary["has_order"] and "x" not in called
 
 
+def test_cancel_interrupts_data_wait(monkeypatch):
+    """stop 期间的数据等待必须立即被 cancel_token 打断，而非等满 120s."""
+    import threading
+    import time
+
+    from pa_agent.server import service
+    from pa_agent.server.state import ServerState
+    from pa_agent.util.threading import CancelToken
+
+    ctx = _fake_ctx([])  # 永远无数据
+    monkeypatch.setattr(service, "DATA_READY_TIMEOUT_S", 60)
+    token = CancelToken()
+    result = {}
+
+    def _run():
+        result["summary"] = service.run_symbol_analysis(
+            ctx, ServerState(), "XAUUSD", "15m", cancel_token=token
+        )
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    time.sleep(0.3)
+    token.set()
+    t.join(5)
+    assert not t.is_alive()
+    assert result["summary"]["ok"] is False and "停止" in result["summary"]["error"]
+
+
+def test_record_exception_marks_failure(monkeypatch):
+    """record.exception 非空（如阶段一失败提前返回）必须记为失败而非成功."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from pa_agent.server import service
+    from pa_agent.server.state import ServerState
+
+    ctx = _fake_ctx(_mk_bars(60))
+    record = SimpleNamespace(
+        stage2_decision=None,
+        exception={"type": "network_error", "message": "连接超时"},
+    )
+    fake_orch = SimpleNamespace(submit=lambda *a, **k: record)
+    with patch("pa_agent.server.service.build_orchestrator", return_value=fake_orch):
+        summary = service.run_symbol_analysis(ctx, ServerState(), "XAUUSD", "15m")
+    assert summary["ok"] is False and "连接超时" in summary["error"]
+
+
 def test_orchestrator_exception_captured(monkeypatch):
     from pa_agent.server import service
     from pa_agent.server.state import ServerState

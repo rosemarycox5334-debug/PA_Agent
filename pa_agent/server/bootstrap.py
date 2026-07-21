@@ -148,6 +148,36 @@ def rebuild_client(ctx: ServerContext) -> None:
     ctx.client = create_ai_client(ctx.settings.provider, logger_=ctx.logger)
 
 
+def rebuild_engine(ctx: ServerContext) -> None:
+    """配置变更后重建全部依赖 settings 的引擎组件.
+
+    覆盖：LLM 客户端、prompt 装配器、校验器、记录写入器（api_key 脱敏）、
+    日志掩码、K 线复权设置。数据源另由 :func:`rebuild_data_source` 处理。
+    """
+    from pa_agent.ai.json_validator import JsonValidator
+    from pa_agent.ai.prompt_assembler import PromptAssembler
+    from pa_agent.config.paths import PROMPT_DIR, RECORDS_PENDING_DIR
+    from pa_agent.data.kline_adjust import apply_kline_adjust_from_settings
+    from pa_agent.records.pending_writer import PendingWriter
+    from pa_agent.util.logging import update_api_key
+
+    settings = ctx.settings
+    rebuild_client(ctx)
+    ctx.assembler = PromptAssembler(
+        prompt_dir=PROMPT_DIR,
+        experience_reader=ctx.exp_reader,
+        prompt_settings=settings.prompt,
+    )
+    ctx.validator = JsonValidator(settings)
+    ctx.pending_writer = PendingWriter(
+        pending_dir=RECORDS_PENDING_DIR,
+        event_bus=None,
+        api_key=settings.provider.api_key,
+    )
+    update_api_key(settings.provider.api_key)
+    apply_kline_adjust_from_settings(settings)
+
+
 def rebuild_data_source(ctx: ServerContext) -> None:
     """按 ctx.settings 重建数据源；不主动 connect（由使用方连接）."""
     try:

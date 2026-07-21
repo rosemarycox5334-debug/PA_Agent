@@ -165,6 +165,50 @@ def test_watch_start_without_symbols_400(client):
     assert r.status_code == 400 and "监控列表" in r.json()["error"]
 
 
+def test_settings_put_garbage_section_ignored(client):
+    """段位传标量（如 provider: 'haha'）不得整段覆盖或 500."""
+    c, _, sp = client
+    resp = c.put("/api/settings", json={"provider": "haha", "feishu": 123})
+    assert resp.status_code == 200
+    saved = json.loads(Path(sp).read_text(encoding="utf-8"))
+    assert saved["provider"]["api_key"] == "sk-1234567890abcdef"
+
+
+def test_watch_start_blocked_by_manual_analysis(client, monkeypatch):
+    """手动分析进行中不得启动轮巡（互斥双向生效）."""
+    import time
+
+    from pa_agent.server import api as api_mod
+
+    c, _, _ = client
+    monkeypatch.setattr(
+        api_mod, "run_symbol_analysis", lambda *a, **k: time.sleep(1.0) or {"ok": True}
+    )
+    assert c.post("/api/analyze", json={"symbol": "XAUUSD"}).status_code == 200
+    r = c.post("/api/watch/start")
+    assert r.status_code == 409 and "手动分析" in r.json()["error"]
+
+
+def test_settings_ds_change_rejected_while_watch_running(client, monkeypatch):
+    """轮巡运行中切换数据源必须被 409 拒绝（数据源被分析线程持有）."""
+    import time
+
+    from pa_agent.server import scheduler as sched_mod
+
+    c, _, _ = client
+    monkeypatch.setattr(
+        sched_mod,
+        "run_symbol_analysis",
+        lambda *a, **k: time.sleep(0.5) or {"ok": True},
+    )
+    c.post("/api/watch/start")
+    data = c.get("/api/settings").json()
+    data["general"]["last_data_source"] = "akshare"
+    r = c.put("/api/settings", json=data)
+    assert r.status_code == 409
+    c.post("/api/watch/stop")
+
+
 def test_analyze_conflicts_with_running_watch(client, monkeypatch):
     c, _, _ = client
     import time

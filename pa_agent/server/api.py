@@ -15,8 +15,8 @@ from pa_agent.config.paths import RECORDS_PENDING_DIR  # noqa: F401  (供测试 
 from pa_agent.notify.order_opportunity import has_order_opportunity
 from pa_agent.server.bootstrap import (
     ServerContext,
-    rebuild_client,
     rebuild_data_source,
+    rebuild_engine,
 )
 from pa_agent.server.scheduler import WatchScheduler
 from pa_agent.server.service import run_symbol_analysis
@@ -73,6 +73,8 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(out.get(key), dict):
             out[key] = _deep_merge(out[key], value)
+        elif isinstance(out.get(key), dict):
+            continue  # 段位是 dict 而 patch 给了标量：拒绝整段覆盖
         else:
             out[key] = value
     return out
@@ -107,7 +109,9 @@ def _send_feishu_test(settings: Any) -> tuple[bool, str]:
         return False, f"发送失败：{exc}"
 
 
-def _record_summary(path: Path) -> dict[str, Any] | None:
+def _record_summary(
+    path: Path, confidence_threshold: int | None = None
+) -> dict[str, Any] | None:
     """从 pending 记录文件提取列表摘要；解析失败返回 None."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -125,8 +129,18 @@ def _record_summary(path: Path) -> dict[str, Any] | None:
         "direction": inner.get("order_direction"),
         "order_type": inner.get("order_type"),
         "confidence": inner.get("trade_confidence"),
-        "has_order": has_order_opportunity(inner),
+        "has_order": has_order_opportunity(
+            inner, confidence_threshold=confidence_threshold
+        ),
     }
+
+
+def _symbol_from_record_name(name: str) -> str:
+    """从文件名 {日期}_{时间}_{symbol}_{周期}.json 提取品种；无法解析返回空串."""
+    parts = name.rsplit(".", 1)[0].split("_")
+    if len(parts) >= 4:
+        return "_".join(parts[2:-1])
+    return ""
 
 
 def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> FastAPI:
@@ -141,7 +155,9 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
     app.state.ctx = ctx
     app.state.server_state = state
     app.state.scheduler = scheduler
-    manual_lock = threading.Lock()
+    # 手动分析持有此锁直到分析结束；轮巡启动也短暂持有 —— 二者互斥收敛于此
+    analysis_lock = threading.Lock()
+    settings_lock = threading.Lock()
 
     @app.get("/api/status")
     def api_status() -> dict[str, Any]:
@@ -149,7 +165,15 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
 
     @app.post("/api/watch/start")
     def api_watch_start() -> JSONResponse:
-        err = scheduler.start()
+        if not analysis_lock.acquire(blocking=False):
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "手动分析进行中，请等待其完成后再启动轮巡"},
+            )
+        try:
+            err = scheduler.start()
+        finally:
+            analysis_lock.release()
         if err:
             return JSONResponse(status_code=400, content={"ok": False, "error": err})
         return JSONResponse(content={"ok": True})
@@ -166,15 +190,17 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
             return JSONResponse(
                 status_code=400, content={"ok": False, "error": "symbol 不能为空"}
             )
-        if scheduler.running:
-            return JSONResponse(
-                status_code=409,
-                content={"ok": False, "error": "轮巡运行中，请先停止再手动分析"},
-            )
-        if not manual_lock.acquire(blocking=False):
+        if not analysis_lock.acquire(blocking=False):
             return JSONResponse(
                 status_code=409,
                 content={"ok": False, "error": "已有手动分析在进行中"},
+            )
+        # 持锁后再确认轮巡状态，封住「检查后启动前」被轮巡插入的窗口
+        if scheduler.running:
+            analysis_lock.release()
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "轮巡运行中，请先停止再手动分析"},
             )
         timeframe = (
             str(body.get("timeframe") or "").strip()
@@ -185,7 +211,7 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
             try:
                 run_symbol_analysis(ctx, state, symbol, timeframe)
             finally:
-                manual_lock.release()
+                analysis_lock.release()
 
         threading.Thread(target=_run, name=f"manual-{symbol}", daemon=True).start()
         return JSONResponse(content={"ok": True, "message": f"已开始分析 {symbol}"})
@@ -198,33 +224,47 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
     def api_settings_put(payload: dict[str, Any]) -> JSONResponse:
         from pydantic import ValidationError
 
-        old = ctx.settings
-        try:
-            new_settings = apply_settings_update(old, payload)
-        except ValidationError as exc:
-            return JSONResponse(
-                status_code=422,
-                content={"ok": False, "error": "配置校验失败", "detail": exc.errors()},
-            )
-        save_settings(new_settings, save_path)
-        ctx.settings = new_settings
-        try:
-            rebuild_client(ctx)
-        except Exception as exc:  # noqa: BLE001
-            ctx.logger.warning("LLM 客户端重建失败: %s", exc)
-        ds_changed = (
-            getattr(old.general, "last_data_source", "")
-            != getattr(new_settings.general, "last_data_source", "")
-            or getattr(old.general, "last_tradingview_exchange", "")
-            != getattr(new_settings.general, "last_tradingview_exchange", "")
-        )
-        if ds_changed:
+        with settings_lock:
+            old = ctx.settings
             try:
-                rebuild_data_source(ctx)
+                new_settings = apply_settings_update(old, payload)
+            except ValidationError as exc:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "ok": False,
+                        "error": "配置校验失败",
+                        "detail": exc.errors(include_input=False, include_url=False),
+                    },
+                )
+            ds_changed = (
+                getattr(old.general, "last_data_source", "")
+                != getattr(new_settings.general, "last_data_source", "")
+                or getattr(old.general, "last_tradingview_exchange", "")
+                != getattr(new_settings.general, "last_tradingview_exchange", "")
+            )
+            # 数据源被正在运行的分析线程持有引用，运行中热切换会把它踢下线
+            if ds_changed and (scheduler.running or analysis_lock.locked()):
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "ok": False,
+                        "error": "分析进行中无法切换数据源，请先停止轮巡（或等手动分析结束）再保存",
+                    },
+                )
+            save_settings(new_settings, save_path)
+            ctx.settings = new_settings
+            try:
+                rebuild_engine(ctx)
             except Exception as exc:  # noqa: BLE001
-                ctx.logger.warning("数据源重建失败: %s", exc)
-        state.add_event("配置已更新" + ("（数据源已切换）" if ds_changed else ""))
-        return JSONResponse(content={"ok": True})
+                ctx.logger.warning("引擎组件重建失败: %s", exc)
+            if ds_changed:
+                try:
+                    rebuild_data_source(ctx)
+                except Exception as exc:  # noqa: BLE001
+                    ctx.logger.warning("数据源重建失败: %s", exc)
+            state.add_event("配置已更新" + ("（数据源已切换）" if ds_changed else ""))
+            return JSONResponse(content={"ok": True})
 
     @app.post("/api/feishu/test")
     def api_feishu_test() -> dict[str, Any]:
@@ -234,15 +274,27 @@ def create_app(ctx: ServerContext, *, settings_path: Path | None = None) -> Fast
     @app.get("/api/records")
     def api_records(symbol: str = "", limit: int = 50, offset: int = 0) -> dict[str, Any]:
         pending_dir: Path = RECORDS_PENDING_DIR
-        paths = sorted(pending_dir.glob("*.json"), key=lambda p: p.name, reverse=True)
-        summaries = [s for p in paths if (s := _record_summary(p)) is not None]
+        # 只 stat 排序 + 按文件名过滤品种，仅对当前页的文件做 JSON 解析，
+        # 记录量增长后列表接口的开销保持 O(页大小)
+        paths = list(pending_dir.glob("*.json"))
         if symbol.strip():
             want = symbol.strip().upper()
-            summaries = [s for s in summaries if s["symbol"].upper() == want]
-        total = len(summaries)
+            paths = [
+                p for p in paths if _symbol_from_record_name(p.name).upper() == want
+            ]
+        paths.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+        total = len(paths)
         limit = max(1, min(int(limit), 200))
         offset = max(0, int(offset))
-        return {"total": total, "items": summaries[offset : offset + limit]}
+        threshold = int(
+            getattr(ctx.settings.general, "decision_confidence_threshold", 0) or 0
+        )
+        items = [
+            s
+            for p in paths[offset : offset + limit]
+            if (s := _record_summary(p, confidence_threshold=threshold)) is not None
+        ]
+        return {"total": total, "items": items}
 
     @app.get("/api/records/{name}")
     def api_record_detail(name: str, request: Request) -> dict[str, Any]:

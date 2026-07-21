@@ -85,7 +85,8 @@ class WatchScheduler:
     def stop(self, timeout: float = 35.0) -> None:
         """请求停止并等待线程退出（打断数据等待/轮间隔等待/当前分析）."""
         self._stop_evt.set()
-        token = self._cancel_token
+        with self._lock:
+            token = self._cancel_token
         if token is not None:
             token.set()
         thread = self._thread
@@ -99,19 +100,22 @@ class WatchScheduler:
         try:
             while not self._stop_evt.is_set():
                 for idx, sym in enumerate(symbols):
-                    if self._stop_evt.is_set():
-                        break
+                    # 换 token 与 stop() 读 token 用同一把锁：要么 stop 看到新
+                    # token 能取消本次分析，要么本迭代看到 stop 位不再启动
+                    with self._lock:
+                        if self._stop_evt.is_set():
+                            break
+                        self._cancel_token = token = CancelToken()
                     self._state.set_current(
                         sym, "switching", round_num, idx, len(symbols)
                     )
-                    self._cancel_token = CancelToken()
                     try:
                         run_symbol_analysis(
                             self._ctx,
                             self._state,
                             sym,
                             timeframe,
-                            cancel_token=self._cancel_token,
+                            cancel_token=token,
                             round_num=round_num,
                             idx=idx,
                             total=len(symbols),

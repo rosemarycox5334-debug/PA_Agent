@@ -3,8 +3,9 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 TZ=Asia/Shanghai
 WORKDIR /app
 
-# git: tvdatafeed 为 git 依赖；tzdata: 时区
-RUN apt-get update && apt-get install -y --no-install-recommends git tzdata \
+# git: tvdatafeed 为 git 依赖；tzdata: 时区；fonts-noto-cjk: 图表中文标签
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git tzdata fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./

@@ -71,14 +71,21 @@ def run_symbol_analysis(
 
         state.set_current(symbol, "waiting_data", round_num, idx, total)
         state.add_event(f"{symbol} 等待数据就绪")
-        frame = _wait_frame(ctx, symbol, timeframe, bar_count)
+        frame = _wait_frame(ctx, symbol, timeframe, bar_count, cancel_token)
 
         state.set_current(symbol, "stage1", round_num, idx, total)
         record = _submit_with_watchdog(
             ctx, state, frame, cancel_token, symbol, round_num, idx, total
         )
 
+        record_exc = getattr(record, "exception", None)
+        if record_exc:
+            detail = record_exc.get("message") or record_exc.get("type") or "未知原因"
+            raise RuntimeError(f"分析未完成（{record_exc.get('type', '异常')}）：{detail}")
+
         stage2_full = getattr(record, "stage2_decision", None) or {}
+        if not stage2_full:
+            raise RuntimeError("分析未产生阶段二决策结果")
         inner = stage2_full.get("decision") or {}
         threshold = int(
             getattr(settings.general, "decision_confidence_threshold", 0) or 0
@@ -112,8 +119,14 @@ def run_symbol_analysis(
     return summary
 
 
-def _wait_frame(ctx: Any, symbol: str, timeframe: str, bar_count: int) -> Any:
-    """订阅并轮询数据源，直到能构建完整分析快照或超时."""
+def _wait_frame(
+    ctx: Any,
+    symbol: str,
+    timeframe: str,
+    bar_count: int,
+    cancel_token: CancelToken,
+) -> Any:
+    """订阅并轮询数据源，直到能构建完整分析快照、被取消或超时."""
     from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS, build_display_frame
     from pa_agent.util.timefmt import now_local_ms
 
@@ -128,6 +141,8 @@ def _wait_frame(ctx: Any, symbol: str, timeframe: str, bar_count: int) -> Any:
     deadline = time.monotonic() + DATA_READY_TIMEOUT_S
     last_err: Exception | None = None
     while True:
+        if cancel_token.is_set():
+            raise RuntimeError("已请求停止，取消数据等待")
         try:
             bars = ds.latest_snapshot(need)
             frame = build_display_frame(
@@ -142,7 +157,8 @@ def _wait_frame(ctx: Any, symbol: str, timeframe: str, bar_count: int) -> Any:
             raise TimeoutError(
                 f"{symbol} 数据未就绪（{DATA_READY_TIMEOUT_S}s 超时）{detail}"
             )
-        time.sleep(_WAIT_POLL_S)
+        if cancel_token.wait(_WAIT_POLL_S):
+            raise RuntimeError("已请求停止，取消数据等待")
 
 
 def _submit_with_watchdog(
@@ -241,6 +257,9 @@ def _notify_order(
             reverse=True,
         )
         latest_img = candidates[0] if candidates else None
+        # 时效护栏：图不是刚生成的（如 save_trade_record 失败）就不附旧图
+        if latest_img is not None and time.time() - latest_img.stat().st_mtime > 600:
+            latest_img = None
 
         send_feishu_order(
             decision_inner=inner,
