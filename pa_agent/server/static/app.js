@@ -319,8 +319,11 @@ createApp({
       this.busy.save = true;
       this.saveMsg = null;
       try {
-        await api("/api/settings", { method: "PUT", body: JSON.stringify(this.cfg) });
-        this.saveMsg = { ok: true, text: "✅ 已保存（轮巡运行中则下一品种生效）" };
+        const resp = await api("/api/settings", { method: "PUT", body: JSON.stringify(this.cfg) });
+        this.saveMsg = {
+          ok: true,
+          text: resp && resp.hint ? `✅ 已保存（${resp.hint}）` : "✅ 已保存",
+        };
         await this.loadConfig();
       } catch (e) {
         this.saveMsg = { ok: false, text: "保存失败：" + e.message };
