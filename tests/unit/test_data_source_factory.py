@@ -9,6 +9,7 @@ from pa_agent.data.factory import (
     default_tradingview_exchange,
     normalize_data_source_kind,
 )
+from pa_agent.data.akshare_source import AkShareSource
 from pa_agent.data.eastmoney_source import EastMoneySource
 from pa_agent.data.mt5 import MT5Source
 from pa_agent.data.tushare_source import TushareSource
@@ -27,10 +28,10 @@ def test_normalize_data_source_kind_hidden_sources():
     assert normalize_data_source_kind("yfinance") == "yfinance"
 
 
-def test_eastmoney_not_in_ui_choices():
+def test_ashare_sources_in_ui_choices():
     ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
-    assert "eastmoney" not in ui_kinds
-    assert "akshare" not in ui_kinds
+    assert "akshare" in ui_kinds
+    assert "eastmoney" in ui_kinds
 
 
 def test_tushare_not_in_ui_choices():
@@ -41,6 +42,7 @@ def test_tushare_not_in_ui_choices():
 def test_create_data_source_returns_expected_types():
     assert isinstance(create_data_source("mt5"), MT5Source)
     assert isinstance(create_data_source("tradingview"), TradingViewSource)
+    assert isinstance(create_data_source("akshare"), AkShareSource)
     assert isinstance(create_data_source("eastmoney"), EastMoneySource)
     assert isinstance(create_data_source("tushare"), TushareSource)
 
@@ -48,6 +50,7 @@ def test_create_data_source_returns_expected_types():
 def test_default_symbols_per_kind():
     assert default_symbol_for_kind("mt5") == "XAUUSDm"
     assert default_symbol_for_kind("tradingview") == "XAUUSD"
+    assert default_symbol_for_kind("akshare") == "000001"
     assert default_symbol_for_kind("eastmoney") == "000001"
     assert default_symbol_for_kind("tushare") == "000001"
 

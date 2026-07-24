@@ -1215,7 +1215,7 @@ class MainWindow(QMainWindow):
 
     def _populate_timeframe_combo_for_source(self) -> None:
         data_source = getattr(self._ctx, "data_source", None)
-        preferred = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
+        preferred = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"]
         supported: list[str] = []
         if data_source is not None:
             try:
@@ -1253,7 +1253,7 @@ class MainWindow(QMainWindow):
             self._switch_data_source(kind)
 
     def _on_data_source_combo_changed(self, index: int) -> None:
-        """Switch K-line data source (MT5 / TradingView)."""
+        """Switch the selected GUI-visible K-line data source."""
         if getattr(self, "_switching", False):
             return
         if getattr(self, "_demo_mode", False):
@@ -4135,13 +4135,14 @@ class MainWindow(QMainWindow):
     def _on_startup_api_key_check(self) -> None:
         self._refresh_api_key_ui_state()
         if not self._has_api_key_configured():
-            QMessageBox.information(
-                self,
-                "需要配置 API Key",
-                "尚未配置 API Key，将打开设置窗口。\n"
-                "请填写 API Key 并点击「保存」，才能使用「提交分析」与「增量分析」。",
+            # Do not open a nested modal dialog during the first show event.
+            # On some Windows desktop/session combinations this can prevent the
+            # initial top-level window from being presented.  The persistent
+            # in-window API-key warning and the AI model settings menu remain
+            # available for configuration.
+            self._status_bar.showMessage(
+                "未配置 API Key：请点击左上角「AI 模型设置」完成配置"
             )
-            self._open_settings_dialog(focus_api_key=True)
 
     def _has_api_key_configured(self) -> bool:
         from pa_agent.config.settings import provider_api_key_configured

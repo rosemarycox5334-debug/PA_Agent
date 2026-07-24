@@ -367,7 +367,7 @@ class EastMoneySource(DataSource):
 
         if daily:
             from pa_agent.data.ashare_common import apply_session_quote_to_forming_row
-            from pa_agent.data.eastmoney_client import fetch_stock_order_book, fetch_spot_price
+            from pa_agent.data.eastmoney_client import fetch_stock_order_book
 
             book = fetch_stock_order_book(self._symbol)
             if book is not None and book.price > 0:

@@ -70,6 +70,7 @@ MAC*.txt
 .vscode/
 .cursor/
 .kiro/
+.codegraph/
 
 # ── tools 目录下的本地诊断输出（保留 .py 脚本本身）──────────────────────────
 tools/_pending_order_report.txt
