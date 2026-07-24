@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import pytest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -36,6 +37,50 @@ def _make_frame(n: int = 5) -> KlineFrame:
         indicators=indicators,
         snapshot_ts_local_ms=1_700_000_000_000,
     )
+
+
+def _eastmoney_context() -> dict:
+    return {
+        "provider": "eastmoney",
+        "snapshot_ts_ms": 1_700_000_000_123,
+        "code": "600519",
+        "name": "贵州茅台",
+        "last_price": 1450.5,
+        "pct_chg": 1.25,
+        "volume_unit": "手",
+        "bids": [
+            {"level": 1, "price": 1450.4, "volume_lots": 120},
+            {"level": 2, "price": 1450.3, "volume_lots": 80},
+        ],
+        "asks": [
+            {"level": 1, "price": 1450.6, "volume_lots": 50},
+            {"level": 2, "price": 1450.7, "volume_lots": 30},
+        ],
+        "bid_total_lots": 200,
+        "ask_total_lots": 80,
+        "order_imbalance_pct": 42.86,
+        "depth_levels": 5,
+        "depth_source": "push2_free",
+        "recent_trades": [
+            {
+                "time": "14:59:57",
+                "price": 1450.4,
+                "volume_lots": 7,
+                "side": "卖",
+            },
+            {
+                "time": "14:59:58",
+                "price": 1450.5,
+                "volume_lots": 12,
+                "side": "买",
+            },
+        ],
+        "trade_count": 2,
+        "active_buy_lots": 12,
+        "active_sell_lots": 7,
+        "neutral_trade_lots": 0,
+        "active_net_lots": 5,
+    }
 
 
 @pytest.fixture()
@@ -72,8 +117,12 @@ def assembler(tmp_path: Path) -> PromptAssembler:
         "文件25-主要趋势反转MTR.txt",
         "文件27-三角形与收敛形态.txt",
         "文件28-双重顶底与微型结构.txt",
+        "东方财富盘口分析规则.txt",
     ]:
-        (tmp_path / fname).write_text(f"[CONTENT OF {fname}]", encoding="utf-8")
+        content = f"[CONTENT OF {fname}]"
+        if fname == "东方财富盘口分析规则.txt":
+            content += "\n盘口委托可随时撤单，只能作为辅助证据。"
+        (tmp_path / fname).write_text(content, encoding="utf-8")
     return PromptAssembler(prompt_dir=tmp_path)
 
 
@@ -113,6 +162,48 @@ def test_stage1_user_prompt_contains_required_fields(assembler: PromptAssembler)
     assert "程序结构辅助特征" in user
     assert "doji" in user
     assert "更高时间框架" not in user
+
+
+def test_eastmoney_order_book_is_sent_to_both_model_stages(
+    assembler: PromptAssembler,
+):
+    frame = replace(
+        _make_frame(),
+        symbol="600519",
+        market_context=_eastmoney_context(),
+    )
+
+    stage1_user = assembler.build_stage1(frame)[1]["content"]
+    stage2_user = assembler.build_stage2(
+        frame,
+        {"cycle_position": "normal_channel", "direction": "bullish"},
+        [],
+        [],
+    )[1]["content"]
+
+    for prompt in (stage1_user, stage2_user):
+        assert "东方财富实时盘口（分析提交时快照）" in prompt
+        assert "买盘合计：200手" in prompt
+        assert "卖盘合计：80手" in prompt
+        assert "1450.4" in prompt
+        assert "1450.6" in prompt
+        assert "最近成交明细（按时间升序）" in prompt
+        assert "14:59:58 | 1450.5 | 12 | 买" in prompt
+        assert "主买12手；主卖7手" in prompt
+        assert "盘口委托可随时撤单" in prompt
+        assert "[CONTENT OF 东方财富盘口分析规则.txt]" in prompt
+
+
+def test_non_eastmoney_frame_does_not_send_order_book(
+    assembler: PromptAssembler,
+):
+    with patch.object(assembler, "_load", wraps=assembler._load) as load:
+        user = assembler.build_stage1(_make_frame())[1]["content"]
+    assert "东方财富实时盘口" not in user
+    assert all(
+        call.args != ("东方财富盘口分析规则.txt",)
+        for call in load.call_args_list
+    )
 
 
 def test_stage2_user_prompt_includes_gate_trace(assembler: PromptAssembler):
@@ -393,7 +484,7 @@ def test_incremental_stage1_prompt_includes_previous_record_and_new_bars(
     """Incremental Stage 1 with full previous record uses 4-message continuation."""
     from pa_agent.records.schema import AnalysisRecord, RecordMeta
 
-    frame = _make_frame(5)
+    frame = replace(_make_frame(5), market_context=_eastmoney_context())
     # Build a full Stage 1 to get realistic messages/response for the previous record
     full_s1_messages = assembler.build_stage1(frame)
     prev_user = next(m["content"] for m in full_s1_messages if m["role"] == "user")
@@ -442,6 +533,7 @@ def test_incremental_stage1_prompt_includes_previous_record_and_new_bars(
     assert "新增已收盘K线:2" in incremental_user
     assert "上一轮已完成分析" in incremental_user
     assert "normal_channel" in incremental_user
+    assert "东方财富实时盘口（分析提交时快照）" in incremental_user
     # Anti-anchoring directives must be present
     assert "反锚定要求" in incremental_user
     assert "不要因为上一轮已得出结论就倾向于延续它" in incremental_user

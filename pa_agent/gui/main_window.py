@@ -610,6 +610,18 @@ class MainWindow(QMainWindow):
         self._fit_chart_btn.clicked.connect(self._on_fit_chart)
         ctrl_layout.addWidget(self._fit_chart_btn)
 
+        self._eastmoney_market_panel_toggle = QPushButton("隐藏盘口/成交")
+        self._eastmoney_market_panel_toggle.setCheckable(True)
+        self._eastmoney_market_panel_toggle.setChecked(True)
+        self._eastmoney_market_panel_toggle.setMinimumWidth(112)
+        self._eastmoney_market_panel_toggle.setToolTip(
+            "显示或隐藏东方财富盘口与成交明细；隐藏后 K 线图自动扩展"
+        )
+        self._eastmoney_market_panel_toggle.toggled.connect(
+            self._on_eastmoney_market_panel_toggled
+        )
+        ctrl_layout.addWidget(self._eastmoney_market_panel_toggle)
+
         self._decision_badge = QLabel("")
         self._decision_badge.setObjectName("mutedLabel")
         ctrl_layout.addWidget(self._decision_badge)
@@ -665,6 +677,7 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self._flow_bar)
 
         workbench = QSplitter(Qt.Orientation.Horizontal)
+        self._workbench_splitter = workbench
 
         self._chart_widget = ChartWidget()
         self._chart_widget.setSizePolicy(
@@ -673,11 +686,20 @@ class MainWindow(QMainWindow):
         self._apply_chart_display_settings()
         workbench.addWidget(self._chart_widget)
 
+        from pa_agent.gui.widgets.eastmoney_order_book import EastMoneyOrderBookPanel
+
+        self._eastmoney_order_book_panel = EastMoneyOrderBookPanel()
+        self._eastmoney_order_book_panel.setMinimumWidth(270)
+        self._eastmoney_order_book_panel.setMaximumWidth(340)
+        workbench.addWidget(self._eastmoney_order_book_panel)
+
         self._ai_sidebar.setMinimumWidth(400)
         workbench.addWidget(self._ai_sidebar)
 
         workbench.setStretchFactor(0, 3)
-        workbench.setStretchFactor(1, 2)
+        workbench.setStretchFactor(1, 0)
+        workbench.setStretchFactor(2, 2)
+        self._sync_eastmoney_order_book_visibility()
 
         # ── SummaryStrip: 5-metric card strip above workbench ─────────────────
         from pa_agent.gui.widgets.summary_strip import SummaryStrip
@@ -966,6 +988,56 @@ class MainWindow(QMainWindow):
     def _current_data_source_kind(self) -> str:
         return getattr(self, "_active_data_source_kind", "mt5")
 
+    def _sync_eastmoney_order_book_visibility(self) -> None:
+        panel = getattr(self, "_eastmoney_order_book_panel", None)
+        if panel is None:
+            return
+        available = (
+            self._current_data_source_kind() == "eastmoney"
+            and not getattr(self, "_demo_mode", False)
+        )
+        toggle = getattr(self, "_eastmoney_market_panel_toggle", None)
+        if toggle is not None:
+            toggle.setVisible(available)
+            toggle.setEnabled(available)
+            panel_enabled = bool(toggle.isChecked())
+            toggle.setText(
+                "隐藏盘口/成交" if panel_enabled else "显示盘口/成交"
+            )
+        else:
+            panel_enabled = True
+        panel.setVisible(available and panel_enabled)
+        if not available:
+            panel.clear()
+
+    def _on_eastmoney_market_panel_toggled(self, _checked: bool) -> None:
+        """Apply the user's session-level market-panel visibility preference."""
+        self._sync_eastmoney_order_book_visibility()
+
+    def _update_eastmoney_order_book(self) -> None:
+        panel = getattr(self, "_eastmoney_order_book_panel", None)
+        if panel is None or self._current_data_source_kind() != "eastmoney":
+            return
+        source = getattr(self._ctx, "data_source", None)
+        getter = getattr(source, "latest_order_book", None)
+        book = getter() if callable(getter) else None
+        trades_getter = getattr(source, "latest_trades", None)
+        trades = trades_getter() if callable(trades_getter) else []
+        panel.set_market_data(book, trades)
+
+    def _attach_analysis_market_context(self, frame: Any) -> Any:
+        """Freeze optional source-specific context into the analysis snapshot."""
+        if frame is None or self._current_data_source_kind() != "eastmoney":
+            return frame
+        source = getattr(self._ctx, "data_source", None)
+        getter = getattr(source, "latest_market_context", None)
+        context = getter() if callable(getter) else None
+        if not isinstance(context, dict) or not context:
+            return frame
+        from dataclasses import replace
+
+        return replace(frame, market_context=context)
+
     def _tv_exchange_text(self) -> str:
         combo = getattr(self, "_tv_exchange_combo", None)
         if combo is None:
@@ -1224,7 +1296,7 @@ class MainWindow(QMainWindow):
 
     def _populate_timeframe_combo_for_source(self) -> None:
         data_source = getattr(self._ctx, "data_source", None)
-        preferred = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
+        preferred = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"]
         supported: list[str] = []
         if data_source is not None:
             try:
@@ -1262,7 +1334,7 @@ class MainWindow(QMainWindow):
             self._switch_data_source(kind)
 
     def _on_data_source_combo_changed(self, index: int) -> None:
-        """Switch K-line data source (MT5 / TradingView)."""
+        """Switch the selected GUI-visible K-line data source."""
         if getattr(self, "_switching", False):
             return
         if getattr(self, "_demo_mode", False):
@@ -1313,6 +1385,7 @@ class MainWindow(QMainWindow):
 
             self._active_data_source_kind = kind
             self._sync_tv_exchange_visibility()
+            self._sync_eastmoney_order_book_visibility()
             self._apply_gold_defaults_for_data_source(kind)
 
             # Restore saved TV exchange before applying to data source
@@ -1789,6 +1862,7 @@ class MainWindow(QMainWindow):
 
     def _on_data_frame(self, frame: Any) -> None:
         """Forward a new KlineFrame to the chart widget (throttled by 30 Hz timer)."""
+        self._update_eastmoney_order_book()
         self._chart_widget.set_frame(frame)
 
     def _on_refresh_frame_ready(self, bars: Any) -> None:
@@ -1799,6 +1873,7 @@ class MainWindow(QMainWindow):
         """
         if bars:
             self._last_frame_ready_bars = list(bars)
+            self._update_eastmoney_order_book()
             from pa_agent.data.bar_close_wait import current_forming_ts
 
             ts = current_forming_ts(
@@ -1977,6 +2052,12 @@ class MainWindow(QMainWindow):
                         "subscribe(%s, %s) failed: %s", new_symbol, new_tf, exc
                     )
                     self._status_bar.showMessage(f"订阅失败：{exc}")
+            panel = getattr(self, "_eastmoney_order_book_panel", None)
+            if (
+                panel is not None
+                and self._current_data_source_kind() == "eastmoney"
+            ):
+                panel.clear()
 
             # ── Step 4: Reset ChartWidget ─────────────────────────────────────
             if hasattr(self, "_chart_widget"):
@@ -2643,6 +2724,7 @@ class MainWindow(QMainWindow):
         if ds_combo is not None:
             ds_combo.setEnabled(False)
         self._sync_tv_exchange_visibility()
+        self._sync_eastmoney_order_book_visibility()
 
         meta = record.meta
         self._symbol_combo.blockSignals(True)
@@ -2791,6 +2873,7 @@ class MainWindow(QMainWindow):
         if ds_combo is not None:
             ds_combo.setEnabled(True)
         self._sync_tv_exchange_visibility()
+        self._sync_eastmoney_order_book_visibility()
         self._demo_mode_label.hide()
         self._analysis_in_progress = False
         self._set_chart_refresh_paused(False)
@@ -3050,6 +3133,7 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
             return
 
+        frame = self._attach_analysis_market_context(frame)
         self._last_analysis_frame = frame
         previous_record = getattr(prep, "previous_record", None)
         self._analysis_previous_record = previous_record
@@ -4144,13 +4228,14 @@ class MainWindow(QMainWindow):
     def _on_startup_api_key_check(self) -> None:
         self._refresh_api_key_ui_state()
         if not self._has_api_key_configured():
-            QMessageBox.information(
-                self,
-                "需要配置 API Key",
-                "尚未配置 API Key，将打开设置窗口。\n"
-                "请填写 API Key 并点击「保存」，才能使用「提交分析」与「增量分析」。",
+            # Do not open a nested modal dialog during the first show event.
+            # On some Windows desktop/session combinations this can prevent the
+            # initial top-level window from being presented.  The persistent
+            # in-window API-key warning and the AI model settings menu remain
+            # available for configuration.
+            self._status_bar.showMessage(
+                "未配置 API Key：请点击左上角「AI 模型设置」完成配置"
             )
-            self._open_settings_dialog(focus_api_key=True)
 
     def _has_api_key_configured(self) -> bool:
         from pa_agent.config.settings import provider_api_key_configured
@@ -4450,11 +4535,12 @@ class MainWindow(QMainWindow):
             if not bars_raw:
                 return None
 
-            return self._build_chart_frame_from_bars(
+            frame = self._build_chart_frame_from_bars(
                 bars_raw,
                 bar_count=bar_count,
                 include_forming=False,
             )
+            return self._attach_analysis_market_context(frame)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Snapshot failed: %s", exc)
             return None

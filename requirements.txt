@@ -1,0 +1,16 @@
+PyQt6
+pyqtgraph
+numpy
+pandas
+openai
+tiktoken
+jsonschema
+pydantic
+MetaTrader5
+git+https://github.com/rongardF/tvdatafeed.git
+cryptography
+pywin32
+akshare
+baostock
+curl_cffi
+Pygments

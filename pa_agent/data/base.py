@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Any, Sequence
 
 
 # ── KlineBar ──────────────────────────────────────────────────────────────────
@@ -77,6 +77,12 @@ class KlineFrame:
     bars: tuple[KlineBar, ...]
     indicators: IndicatorBundle
     snapshot_ts_local_ms: int   # milliseconds since epoch, local time
+    market_context: dict[str, Any] | None = field(
+        default=None,
+        compare=False,
+        hash=False,
+        repr=False,
+    )
 
 
 # ── DataSource ABC ────────────────────────────────────────────────────────────
