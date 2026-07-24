@@ -101,11 +101,31 @@ def test_order_book_visibility_is_limited_to_eastmoney():
         def clear(self):
             self.cleared = True
 
+    class _Toggle:
+        def __init__(self, checked=True):
+            self.checked = checked
+            self.visible = False
+            self.enabled = False
+            self.text = ""
+
+        def isChecked(self):
+            return self.checked
+
+        def setVisible(self, visible):
+            self.visible = visible
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
+        def setText(self, text):
+            self.text = text
+
     class _Host:
-        def __init__(self, kind):
+        def __init__(self, kind, *, checked=True):
             self.kind = kind
             self._demo_mode = False
             self._eastmoney_order_book_panel = _Panel()
+            self._eastmoney_market_panel_toggle = _Toggle(checked)
 
         def _current_data_source_kind(self):
             return self.kind
@@ -113,11 +133,34 @@ def test_order_book_visibility_is_limited_to_eastmoney():
     eastmoney = _Host("eastmoney")
     MainWindow._sync_eastmoney_order_book_visibility(eastmoney)
     assert eastmoney._eastmoney_order_book_panel.visible is True
+    assert eastmoney._eastmoney_market_panel_toggle.visible is True
+    assert eastmoney._eastmoney_market_panel_toggle.enabled is True
+    assert eastmoney._eastmoney_market_panel_toggle.text == "隐藏盘口/成交"
+
+    hidden = _Host("eastmoney", checked=False)
+    MainWindow._sync_eastmoney_order_book_visibility(hidden)
+    assert hidden._eastmoney_order_book_panel.visible is False
+    assert hidden._eastmoney_order_book_panel.cleared is False
+    assert hidden._eastmoney_market_panel_toggle.text == "显示盘口/成交"
 
     akshare = _Host("akshare")
     MainWindow._sync_eastmoney_order_book_visibility(akshare)
     assert akshare._eastmoney_order_book_panel.visible is False
     assert akshare._eastmoney_order_book_panel.cleared is True
+    assert akshare._eastmoney_market_panel_toggle.visible is False
+    assert akshare._eastmoney_market_panel_toggle.enabled is False
+
+
+def test_market_panel_toggle_resyncs_visibility():
+    class _Host:
+        calls = 0
+
+        def _sync_eastmoney_order_book_visibility(self):
+            self.calls += 1
+
+    host = _Host()
+    MainWindow._on_eastmoney_market_panel_toggled(host, False)
+    assert host.calls == 1
 
 
 def test_analysis_snapshot_attaches_context_only_for_eastmoney():

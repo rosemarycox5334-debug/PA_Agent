@@ -601,6 +601,18 @@ class MainWindow(QMainWindow):
         self._fit_chart_btn.clicked.connect(self._on_fit_chart)
         ctrl_layout.addWidget(self._fit_chart_btn)
 
+        self._eastmoney_market_panel_toggle = QPushButton("隐藏盘口/成交")
+        self._eastmoney_market_panel_toggle.setCheckable(True)
+        self._eastmoney_market_panel_toggle.setChecked(True)
+        self._eastmoney_market_panel_toggle.setMinimumWidth(112)
+        self._eastmoney_market_panel_toggle.setToolTip(
+            "显示或隐藏东方财富盘口与成交明细；隐藏后 K 线图自动扩展"
+        )
+        self._eastmoney_market_panel_toggle.toggled.connect(
+            self._on_eastmoney_market_panel_toggled
+        )
+        ctrl_layout.addWidget(self._eastmoney_market_panel_toggle)
+
         self._decision_badge = QLabel("")
         self._decision_badge.setObjectName("mutedLabel")
         ctrl_layout.addWidget(self._decision_badge)
@@ -656,6 +668,7 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self._flow_bar)
 
         workbench = QSplitter(Qt.Orientation.Horizontal)
+        self._workbench_splitter = workbench
 
         self._chart_widget = ChartWidget()
         self._chart_widget.setSizePolicy(
@@ -970,13 +983,27 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_eastmoney_order_book_panel", None)
         if panel is None:
             return
-        visible = (
+        available = (
             self._current_data_source_kind() == "eastmoney"
             and not getattr(self, "_demo_mode", False)
         )
-        panel.setVisible(visible)
-        if not visible:
+        toggle = getattr(self, "_eastmoney_market_panel_toggle", None)
+        if toggle is not None:
+            toggle.setVisible(available)
+            toggle.setEnabled(available)
+            panel_enabled = bool(toggle.isChecked())
+            toggle.setText(
+                "隐藏盘口/成交" if panel_enabled else "显示盘口/成交"
+            )
+        else:
+            panel_enabled = True
+        panel.setVisible(available and panel_enabled)
+        if not available:
             panel.clear()
+
+    def _on_eastmoney_market_panel_toggled(self, _checked: bool) -> None:
+        """Apply the user's session-level market-panel visibility preference."""
+        self._sync_eastmoney_order_book_visibility()
 
     def _update_eastmoney_order_book(self) -> None:
         panel = getattr(self, "_eastmoney_order_book_panel", None)
