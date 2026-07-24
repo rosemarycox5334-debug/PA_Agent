@@ -7,7 +7,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 
 from pa_agent.data.base import IndicatorBundle, KlineFrame
-from pa_agent.data.eastmoney_quote import OrderBookLevel, StockOrderBook
+from pa_agent.data.eastmoney_quote import OrderBookLevel, StockOrderBook, TickTrade
 from pa_agent.gui.main_window import MainWindow
 from pa_agent.gui.widgets.eastmoney_order_book import EastMoneyOrderBookPanel
 
@@ -67,6 +67,27 @@ def test_order_book_panel_clears_missing_depth(qapp):
     assert panel._quote_label.text() == "暂无盘口数据"
     assert panel._bid_rows[0][1].text() == "—"
     assert panel._ask_rows[0][1].text() == "—"
+
+
+def test_order_book_panel_renders_recent_trades_newest_first(qapp):
+    panel = EastMoneyOrderBookPanel()
+    trades = [
+        TickTrade("14:59:57", 1450.4, 12, "卖"),
+        TickTrade("14:59:58", 1450.5, 20, "买"),
+    ]
+
+    panel.set_market_data(_book(), trades)
+
+    assert panel._trade_count_label.text() == "最近 2 笔"
+    assert panel._trade_table.item(0, 0).text() == "14:59:58"
+    assert panel._trade_table.item(0, 1).text() == "1450.5"
+    assert panel._trade_table.item(0, 2).text() == "20"
+    assert panel._trade_table.item(0, 3).text() == "主买"
+    assert panel._trade_table.item(1, 3).text() == "主卖"
+
+    panel.clear()
+    assert panel._trade_table.rowCount() == 0
+    assert panel._trade_count_label.text() == "暂无数据"
 
 
 def test_order_book_visibility_is_limited_to_eastmoney():

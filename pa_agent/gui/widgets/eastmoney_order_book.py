@@ -4,12 +4,17 @@ from __future__ import annotations
 from typing import Any
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QFrame,
     QGridLayout,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
 )
 
@@ -119,7 +124,48 @@ class EastMoneyOrderBookPanel(QFrame):
             "color: #c9d1d9; font-size: 12px;"
         )
         layout.addWidget(self._summary_label)
-        layout.addStretch(1)
+
+        trade_title_row = QHBoxLayout()
+        trade_title = QLabel("成交明细")
+        trade_title.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #79c0ff;"
+        )
+        self._trade_count_label = QLabel("暂无数据")
+        self._trade_count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._trade_count_label.setStyleSheet(
+            f"color: {_MUTED_COLOR}; font-size: 11px;"
+        )
+        trade_title_row.addWidget(trade_title)
+        trade_title_row.addStretch(1)
+        trade_title_row.addWidget(self._trade_count_label)
+        layout.addLayout(trade_title_row)
+
+        self._trade_table = QTableWidget(0, 4)
+        self._trade_table.setHorizontalHeaderLabels(
+            ["时间", "价格", "手数", "方向"]
+        )
+        self._trade_table.verticalHeader().setVisible(False)
+        self._trade_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self._trade_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._trade_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self._trade_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._trade_table.setAlternatingRowColors(True)
+        self._trade_table.setShowGrid(False)
+        self._trade_table.setMinimumHeight(170)
+        self._trade_table.setStyleSheet(
+            "QTableWidget { background-color: #0d1117; color: #c9d1d9;"
+            " border: 1px solid #30363d; font-size: 11px; }"
+            "QHeaderView::section { background-color: #21262d; color: #8b949e;"
+            " border: 0; padding: 4px; font-weight: bold; }"
+            "QTableWidget::item { padding: 3px; }"
+        )
+        layout.addWidget(self._trade_table, 1)
 
     @staticmethod
     def _make_level_row(name: str, color: str) -> tuple[QLabel, QLabel, QLabel]:
@@ -199,6 +245,65 @@ class EastMoneyOrderBookPanel(QFrame):
             f"卖盘 {_format_volume(ask_total)}  ·  委比 {imbalance:+.1f}%"
         )
 
+    @staticmethod
+    def _trade_values(trade: Any) -> tuple[str, object, object, str]:
+        if isinstance(trade, dict):
+            return (
+                str(trade.get("time") or ""),
+                trade.get("price"),
+                trade.get("volume_lots", trade.get("volume")),
+                str(trade.get("side") or trade.get("side_hint") or "—"),
+            )
+        return (
+            str(getattr(trade, "time", "") or ""),
+            getattr(trade, "price", None),
+            getattr(trade, "volume", None),
+            str(getattr(trade, "side_hint", "") or "—"),
+        )
+
+    def set_trade_details(self, trades: object) -> None:
+        values = list(trades) if isinstance(trades, (list, tuple)) else []
+        values = values[-40:]
+        values.reverse()
+        self._trade_table.setRowCount(len(values))
+        self._trade_count_label.setText(
+            f"最近 {len(values)} 笔" if values else "暂无数据"
+        )
+
+        for row, trade in enumerate(values):
+            time_text, price, volume, side = self._trade_values(trade)
+            direction = {
+                "买": "主买",
+                "卖": "主卖",
+                "0": "中性",
+                "1": "主买",
+                "2": "主卖",
+            }.get(side, side)
+            texts = (
+                time_text or "—",
+                _format_price(price),
+                _format_volume(volume).removesuffix("手"),
+                direction,
+            )
+            color = (
+                _BID_COLOR
+                if direction == "主买"
+                else _ASK_COLOR
+                if direction == "主卖"
+                else _MUTED_COLOR
+            )
+            for column, text in enumerate(texts):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column in (1, 3):
+                    item.setForeground(QColor(color))
+                self._trade_table.setItem(row, column, item)
+
+    def set_market_data(self, book: Any | None, trades: object) -> None:
+        """Update order book and recent tick trades as one coherent snapshot."""
+        self.set_order_book(book)
+        self.set_trade_details(trades)
+
     def clear(self, message: str = "等待获取盘口") -> None:
         self._quote_label.setText(message)
         self._quote_label.setStyleSheet(
@@ -208,3 +313,5 @@ class EastMoneyOrderBookPanel(QFrame):
         self._set_levels(self._bid_rows, [])
         self._set_levels(self._ask_rows, [])
         self._summary_label.setText("买盘 —  ·  卖盘 —  ·  委比 —")
+        self._trade_table.setRowCount(0)
+        self._trade_count_label.setText("暂无数据")

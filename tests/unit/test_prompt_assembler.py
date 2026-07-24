@@ -61,6 +61,25 @@ def _eastmoney_context() -> dict:
         "order_imbalance_pct": 42.86,
         "depth_levels": 5,
         "depth_source": "push2_free",
+        "recent_trades": [
+            {
+                "time": "14:59:57",
+                "price": 1450.4,
+                "volume_lots": 7,
+                "side": "卖",
+            },
+            {
+                "time": "14:59:58",
+                "price": 1450.5,
+                "volume_lots": 12,
+                "side": "买",
+            },
+        ],
+        "trade_count": 2,
+        "active_buy_lots": 12,
+        "active_sell_lots": 7,
+        "neutral_trade_lots": 0,
+        "active_net_lots": 5,
     }
 
 
@@ -168,6 +187,9 @@ def test_eastmoney_order_book_is_sent_to_both_model_stages(
         assert "卖盘合计：80手" in prompt
         assert "1450.4" in prompt
         assert "1450.6" in prompt
+        assert "最近成交明细（按时间升序）" in prompt
+        assert "14:59:58 | 1450.5 | 12 | 买" in prompt
+        assert "主买12手；主卖7手" in prompt
         assert "盘口委托可随时撤单" in prompt
         assert "[CONTENT OF 东方财富盘口分析规则.txt]" in prompt
 

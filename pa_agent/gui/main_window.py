@@ -985,7 +985,9 @@ class MainWindow(QMainWindow):
         source = getattr(self._ctx, "data_source", None)
         getter = getattr(source, "latest_order_book", None)
         book = getter() if callable(getter) else None
-        panel.set_order_book(book)
+        trades_getter = getattr(source, "latest_trades", None)
+        trades = trades_getter() if callable(trades_getter) else []
+        panel.set_market_data(book, trades)
 
     def _attach_analysis_market_context(self, frame: Any) -> Any:
         """Freeze optional source-specific context into the analysis snapshot."""

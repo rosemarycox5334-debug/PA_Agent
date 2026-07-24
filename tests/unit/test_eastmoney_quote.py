@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pa_agent.data.eastmoney_quote import parse_order_book_payload
+from pa_agent.data.eastmoney_quote import parse_order_book_payload, parse_tick_lines
 
 
 def test_parse_order_book_uses_etf_three_decimal_precision() -> None:
@@ -75,3 +75,19 @@ def test_parse_order_book_fltt_two_prices_are_already_scaled() -> None:
     assert book.price == pytest.approx(0.835)
     assert book.bids[0].price == pytest.approx(0.834)
     assert book.asks[0].price == pytest.approx(0.835)
+
+
+def test_parse_tick_lines_keeps_recent_trade_direction() -> None:
+    trades = parse_tick_lines(
+        [
+            "14:59:57,0.834,1488,1,2",
+            "14:59:58,0.835,748,1,1",
+        ],
+        tail=2,
+    )
+
+    assert trades[0].time == "14:59:57"
+    assert trades[0].price == pytest.approx(0.834)
+    assert trades[0].volume == 1488
+    assert trades[0].side_hint == "卖"
+    assert trades[1].side_hint == "买"

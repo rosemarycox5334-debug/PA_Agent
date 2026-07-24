@@ -63,16 +63,19 @@ def test_subscribe_clears_order_book_when_symbol_changes():
     source._symbol = "600519"
     source._timeframe = "15m"
     source._latest_order_book = object()
+    source._latest_trades = [object()]
 
     source.subscribe("000001", "15m")
 
     assert source.latest_order_book() is None
+    assert source.latest_trades() == []
 
 
 def test_latest_market_context_serializes_both_sides():
     source = EastMoneySource()
     source._symbol = "600519"
     source._latest_order_book_ts_ms = 123456
+    source._latest_trades_ts_ms = 123457
     source._latest_order_book = SimpleNamespace(
         code="600519",
         name="贵州茅台",
@@ -89,12 +92,33 @@ def test_latest_market_context_serializes_both_sides():
         depth_levels=5,
         depth_source="push2_free",
     )
+    source._latest_trades = [
+        SimpleNamespace(
+            time="14:59:57",
+            price=1450.5,
+            volume=12,
+            side_hint="买",
+        ),
+        SimpleNamespace(
+            time="14:59:58",
+            price=1450.4,
+            volume=7,
+            side_hint="卖",
+        ),
+        SimpleNamespace(
+            time="14:59:59",
+            price=1450.5,
+            volume=3,
+            side_hint="中性",
+        ),
+    ]
 
     context = source.latest_market_context()
 
     assert context is not None
     assert context["provider"] == "eastmoney"
-    assert context["snapshot_ts_ms"] == 123456
+    assert context["snapshot_ts_ms"] == 123457
+    assert context["trades_snapshot_ts_ms"] == 123457
     assert context["bids"][0] == {
         "level": 1,
         "price": 1450.4,
@@ -104,3 +128,14 @@ def test_latest_market_context_serializes_both_sides():
     assert context["bid_total_lots"] == 200
     assert context["ask_total_lots"] == 80
     assert context["order_imbalance_pct"] == 42.86
+    assert context["recent_trades"][0] == {
+        "time": "14:59:57",
+        "price": 1450.5,
+        "volume_lots": 12,
+        "side": "买",
+    }
+    assert context["trade_count"] == 3
+    assert context["active_buy_lots"] == 12
+    assert context["active_sell_lots"] == 7
+    assert context["neutral_trade_lots"] == 3
+    assert context["active_net_lots"] == 5

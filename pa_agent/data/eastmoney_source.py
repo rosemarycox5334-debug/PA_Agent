@@ -106,6 +106,8 @@ class EastMoneySource(DataSource):
         self._snap_cache_bars: list[KlineBar] = []
         self._latest_order_book: Any | None = None
         self._latest_order_book_ts_ms: int | None = None
+        self._latest_trades: list[Any] = []
+        self._latest_trades_ts_ms: int | None = None
 
     def connect(self) -> None:
         self._connected = True
@@ -146,6 +148,8 @@ class EastMoneySource(DataSource):
             self._snap_cache_n = 0
             self._latest_order_book = None
             self._latest_order_book_ts_ms = None
+            self._latest_trades = []
+            self._latest_trades_ts_ms = None
         self._symbol = code
         self._timeframe = timeframe
         logger.info("EastMoneySource subscribed: %s %s", code, timeframe)
@@ -157,16 +161,23 @@ class EastMoneySource(DataSource):
         self._snap_cache_n = 0
         self._latest_order_book = None
         self._latest_order_book_ts_ms = None
+        self._latest_trades = []
+        self._latest_trades_ts_ms = None
         logger.info("EastMoneySource unsubscribed")
 
     def latest_order_book(self) -> Any | None:
         """Return the order book cached by the latest background snapshot."""
         return self._latest_order_book
 
+    def latest_trades(self) -> list[Any]:
+        """Return recent tick trades cached by the latest background snapshot."""
+        return list(self._latest_trades)
+
     def latest_market_context(self) -> dict[str, Any] | None:
-        """Return a JSON-safe East Money order-book snapshot for AI prompts."""
+        """Return JSON-safe East Money order-book and tick data for AI prompts."""
         book = self._latest_order_book
-        if book is None:
+        trade_values = list(self._latest_trades[-40:])
+        if book is None and not trade_values:
             return None
 
         def _levels(items: object) -> list[dict[str, int | float]]:
@@ -180,27 +191,77 @@ class EastMoneySource(DataSource):
                 for index, level in enumerate(values[:10], start=1)
             ]
 
-        bids = _levels(getattr(book, "bids", None))
-        asks = _levels(getattr(book, "asks", None))
+        bids = _levels(getattr(book, "bids", None)) if book is not None else []
+        asks = _levels(getattr(book, "asks", None)) if book is not None else []
         bid_total = sum(int(item["volume_lots"]) for item in bids)
         ask_total = sum(int(item["volume_lots"]) for item in asks)
         total = bid_total + ask_total
         imbalance = ((bid_total - ask_total) / total * 100.0) if total else 0.0
+
+        trades = [
+            {
+                "time": str(getattr(trade, "time", "") or ""),
+                "price": float(getattr(trade, "price", 0.0) or 0.0),
+                "volume_lots": int(getattr(trade, "volume", 0) or 0),
+                "side": str(getattr(trade, "side_hint", "") or "—"),
+            }
+            for trade in trade_values
+        ]
+        active_buy_lots = sum(
+            int(trade["volume_lots"])
+            for trade in trades
+            if trade["side"] == "买"
+        )
+        active_sell_lots = sum(
+            int(trade["volume_lots"])
+            for trade in trades
+            if trade["side"] == "卖"
+        )
+        neutral_lots = sum(
+            int(trade["volume_lots"])
+            for trade in trades
+            if trade["side"] not in {"买", "卖"}
+        )
+        last_trade_price = float(trades[-1]["price"]) if trades else 0.0
+        snapshot_ts_ms = max(
+            self._latest_order_book_ts_ms or 0,
+            self._latest_trades_ts_ms or 0,
+        ) or None
         return {
             "provider": "eastmoney",
-            "snapshot_ts_ms": self._latest_order_book_ts_ms,
-            "code": str(getattr(book, "code", "") or self._symbol),
-            "name": str(getattr(book, "name", "") or ""),
-            "last_price": float(getattr(book, "price", 0.0) or 0.0),
-            "pct_chg": float(getattr(book, "pct_chg", 0.0) or 0.0),
+            "snapshot_ts_ms": snapshot_ts_ms,
+            "trades_snapshot_ts_ms": self._latest_trades_ts_ms,
+            "code": str(
+                (getattr(book, "code", "") if book is not None else "")
+                or self._symbol
+            ),
+            "name": str(getattr(book, "name", "") if book is not None else ""),
+            "last_price": float(
+                (getattr(book, "price", 0.0) if book is not None else 0.0)
+                or last_trade_price
+            ),
+            "pct_chg": float(
+                getattr(book, "pct_chg", 0.0) if book is not None else 0.0
+            ),
             "volume_unit": "手",
             "bids": bids,
             "asks": asks,
             "bid_total_lots": bid_total,
             "ask_total_lots": ask_total,
             "order_imbalance_pct": round(imbalance, 2),
-            "depth_levels": int(getattr(book, "depth_levels", 5) or 5),
-            "depth_source": str(getattr(book, "depth_source", "") or ""),
+            "depth_levels": int(
+                (getattr(book, "depth_levels", 5) if book is not None else 5)
+                or 5
+            ),
+            "depth_source": str(
+                getattr(book, "depth_source", "") if book is not None else ""
+            ),
+            "recent_trades": trades,
+            "trade_count": len(trades),
+            "active_buy_lots": active_buy_lots,
+            "active_sell_lots": active_sell_lots,
+            "neutral_trade_lots": neutral_lots,
+            "active_net_lots": active_buy_lots - active_sell_lots,
         }
 
     def latest_snapshot(self, n: int) -> list[KlineBar]:
@@ -240,12 +301,20 @@ class EastMoneySource(DataSource):
 
         self._latest_order_book = None
         self._latest_order_book_ts_ms = None
+        self._latest_trades = []
+        self._latest_trades_ts_ms = None
         if not is_index_symbol(self._symbol):
-            from pa_agent.data.eastmoney_client import fetch_stock_order_book
+            from pa_agent.data.eastmoney_client import (
+                fetch_stock_order_book,
+                fetch_stock_tick_details,
+            )
 
             self._latest_order_book = fetch_stock_order_book(self._symbol)
             if self._latest_order_book is not None:
                 self._latest_order_book_ts_ms = int(time.time() * 1000)
+            self._latest_trades = fetch_stock_tick_details(self._symbol, tail=40)
+            if self._latest_trades:
+                self._latest_trades_ts_ms = int(time.time() * 1000)
 
         if self._timeframe == "1d" and _ashare_trading_day():
             book = self._latest_order_book
