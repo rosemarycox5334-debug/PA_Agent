@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import sys
+from types import SimpleNamespace
+
+import pytest
+from PyQt6.QtWidgets import QApplication
+
+from pa_agent.data.base import IndicatorBundle, KlineFrame
+from pa_agent.data.eastmoney_quote import OrderBookLevel, StockOrderBook
+from pa_agent.gui.main_window import MainWindow
+from pa_agent.gui.widgets.eastmoney_order_book import EastMoneyOrderBookPanel
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    return app
+
+
+def _book() -> StockOrderBook:
+    return StockOrderBook(
+        code="600519",
+        name="贵州茅台",
+        price=1450.5,
+        pct_chg=1.25,
+        open=1435.0,
+        high=1460.0,
+        low=1430.0,
+        prev_close=1432.59,
+        volume=100_000,
+        amount=145_000_000.0,
+        bids=[
+            OrderBookLevel(1450.4, 120),
+            OrderBookLevel(1450.3, 80),
+        ],
+        asks=[
+            OrderBookLevel(1450.6, 50),
+            OrderBookLevel(1450.7, 30),
+        ],
+    )
+
+
+def test_order_book_panel_renders_both_sides(qapp):
+    panel = EastMoneyOrderBookPanel()
+
+    panel.set_order_book(_book())
+
+    assert "贵州茅台 600519" in panel._quote_label.text()
+    assert panel._bid_rows[0][1].text() == "1450.4"
+    assert panel._bid_rows[0][2].text() == "120手"
+    assert panel._ask_rows[0][1].text() == "1450.6"
+    assert panel._ask_rows[0][2].text() == "50手"
+    assert "买盘 200手" in panel._summary_label.text()
+    assert "卖盘 80手" in panel._summary_label.text()
+    assert "委比 +42.9%" in panel._summary_label.text()
+
+
+def test_order_book_panel_clears_missing_depth(qapp):
+    panel = EastMoneyOrderBookPanel()
+    panel.set_order_book(_book())
+
+    panel.set_order_book(None)
+
+    assert panel._quote_label.text() == "暂无盘口数据"
+    assert panel._bid_rows[0][1].text() == "—"
+    assert panel._ask_rows[0][1].text() == "—"
+
+
+def test_order_book_visibility_is_limited_to_eastmoney():
+    class _Panel:
+        visible = False
+        cleared = False
+
+        def setVisible(self, visible):
+            self.visible = visible
+
+        def clear(self):
+            self.cleared = True
+
+    class _Host:
+        def __init__(self, kind):
+            self.kind = kind
+            self._demo_mode = False
+            self._eastmoney_order_book_panel = _Panel()
+
+        def _current_data_source_kind(self):
+            return self.kind
+
+    eastmoney = _Host("eastmoney")
+    MainWindow._sync_eastmoney_order_book_visibility(eastmoney)
+    assert eastmoney._eastmoney_order_book_panel.visible is True
+
+    akshare = _Host("akshare")
+    MainWindow._sync_eastmoney_order_book_visibility(akshare)
+    assert akshare._eastmoney_order_book_panel.visible is False
+    assert akshare._eastmoney_order_book_panel.cleared is True
+
+
+def test_analysis_snapshot_attaches_context_only_for_eastmoney():
+    context = {"provider": "eastmoney", "bids": [{"price": 10, "volume_lots": 1}]}
+    frame = KlineFrame(
+        symbol="600519",
+        timeframe="15m",
+        bars=(),
+        indicators=IndicatorBundle(ema20=(), atr14=()),
+        snapshot_ts_local_ms=1,
+    )
+
+    class _Host:
+        def __init__(self, kind):
+            self.kind = kind
+            self._ctx = SimpleNamespace(
+                data_source=SimpleNamespace(
+                    latest_market_context=lambda: context,
+                )
+            )
+
+        def _current_data_source_kind(self):
+            return self.kind
+
+    eastmoney_frame = MainWindow._attach_analysis_market_context(
+        _Host("eastmoney"),
+        frame,
+    )
+    assert eastmoney_frame.market_context == context
+    assert eastmoney_frame is not frame
+
+    akshare_frame = MainWindow._attach_analysis_market_context(
+        _Host("akshare"),
+        frame,
+    )
+    assert akshare_frame is frame
+    assert akshare_frame.market_context is None

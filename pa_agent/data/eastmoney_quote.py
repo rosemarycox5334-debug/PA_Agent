@@ -87,11 +87,27 @@ def _infer_fltt(payload: dict[str, Any]) -> int:
     return 2
 
 
-def _scale_price(val: float | None, fltt: int) -> float | None:
+def _price_decimals(payload: dict[str, Any], fltt: int) -> int:
+    """Return the price precision advertised by East Money for ``fltt=1``."""
+    if fltt != 1:
+        return 0
+    raw = _to_float(payload.get("f59"))
+    if raw is None:
+        return 2
+    decimals = int(raw)
+    return decimals if 0 <= decimals <= 6 else 2
+
+
+def _scale_price(
+    val: float | None,
+    fltt: int,
+    *,
+    decimals: int = 2,
+) -> float | None:
     if val is None:
         return None
     if fltt == 1:
-        return val / 100.0
+        return val / (10.0**decimals)
     return val
 
 
@@ -108,10 +124,15 @@ def _levels_from_pairs(
     pairs: tuple[tuple[str, str], ...],
     *,
     fltt: int,
+    decimals: int,
 ) -> list[OrderBookLevel]:
     out: list[OrderBookLevel] = []
     for px_key, vol_key in pairs:
-        px = _scale_price(_to_float(payload.get(px_key)), fltt)
+        px = _scale_price(
+            _to_float(payload.get(px_key)),
+            fltt,
+            decimals=decimals,
+        )
         vol = _to_int(payload.get(vol_key))
         if px is not None and px > 0:
             out.append(OrderBookLevel(px, vol))
@@ -127,17 +148,42 @@ def parse_order_book_payload(
     if not payload:
         return None
     flt = fltt or _infer_fltt(payload)
+    price_decimals = _price_decimals(payload, flt)
     code = str(payload.get("f57") or "").strip()
     name = str(payload.get("f58") or code).strip()
-    price = _scale_price(_to_float(payload.get("f43")), flt)
+    price = _scale_price(
+        _to_float(payload.get("f43")),
+        flt,
+        decimals=price_decimals,
+    )
     if price is None:
         return None
 
-    asks = _levels_from_pairs(payload, ASK_FIELD_PAIRS, fltt=flt)
-    bids = _levels_from_pairs(payload, BID_FIELD_PAIRS, fltt=flt)
+    asks = _levels_from_pairs(
+        payload,
+        ASK_FIELD_PAIRS,
+        fltt=flt,
+        decimals=price_decimals,
+    )
+    bids = _levels_from_pairs(
+        payload,
+        BID_FIELD_PAIRS,
+        fltt=flt,
+        decimals=price_decimals,
+    )
 
-    l2_asks = _levels_from_pairs(payload, L2_ASK_EXTENDED, fltt=flt)
-    l2_bids = _levels_from_pairs(payload, L2_BID_EXTENDED, fltt=flt)
+    l2_asks = _levels_from_pairs(
+        payload,
+        L2_ASK_EXTENDED,
+        fltt=flt,
+        decimals=price_decimals,
+    )
+    l2_bids = _levels_from_pairs(
+        payload,
+        L2_BID_EXTENDED,
+        fltt=flt,
+        decimals=price_decimals,
+    )
     if l2_asks or l2_bids:
         asks = asks + l2_asks
         bids = bids + l2_bids
@@ -152,10 +198,30 @@ def parse_order_book_payload(
         name=name,
         price=price,
         pct_chg=_scale_pct(_to_float(payload.get("f170")), flt),
-        open=_scale_price(_to_float(payload.get("f46")), flt) or 0.0,
-        high=_scale_price(_to_float(payload.get("f44")), flt) or 0.0,
-        low=_scale_price(_to_float(payload.get("f45")), flt) or 0.0,
-        prev_close=_scale_price(_to_float(payload.get("f60")), flt) or 0.0,
+        open=_scale_price(
+            _to_float(payload.get("f46")),
+            flt,
+            decimals=price_decimals,
+        )
+        or 0.0,
+        high=_scale_price(
+            _to_float(payload.get("f44")),
+            flt,
+            decimals=price_decimals,
+        )
+        or 0.0,
+        low=_scale_price(
+            _to_float(payload.get("f45")),
+            flt,
+            decimals=price_decimals,
+        )
+        or 0.0,
+        prev_close=_scale_price(
+            _to_float(payload.get("f60")),
+            flt,
+            decimals=price_decimals,
+        )
+        or 0.0,
         volume=_to_int(payload.get("f47")),
         amount=_to_float(payload.get("f48")) or 0.0,
         bids=bids,

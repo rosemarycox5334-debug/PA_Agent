@@ -664,11 +664,20 @@ class MainWindow(QMainWindow):
         self._apply_chart_display_settings()
         workbench.addWidget(self._chart_widget)
 
+        from pa_agent.gui.widgets.eastmoney_order_book import EastMoneyOrderBookPanel
+
+        self._eastmoney_order_book_panel = EastMoneyOrderBookPanel()
+        self._eastmoney_order_book_panel.setMinimumWidth(270)
+        self._eastmoney_order_book_panel.setMaximumWidth(340)
+        workbench.addWidget(self._eastmoney_order_book_panel)
+
         self._ai_sidebar.setMinimumWidth(400)
         workbench.addWidget(self._ai_sidebar)
 
         workbench.setStretchFactor(0, 3)
-        workbench.setStretchFactor(1, 2)
+        workbench.setStretchFactor(1, 0)
+        workbench.setStretchFactor(2, 2)
+        self._sync_eastmoney_order_book_visibility()
 
         # ── SummaryStrip: 5-metric card strip above workbench ─────────────────
         from pa_agent.gui.widgets.summary_strip import SummaryStrip
@@ -956,6 +965,40 @@ class MainWindow(QMainWindow):
 
     def _current_data_source_kind(self) -> str:
         return getattr(self, "_active_data_source_kind", "mt5")
+
+    def _sync_eastmoney_order_book_visibility(self) -> None:
+        panel = getattr(self, "_eastmoney_order_book_panel", None)
+        if panel is None:
+            return
+        visible = (
+            self._current_data_source_kind() == "eastmoney"
+            and not getattr(self, "_demo_mode", False)
+        )
+        panel.setVisible(visible)
+        if not visible:
+            panel.clear()
+
+    def _update_eastmoney_order_book(self) -> None:
+        panel = getattr(self, "_eastmoney_order_book_panel", None)
+        if panel is None or self._current_data_source_kind() != "eastmoney":
+            return
+        source = getattr(self._ctx, "data_source", None)
+        getter = getattr(source, "latest_order_book", None)
+        book = getter() if callable(getter) else None
+        panel.set_order_book(book)
+
+    def _attach_analysis_market_context(self, frame: Any) -> Any:
+        """Freeze optional source-specific context into the analysis snapshot."""
+        if frame is None or self._current_data_source_kind() != "eastmoney":
+            return frame
+        source = getattr(self._ctx, "data_source", None)
+        getter = getattr(source, "latest_market_context", None)
+        context = getter() if callable(getter) else None
+        if not isinstance(context, dict) or not context:
+            return frame
+        from dataclasses import replace
+
+        return replace(frame, market_context=context)
 
     def _tv_exchange_text(self) -> str:
         combo = getattr(self, "_tv_exchange_combo", None)
@@ -1304,6 +1347,7 @@ class MainWindow(QMainWindow):
 
             self._active_data_source_kind = kind
             self._sync_tv_exchange_visibility()
+            self._sync_eastmoney_order_book_visibility()
             self._apply_gold_defaults_for_data_source(kind)
 
             # Restore saved TV exchange before applying to data source
@@ -1780,6 +1824,7 @@ class MainWindow(QMainWindow):
 
     def _on_data_frame(self, frame: Any) -> None:
         """Forward a new KlineFrame to the chart widget (throttled by 30 Hz timer)."""
+        self._update_eastmoney_order_book()
         self._chart_widget.set_frame(frame)
 
     def _on_refresh_frame_ready(self, bars: Any) -> None:
@@ -1790,6 +1835,7 @@ class MainWindow(QMainWindow):
         """
         if bars:
             self._last_frame_ready_bars = list(bars)
+            self._update_eastmoney_order_book()
             from pa_agent.data.bar_close_wait import current_forming_ts
 
             ts = current_forming_ts(
@@ -1968,6 +2014,12 @@ class MainWindow(QMainWindow):
                         "subscribe(%s, %s) failed: %s", new_symbol, new_tf, exc
                     )
                     self._status_bar.showMessage(f"订阅失败：{exc}")
+            panel = getattr(self, "_eastmoney_order_book_panel", None)
+            if (
+                panel is not None
+                and self._current_data_source_kind() == "eastmoney"
+            ):
+                panel.clear()
 
             # ── Step 4: Reset ChartWidget ─────────────────────────────────────
             if hasattr(self, "_chart_widget"):
@@ -2634,6 +2686,7 @@ class MainWindow(QMainWindow):
         if ds_combo is not None:
             ds_combo.setEnabled(False)
         self._sync_tv_exchange_visibility()
+        self._sync_eastmoney_order_book_visibility()
 
         meta = record.meta
         self._symbol_combo.blockSignals(True)
@@ -2782,6 +2835,7 @@ class MainWindow(QMainWindow):
         if ds_combo is not None:
             ds_combo.setEnabled(True)
         self._sync_tv_exchange_visibility()
+        self._sync_eastmoney_order_book_visibility()
         self._demo_mode_label.hide()
         self._analysis_in_progress = False
         self._set_chart_refresh_paused(False)
@@ -3041,6 +3095,7 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
             return
 
+        frame = self._attach_analysis_market_context(frame)
         self._last_analysis_frame = frame
         previous_record = getattr(prep, "previous_record", None)
         self._analysis_previous_record = previous_record
@@ -4442,11 +4497,12 @@ class MainWindow(QMainWindow):
             if not bars_raw:
                 return None
 
-            return self._build_chart_frame_from_bars(
+            frame = self._build_chart_frame_from_bars(
                 bars_raw,
                 bar_count=bar_count,
                 include_forming=False,
             )
+            return self._attach_analysis_market_context(frame)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Snapshot failed: %s", exc)
             return None

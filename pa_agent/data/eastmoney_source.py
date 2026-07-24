@@ -104,6 +104,8 @@ class EastMoneySource(DataSource):
         self._snap_cache_n: int = 0
         self._snap_cache_ts: float = 0.0
         self._snap_cache_bars: list[KlineBar] = []
+        self._latest_order_book: Any | None = None
+        self._latest_order_book_ts_ms: int | None = None
 
     def connect(self) -> None:
         self._connected = True
@@ -142,6 +144,8 @@ class EastMoneySource(DataSource):
         if code != self._symbol or timeframe != self._timeframe:
             self._snap_cache_bars = []
             self._snap_cache_n = 0
+            self._latest_order_book = None
+            self._latest_order_book_ts_ms = None
         self._symbol = code
         self._timeframe = timeframe
         logger.info("EastMoneySource subscribed: %s %s", code, timeframe)
@@ -151,7 +155,53 @@ class EastMoneySource(DataSource):
         self._timeframe = ""
         self._snap_cache_bars = []
         self._snap_cache_n = 0
+        self._latest_order_book = None
+        self._latest_order_book_ts_ms = None
         logger.info("EastMoneySource unsubscribed")
+
+    def latest_order_book(self) -> Any | None:
+        """Return the order book cached by the latest background snapshot."""
+        return self._latest_order_book
+
+    def latest_market_context(self) -> dict[str, Any] | None:
+        """Return a JSON-safe East Money order-book snapshot for AI prompts."""
+        book = self._latest_order_book
+        if book is None:
+            return None
+
+        def _levels(items: object) -> list[dict[str, int | float]]:
+            values = list(items) if isinstance(items, (list, tuple)) else []
+            return [
+                {
+                    "level": index,
+                    "price": float(level.price),
+                    "volume_lots": int(level.volume),
+                }
+                for index, level in enumerate(values[:10], start=1)
+            ]
+
+        bids = _levels(getattr(book, "bids", None))
+        asks = _levels(getattr(book, "asks", None))
+        bid_total = sum(int(item["volume_lots"]) for item in bids)
+        ask_total = sum(int(item["volume_lots"]) for item in asks)
+        total = bid_total + ask_total
+        imbalance = ((bid_total - ask_total) / total * 100.0) if total else 0.0
+        return {
+            "provider": "eastmoney",
+            "snapshot_ts_ms": self._latest_order_book_ts_ms,
+            "code": str(getattr(book, "code", "") or self._symbol),
+            "name": str(getattr(book, "name", "") or ""),
+            "last_price": float(getattr(book, "price", 0.0) or 0.0),
+            "pct_chg": float(getattr(book, "pct_chg", 0.0) or 0.0),
+            "volume_unit": "手",
+            "bids": bids,
+            "asks": asks,
+            "bid_total_lots": bid_total,
+            "ask_total_lots": ask_total,
+            "order_imbalance_pct": round(imbalance, 2),
+            "depth_levels": int(getattr(book, "depth_levels", 5) or 5),
+            "depth_source": str(getattr(book, "depth_source", "") or ""),
+        }
 
     def latest_snapshot(self, n: int) -> list[KlineBar]:
         if not self._connected:
@@ -188,12 +238,17 @@ class EastMoneySource(DataSource):
                 f"东方财富未返回数据: {self._symbol} {self._timeframe}"
             )
 
-        if self._timeframe == "1d" and _ashare_trading_day():
+        self._latest_order_book = None
+        self._latest_order_book_ts_ms = None
+        if not is_index_symbol(self._symbol):
             from pa_agent.data.eastmoney_client import fetch_stock_order_book
 
-            book = None
-            if not is_index_symbol(self._symbol):
-                book = fetch_stock_order_book(self._symbol)
+            self._latest_order_book = fetch_stock_order_book(self._symbol)
+            if self._latest_order_book is not None:
+                self._latest_order_book_ts_ms = int(time.time() * 1000)
+
+        if self._timeframe == "1d" and _ashare_trading_day():
+            book = self._latest_order_book
             spot = (
                 float(book.price)
                 if book is not None and book.price > 0
@@ -367,9 +422,8 @@ class EastMoneySource(DataSource):
 
         if daily:
             from pa_agent.data.ashare_common import apply_session_quote_to_forming_row
-            from pa_agent.data.eastmoney_client import fetch_stock_order_book
 
-            book = fetch_stock_order_book(self._symbol)
+            book = self._latest_order_book
             if book is not None and book.price > 0:
                 apply_session_quote_to_forming_row(
                     last,
@@ -391,7 +445,12 @@ class EastMoneySource(DataSource):
             apply_session_quote_to_forming_row(last, price=price, daily=True)
             return
 
-        price = fetch_spot_price(self._symbol)
+        book = self._latest_order_book
+        price = (
+            float(book.price)
+            if book is not None and book.price > 0
+            else fetch_spot_price(self._symbol)
+        )
         if price is None:
             return
         from pa_agent.data.ashare_common import apply_session_quote_to_forming_row

@@ -764,6 +764,8 @@ STAGE1_TASK_PROMPT_TXT_FILES: tuple[str, ...] = (
     "文件16-K线信号识别.txt",
 )
 
+EASTMONEY_ORDER_BOOK_PROMPT_FILE = "东方财富盘口分析规则.txt"
+
 _CHANNEL_FILE_GROUPS: dict[str, tuple[str, ...]] = {
     "bullish": (
         "上涨通道分析识别.txt",
@@ -988,6 +990,70 @@ class PromptAssembler:
             )
         lines.append(_KLINE_INDICATOR_NOTE)
         return "\n".join(lines)
+
+    @staticmethod
+    def _render_market_context_block(frame: KlineFrame) -> str:
+        """Render optional source-specific market data without analysis rules."""
+        context = getattr(frame, "market_context", None)
+        if not isinstance(context, dict) or context.get("provider") != "eastmoney":
+            return ""
+        bids = context.get("bids")
+        asks = context.get("asks")
+        bid_items = bids if isinstance(bids, list) else []
+        ask_items = asks if isinstance(asks, list) else []
+        if not bid_items and not ask_items:
+            return ""
+
+        def _item(items: list, index: int) -> tuple[str, str]:
+            if index >= len(items) or not isinstance(items[index], dict):
+                return "—", "—"
+            level = items[index]
+            try:
+                price = f"{float(level.get('price')):.4f}".rstrip("0").rstrip(".")
+            except (TypeError, ValueError):
+                price = "—"
+            try:
+                volume = str(max(0, int(level.get("volume_lots"))))
+            except (TypeError, ValueError):
+                volume = "—"
+            return price, volume
+
+        lines = [
+            "## 东方财富实时盘口（分析提交时快照）",
+            "",
+            (
+                f"股票：{context.get('name') or '—'} "
+                f"({context.get('code') or frame.symbol})；"
+                f"最新价：{context.get('last_price', '—')}；"
+                f"涨跌幅：{context.get('pct_chg', '—')}%；"
+                f"快照时间戳：{context.get('snapshot_ts_ms') or '—'}"
+            ),
+            (
+                f"买盘合计：{context.get('bid_total_lots', 0)}手；"
+                f"卖盘合计：{context.get('ask_total_lots', 0)}手；"
+                f"委比：{context.get('order_imbalance_pct', 0)}%"
+            ),
+            "",
+            "档位 | 买价 | 买量(手) | 卖价 | 卖量(手)",
+            "-----+------+----------+------+----------",
+        ]
+        depth = min(10, max(len(bid_items), len(ask_items)))
+        for index in range(depth):
+            bid_price, bid_volume = _item(bid_items, index)
+            ask_price, ask_volume = _item(ask_items, index)
+            lines.append(
+                f"{index + 1:<4} | {bid_price:<4} | {bid_volume:<8} | "
+                f"{ask_price:<4} | {ask_volume}"
+            )
+        return "\n".join(lines)
+
+    def _render_market_context_prompt(self, frame: KlineFrame) -> str:
+        """Conditionally combine prompt-engineering rules with live market data."""
+        data_block = self._render_market_context_block(frame)
+        if not data_block:
+            return ""
+        rules = self._load(EASTMONEY_ORDER_BOOK_PROMPT_FILE)
+        return f"{rules}\n\n---\n\n{data_block}"
 
     @staticmethod
     def _render_kline_feature_table(frame: KlineFrame, limit: int | None = None) -> str:
@@ -1279,6 +1345,7 @@ class PromptAssembler:
         kline_table = self._render_kline_table(frame)
         feature_table = self._render_kline_feature_table(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
+        market_context_block = self._render_market_context_prompt(frame)
         n_bars = len(frame.bars)
         if n_bars > 40:
             bg_window = f"**长程背景 K{n_bars}–K41**（较老部分）：\n"
@@ -1317,6 +1384,7 @@ class PromptAssembler:
             "不替代周期判断；基于当前 N 根已收盘 K 线，指标非全历史延续)\n\n"
             f"{feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
+            + (f"{market_context_block}\n\n" if market_context_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
             + f"请根据以上数据，严格输出阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
@@ -1410,6 +1478,7 @@ class PromptAssembler:
         """
         prefill_hint = self._render_program_prefill_hint(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
+        market_context_block = self._render_market_context_prompt(frame)
         if simple_features_block:
             simple_features_block = _MARKET_FEATURES_AUTHORITY_NOTE + simple_features_block
         n_bars = len(frame.bars)
@@ -1459,6 +1528,7 @@ class PromptAssembler:
             f"与前棒重叠/内包/ioi 以完整表为准)\n\n"
             f"{new_feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
+            + (f"{market_context_block}\n\n" if market_context_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
             + "请基于上方完整K线数据、上一轮结论和新增K线，严格输出更新后的阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
@@ -1673,6 +1743,7 @@ class PromptAssembler:
 
         n_bars = len(frame.bars)
         breakout_tick_hint = format_breakout_tick_hint(frame)
+        market_context_block = self._render_market_context_prompt(frame)
         prev_pred_block = self._render_previous_prediction(previous_record)
         compact_s1 = json.dumps(
             self._compact_stage1_for_stage2(stage1_json),
@@ -1711,6 +1782,8 @@ class PromptAssembler:
                 kline_block += f"{simple_features_block}\n\n"
             if breakout_tick_hint:
                 kline_block += f"{breakout_tick_hint}\n\n"
+        if market_context_block:
+            kline_block += f"{market_context_block}\n\n"
 
         kline_intro = (
             "完整 K 线表见上方阶段一用户消息。\n\n"
