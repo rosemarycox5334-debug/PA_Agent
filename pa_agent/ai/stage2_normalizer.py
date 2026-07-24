@@ -1812,5 +1812,9 @@ def normalize_stage2(
     decision = out.get("decision")
     if isinstance(decision, dict):
         _truncate_decision_reasoning(decision)
+        from pa_agent.util.trade_metrics import apply_decision_kelly_metrics
+
+        if apply_decision_kelly_metrics(decision):
+            logger.debug("Applied program-derived Kelly risk fraction")
 
     return out

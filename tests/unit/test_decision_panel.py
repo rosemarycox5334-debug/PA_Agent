@@ -77,6 +77,23 @@ def test_panel_no_prediction_hidden(panel: DecisionPanel):
     assert not panel._prediction_group.isVisible()
 
 
+def test_panel_renders_program_kelly_reference(panel: DecisionPanel):
+    decision = {
+        **_valid_no_order()["decision"],
+        "order_type": "限价单",
+        "order_direction": "做多",
+        "entry_price": 100.0,
+        "take_profit_price": 110.0,
+        "take_profit_price_2": 120.0,
+        "stop_loss_price": 90.0,
+        "estimated_win_rate": 60,
+    }
+    panel.set_decision(decision)
+    assert panel._kelly_inline_label.isVisible()
+    assert "全 20.0%" in panel._kelly_inline_label.text()
+    assert "半 10.0%" in panel._kelly_inline_label.text()
+
+
 def test_panel_unpredictable_renders_gray(panel: DecisionPanel):
     """unpredictable=true renders gray badge (R6.4)."""
     data = _valid_no_order()

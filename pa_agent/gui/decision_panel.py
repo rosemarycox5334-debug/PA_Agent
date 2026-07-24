@@ -5,6 +5,7 @@ from PyQt6.QtCore import Qt
 from typing import Any
 
 from pa_agent.util.trade_metrics import (
+    compute_decision_kelly,
     compute_risk_reward,
     format_estimated_win_rate,
     max_risk_reward_ratio,
@@ -212,8 +213,21 @@ class DecisionPanel(QWidget):
             "font-size: 13px; font-weight: bold; color: #a371f7;"
         )
 
+        self._kelly_inline_label = QLabel("—")
+        self._kelly_inline_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._kelly_inline_label.setStyleSheet(
+            "font-size: 13px; font-weight: bold; color: #e6b800;"
+        )
+        self._kelly_inline_label.setToolTip(
+            "凯利公式 f*=(b×p-(1-p))/b；这里是风险资金比例的数学参考，"
+            "不是自动仓位或投资建议。"
+        )
+
         bar_layout.addWidget(self._rr_inline_label, stretch=1)
         bar_layout.addWidget(self._win_rate_inline_label, stretch=1)
+        bar_layout.addWidget(self._kelly_inline_label, stretch=1)
         layout.addWidget(self._conclusion_bar)
 
         self._trade_summary_row = QWidget()
@@ -415,8 +429,10 @@ class DecisionPanel(QWidget):
     def _reset_conclusion_bar_side_labels(self) -> None:
         self._rr_inline_label.setText("—")
         self._win_rate_inline_label.setText("—")
+        self._kelly_inline_label.setText("—")
         self._rr_inline_label.setVisible(False)
         self._win_rate_inline_label.setVisible(False)
+        self._kelly_inline_label.setVisible(False)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -538,6 +554,29 @@ class DecisionPanel(QWidget):
             else:
                 self._win_rate_inline_label.setText("预估胜率  —")
             self._win_rate_inline_label.setVisible(True)
+
+            kelly = decision.get("kelly")
+            if not isinstance(kelly, dict):
+                kelly = compute_decision_kelly(decision)
+            if isinstance(kelly, dict):
+                full_pct = float(kelly.get("full_percent", 0.0) or 0.0)
+                half_pct = float(kelly.get("half_percent", 0.0) or 0.0)
+                positive = bool(kelly.get("positive_edge", False))
+                if positive:
+                    self._kelly_inline_label.setText(
+                        f"凯利风险  全 {full_pct:.1f}% / 半 {half_pct:.1f}%"
+                    )
+                    kelly_color = "#3fb950"
+                else:
+                    self._kelly_inline_label.setText("凯利风险  0%（无正优势）")
+                    kelly_color = "#f85149"
+                self._kelly_inline_label.setStyleSheet(
+                    f"color: {kelly_color}; font-size: 13px; font-weight: bold;"
+                )
+                self._kelly_inline_label.setVisible(True)
+            else:
+                self._kelly_inline_label.setText("凯利风险  —")
+                self._kelly_inline_label.setVisible(True)
 
             self._apply_trade_confidence_inline(
                 trade_conf, trade_conf_reasoning,
