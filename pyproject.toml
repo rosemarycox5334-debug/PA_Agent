@@ -32,6 +32,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+    # trade_logger 图表 PNG（飞书推送附图）需要；桌面版由 GUI 环境自带
+    "matplotlib>=3.8",
+]
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",

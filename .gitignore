@@ -8,7 +8,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-.venv/
+.venv
 venv/
 .pytest_cache/
 .ruff_cache/
@@ -87,3 +87,13 @@ docs/changelog/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 服务端 Docker 数据目录
+/data/
+
+# 镜像导出包
+*.tar.gz
+
+# 本地开发环境
+.venv
+.claude/

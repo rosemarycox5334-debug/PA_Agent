@@ -248,7 +248,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             "PA Agent — Trading Terminal（分析仅供参考，不构成投资建议）"
         )
-        self.resize(1440, 900)
+        self._resize_to_fit_screen()
         self._ctx = ctx
         self._worker: _AnalysisWorker | None = None
         self._analysis_worker_id: object | None = None
@@ -362,12 +362,17 @@ class MainWindow(QMainWindow):
         _feishu_action.triggered.connect(self._open_feishu_settings_dialog)
         menu_bar.addAction(_feishu_action)
 
-        # 3. 其他通用设置 — 点击直接弹对话框（无下拉）
+        # 3. 多品种轮巡监控 — 点击直接弹对话框（无下拉）
+        _watch_action = QAction("多品种轮巡监控", self)
+        _watch_action.triggered.connect(self._open_watch_rotation_dialog)
+        menu_bar.addAction(_watch_action)
+
+        # 4. 其他通用设置 — 点击直接弹对话框（无下拉）
         _general_action = QAction("其他通用设置", self)
         _general_action.triggered.connect(self._open_general_settings_dialog)
         menu_bar.addAction(_general_action)
 
-        # 4. 演示模式 — 保留下拉菜单
+        # 5. 演示模式 — 保留下拉菜单
         demo_menu = menu_bar.addMenu("演示模式")
         self._demo_manual_action = QAction("手动选择记录…", self)
         self._demo_manual_action.triggered.connect(lambda: self._on_demo_menu_action("manual"))
@@ -380,6 +385,24 @@ class MainWindow(QMainWindow):
         self._demo_exit_action.triggered.connect(self._exit_demo_mode)
         self._demo_exit_action.setEnabled(False)
         demo_menu.addAction(self._demo_exit_action)
+
+    def _resize_to_fit_screen(self) -> None:
+        """默认 1440×900；屏幕可用区域更小时收缩窗口并居中，避免超出屏幕."""
+        from PyQt6.QtGui import QGuiApplication
+
+        default_w, default_h = 1440, 900
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(default_w, default_h)
+            return
+        avail = screen.availableGeometry()
+        w = min(default_w, avail.width() - 24)
+        h = min(default_h, avail.height() - 24)
+        self.resize(w, h)
+        self.move(
+            avail.x() + (avail.width() - w) // 2,
+            avail.y() + (avail.height() - h) // 2,
+        )
 
     def _build_workbench(self) -> QWidget:
         """Build chart + AI sidebar workbench."""
@@ -424,7 +447,7 @@ class MainWindow(QMainWindow):
             self._data_source_combo.setCurrentIndex(ds_index)
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
-            "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）、"
+            "K 线数据来源：TradingView（tvDatafeed）、MT5（仅 Windows）、"
             "本地仅支持 MT5 与 TradingView"
         )
         self._data_source_combo.currentIndexChanged.connect(
@@ -1110,7 +1133,7 @@ class MainWindow(QMainWindow):
         elif kind in ("akshare", "eastmoney", "tushare"):
             line.setPlaceholderText("A股 6 位代码，如 600519；指数 000300 或 sh000300")
         else:
-            line.setPlaceholderText("输入 MT5 品种名，如 XAUUSDm…")
+            line.setPlaceholderText("输入品种名，如 XAUUSD…")
 
     def _populate_symbol_combo_for_source(self) -> None:
         """Refresh symbol suggestions for the active data source."""
@@ -4216,6 +4239,26 @@ class MainWindow(QMainWindow):
             settings = Settings()
 
         dlg = FeishuSettingsDialog(settings=settings, parent=self)
+        dlg.exec()
+
+    def _open_watch_rotation_dialog(self) -> None:
+        """打开多品种轮巡监控设置对话框."""
+        from pa_agent.gui.watch_rotation import WatchRotationController
+        from pa_agent.gui.watch_rotation_dialog import WatchRotationDialog
+        from pa_agent.config.settings import Settings
+
+        settings: Settings = self._ctx.settings  # type: ignore[assignment]
+        if settings is None:
+            settings = Settings()
+
+        controller = getattr(self, "_watch_rotation_controller", None)
+        if controller is None:
+            controller = WatchRotationController(self)
+            self._watch_rotation_controller = controller
+
+        dlg = WatchRotationDialog(
+            settings=settings, controller=controller, parent=self
+        )
         dlg.exec()
 
     def _open_general_settings_dialog(self) -> None:

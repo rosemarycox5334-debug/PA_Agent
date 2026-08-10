@@ -1,0 +1,24 @@
+# 镜像直载部署（无需源码构建）：先 docker load 导入镜像包，再 up -d
+#   docker load -i pa-agent-server-amd64.tar.gz
+#   docker compose -f docker-compose.image.yml up -d
+services:
+  pa-agent-server:
+    image: pa-agent-server:nas-amd64
+    container_name: pa-agent-server
+    ports:
+      - "8688:8688"
+    environment:
+      - TZ=Asia/Shanghai
+      # ── TradingView 连接超时时启用代理（改成你的代理地址后去掉 # ）──
+      # 地址写代理所在机器的局域网 IP（容器里 127.0.0.1 指容器自身，不要用）；
+      # 用 http:// 形式端口（如 Clash 的 7890 混合端口），不要写 socks5://
+      # - HTTPS_PROXY=http://192.168.1.100:7890
+      # - HTTP_PROXY=http://192.168.1.100:7890
+      # - NO_PROXY=localhost,127.0.0.1,api.deepseek.com,.eastmoney.com,.feishu.cn,open.feishu.cn
+    volumes:
+      - ./data/config:/app/config
+      - ./data/records:/app/records
+      - ./data/experience:/app/experience
+      - ./data/trade_records:/app/trade_records
+      - ./data/logs:/app/logs
+    restart: unless-stopped
