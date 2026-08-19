@@ -96,6 +96,10 @@ class AIModelSettingsDialog(QDialog):
         self._reasoning_effort_combo.addItems(["low", "medium", "high", "max"])
         form.addRow("Reasoning Effort:", self._reasoning_effort_combo)
 
+        self._max_output_tokens_edit = QLineEdit()
+        self._max_output_tokens_edit.setPlaceholderText("0 = 自动（按网关/模型）")
+        form.addRow("最大输出 Tokens:", self._max_output_tokens_edit)
+
         self._api_key_help_btn = QPushButton("小白点这里！获取程序无限Token，无限分析")
         self._api_key_help_btn.setStyleSheet(
             "QPushButton { font-size: 13pt; font-weight: bold; "
@@ -136,6 +140,7 @@ class AIModelSettingsDialog(QDialog):
         idx = self._reasoning_effort_combo.findText(p.reasoning_effort)
         if idx >= 0:
             self._reasoning_effort_combo.setCurrentIndex(idx)
+        self._max_output_tokens_edit.setText(str(p.max_output_tokens))
 
     def _on_save(self) -> None:
         p = self._settings.provider
@@ -186,6 +191,16 @@ class AIModelSettingsDialog(QDialog):
 
         p.thinking = self._thinking_check.isChecked()
         p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
+
+        raw_mot = self._max_output_tokens_edit.text().strip()
+        try:
+            mot = int(raw_mot) if raw_mot else 0
+            if mot < 0:
+                raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "最大输出 Tokens 无效", "「最大输出 Tokens」需为非负整数（0 = 自动）。")
+            return
+        p.max_output_tokens = mot
 
         save_settings(self._settings, SETTINGS_JSON_PATH)
         self.accept()

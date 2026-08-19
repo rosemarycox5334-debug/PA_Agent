@@ -103,6 +103,11 @@ def _number(row: Any, key: str, default: float = 0.0) -> float:
     return float(value)
 
 
+def _optional_number(row: Any, key: str) -> float | None:
+    value = _number(row, key, default=float("nan"))
+    return None if value != value else value
+
+
 def _df_to_bars_newest_first(df: Any, n: int) -> list[KlineBar]:
     if df is None or getattr(df, "empty", True):
         return []
@@ -130,6 +135,8 @@ def _df_to_bars_newest_first(df: Any, n: int) -> list[KlineBar]:
                     low=_number(row, "low"),
                     close=_number(row, "close"),
                     volume=vol,
+                    amount=_number(row, "amount"),
+                    pct_chg=_optional_number(row, "pct_chg"),
                     closed=True,
                 )
             )
@@ -154,8 +161,8 @@ class TushareSource(DataSource):
         token = self._configured_token()
         if not token:
             raise DataSourceTransientError(
-                "缺少 TUSHARE_TOKEN。请在 config/settings.json 的 tushare.token 填写，"
-                "或设置本机环境变量后重启 PA Agent。"
+                "缺少 TuShare Token。请打开「其他通用设置 → 数据来源」填写，"
+                "或设置本机环境变量 TUSHARE_TOKEN 后重启 PA Agent。"
             )
         try:
             import tushare as ts

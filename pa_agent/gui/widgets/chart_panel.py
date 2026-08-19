@@ -11,7 +11,7 @@ class ChartPanel(QWidget):
     Layout (vertical):
     - titlebar (symbol / timeframe / meta / status pill)
     - chart_widget (``ChartWidget``, stretch=1)
-    - legend (EMA lines + up/down colour key)
+    - legend (EMA/BOLL lines + up/down colour key)
     - footer (usage hints + live price read-out)
     """
 
@@ -78,11 +78,12 @@ class ChartPanel(QWidget):
         legend_layout.setSpacing(16)
 
         for text, color in [
-            ("EMA10（天蓝线）", "#7dd3fc"),
-            ("EMA20（金黄线）", "#fbbf24"),
-            ("EMA60（橙红线）", "#fb923c"),
-            ("涨（绿色）", "#22c55e"),
-            ("跌（红色）", "#ef4444"),
+            ("EMA10", "#7dd3fc"),
+            ("EMA20", "#fbbf24"),
+            ("EMA60", "#fb923c"),
+            ("BOLL20", "#818cf8"),
+            ("涨", "#22c55e"),
+            ("跌", "#ef4444"),
         ]:
             lbl = QLabel(text)
             lbl.setStyleSheet(
@@ -105,7 +106,7 @@ class ChartPanel(QWidget):
         footer_layout.setContentsMargins(14, 0, 14, 0)
         footer_layout.setSpacing(10)
 
-        self._footer_hint_text = "滚轮缩放 · 拖拽平移 · 当前为分析快照"
+        self._footer_hint_text = "移动查看K线详情 · 单击锁定/解除 · 滚轮缩放 · 拖拽平移"
         self._footer_left = QLabel(self._footer_hint_text)
         self._footer_left.setStyleSheet(
             "font-size: 11px; color: #8b949e;"

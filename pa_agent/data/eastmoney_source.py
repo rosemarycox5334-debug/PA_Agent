@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from pa_agent.data.ashare_common import (
@@ -39,12 +39,14 @@ from pa_agent.data.eastmoney_client import (
     fetch_spot_price,
     fetch_stock_daily,
     fetch_stock_minute,
+    fetch_stock_period,
     fetch_stock_period_recent,
     is_transient_http_error,
 )
 from pa_agent.data.kline_adjust import get_kline_adjust
 
 logger = logging.getLogger(__name__)
+_CN_TZ = timezone(timedelta(hours=8))
 
 _PRESET_SYMBOLS: tuple[str, ...] = (
     "000001",
@@ -106,6 +108,11 @@ class EastMoneySource(DataSource):
         self._snap_cache_n: int = 0
         self._snap_cache_ts: float = 0.0
         self._snap_cache_bars: list[KlineBar] = []
+        self._latest_order_book: Any | None = None
+        self._latest_order_book_ts_ms: int | None = None
+        self._latest_trades: list[Any] = []
+        self._latest_trades_ts_ms: int | None = None
+        self._date_range: tuple[date, date] | None = None
 
     def connect(self) -> None:
         self._connected = True
@@ -132,6 +139,69 @@ class EastMoneySource(DataSource):
     def supported_timeframes(self) -> list[str]:
         return list(_SUPPORTED_TIMEFRAMES)
 
+    @property
+    def date_range(self) -> tuple[date, date] | None:
+        """Return the active inclusive history filter, if any."""
+        return self._date_range
+
+    def set_date_range(
+        self,
+        start_date: date | str | None,
+        end_date: date | str | None,
+    ) -> None:
+        """Apply an inclusive date filter; pass two ``None`` values to clear it."""
+        if start_date is None and end_date is None:
+            normalized = None
+        elif start_date is None or end_date is None:
+            raise ValueError("开始日期和结束日期必须同时填写")
+        else:
+            start = self._coerce_date(start_date)
+            end = self._coerce_date(end_date)
+            if start > end:
+                raise ValueError("开始日期不能晚于结束日期")
+            normalized = (start, end)
+        if normalized == self._date_range:
+            return
+        self._date_range = normalized
+        self._clear_snapshot_cache()
+        logger.info("EastMoneySource date range: %s", normalized or "(recent bars)")
+
+    @staticmethod
+    def _coerce_date(value: date | str) -> date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return date.fromisoformat(str(value).strip())
+        except ValueError as exc:
+            raise ValueError("日期格式必须为 YYYY-MM-DD") from exc
+
+    def _clear_snapshot_cache(self) -> None:
+        self._snap_cache_bars = []
+        self._snap_cache_n = 0
+        self._snap_cache_ts = 0.0
+
+    def _range_includes_today(self) -> bool:
+        return self._date_range is None or self._date_range[1] >= _cn_now().date()
+
+    def _filter_rows_by_date(
+        self,
+        rows_asc: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if self._date_range is None:
+            return rows_asc
+        start, end = self._date_range
+        filtered: list[dict[str, Any]] = []
+        for row in rows_asc:
+            ts_ms = int(row.get("ts_open", 0) or 0)
+            if not ts_ms:
+                continue
+            row_date = datetime.fromtimestamp(ts_ms / 1000.0, tz=_CN_TZ).date()
+            if start <= row_date <= end:
+                filtered.append(row)
+        return filtered
+
     def subscribe(self, symbol: str, timeframe: str) -> None:
         if timeframe not in _SUPPORTED_TIMEFRAMES:
             raise ValueError(
@@ -142,8 +212,11 @@ class EastMoneySource(DataSource):
         if not code:
             raise ValueError("A股代码无效，请输入 6 位数字（如 600519）或指数 sh000300")
         if code != self._symbol or timeframe != self._timeframe:
-            self._snap_cache_bars = []
-            self._snap_cache_n = 0
+            self._clear_snapshot_cache()
+            self._latest_order_book = None
+            self._latest_order_book_ts_ms = None
+            self._latest_trades = []
+            self._latest_trades_ts_ms = None
         self._symbol = code
         self._timeframe = timeframe
         logger.info("EastMoneySource subscribed: %s %s", code, timeframe)
@@ -153,7 +226,110 @@ class EastMoneySource(DataSource):
         self._timeframe = ""
         self._snap_cache_bars = []
         self._snap_cache_n = 0
+        self._latest_order_book = None
+        self._latest_order_book_ts_ms = None
+        self._latest_trades = []
+        self._latest_trades_ts_ms = None
         logger.info("EastMoneySource unsubscribed")
+
+    def latest_order_book(self) -> Any | None:
+        """Return the order book cached by the latest background snapshot."""
+        return self._latest_order_book
+
+    def latest_trades(self) -> list[Any]:
+        """Return recent tick trades cached by the latest background snapshot."""
+        return list(self._latest_trades)
+
+    def latest_market_context(self) -> dict[str, Any] | None:
+        """Return JSON-safe East Money order-book and tick data for AI prompts."""
+        book = self._latest_order_book
+        trade_values = list(self._latest_trades[-40:])
+        if book is None and not trade_values:
+            return None
+
+        def _levels(items: object) -> list[dict[str, int | float]]:
+            values = list(items) if isinstance(items, (list, tuple)) else []
+            return [
+                {
+                    "level": index,
+                    "price": float(level.price),
+                    "volume_lots": int(level.volume),
+                }
+                for index, level in enumerate(values[:10], start=1)
+            ]
+
+        bids = _levels(getattr(book, "bids", None)) if book is not None else []
+        asks = _levels(getattr(book, "asks", None)) if book is not None else []
+        bid_total = sum(int(item["volume_lots"]) for item in bids)
+        ask_total = sum(int(item["volume_lots"]) for item in asks)
+        total = bid_total + ask_total
+        imbalance = ((bid_total - ask_total) / total * 100.0) if total else 0.0
+
+        trades = [
+            {
+                "time": str(getattr(trade, "time", "") or ""),
+                "price": float(getattr(trade, "price", 0.0) or 0.0),
+                "volume_lots": int(getattr(trade, "volume", 0) or 0),
+                "side": str(getattr(trade, "side_hint", "") or "—"),
+            }
+            for trade in trade_values
+        ]
+        active_buy_lots = sum(
+            int(trade["volume_lots"])
+            for trade in trades
+            if trade["side"] == "买"
+        )
+        active_sell_lots = sum(
+            int(trade["volume_lots"])
+            for trade in trades
+            if trade["side"] == "卖"
+        )
+        neutral_lots = sum(
+            int(trade["volume_lots"])
+            for trade in trades
+            if trade["side"] not in {"买", "卖"}
+        )
+        last_trade_price = float(trades[-1]["price"]) if trades else 0.0
+        snapshot_ts_ms = max(
+            self._latest_order_book_ts_ms or 0,
+            self._latest_trades_ts_ms or 0,
+        ) or None
+        return {
+            "provider": "eastmoney",
+            "snapshot_ts_ms": snapshot_ts_ms,
+            "trades_snapshot_ts_ms": self._latest_trades_ts_ms,
+            "code": str(
+                (getattr(book, "code", "") if book is not None else "")
+                or self._symbol
+            ),
+            "name": str(getattr(book, "name", "") if book is not None else ""),
+            "last_price": float(
+                (getattr(book, "price", 0.0) if book is not None else 0.0)
+                or last_trade_price
+            ),
+            "pct_chg": float(
+                getattr(book, "pct_chg", 0.0) if book is not None else 0.0
+            ),
+            "volume_unit": "手",
+            "bids": bids,
+            "asks": asks,
+            "bid_total_lots": bid_total,
+            "ask_total_lots": ask_total,
+            "order_imbalance_pct": round(imbalance, 2),
+            "depth_levels": int(
+                (getattr(book, "depth_levels", 5) if book is not None else 5)
+                or 5
+            ),
+            "depth_source": str(
+                getattr(book, "depth_source", "") if book is not None else ""
+            ),
+            "recent_trades": trades,
+            "trade_count": len(trades),
+            "active_buy_lots": active_buy_lots,
+            "active_sell_lots": active_sell_lots,
+            "neutral_trade_lots": neutral_lots,
+            "active_net_lots": active_buy_lots - active_sell_lots,
+        }
 
     def latest_snapshot(self, n: int) -> list[KlineBar]:
         if not self._connected:
@@ -185,17 +361,38 @@ class EastMoneySource(DataSource):
                 ) from exc
             raise DataSourceTransientError(f"东方财富拉取失败: {exc}") from exc
 
+        rows_asc = self._filter_rows_by_date(rows_asc)
         if not rows_asc:
+            range_hint = ""
+            if self._date_range is not None:
+                range_hint = (
+                    f"，日期 {self._date_range[0].isoformat()} "
+                    f"至 {self._date_range[1].isoformat()}"
+                )
             raise DataSourceTransientError(
-                f"东方财富未返回数据: {self._symbol} {self._timeframe}"
+                f"东方财富未返回数据: {self._symbol} {self._timeframe}{range_hint}"
             )
 
-        if self._timeframe == "1d" and _ashare_trading_day():
-            from pa_agent.data.eastmoney_client import fetch_stock_order_book
+        self._latest_order_book = None
+        self._latest_order_book_ts_ms = None
+        self._latest_trades = []
+        self._latest_trades_ts_ms = None
+        live_range = self._range_includes_today()
+        if live_range and not is_index_symbol(self._symbol):
+            from pa_agent.data.eastmoney_client import (
+                fetch_stock_order_book,
+                fetch_stock_tick_details,
+            )
 
-            book = None
-            if not is_index_symbol(self._symbol):
-                book = fetch_stock_order_book(self._symbol)
+            self._latest_order_book = fetch_stock_order_book(self._symbol)
+            if self._latest_order_book is not None:
+                self._latest_order_book_ts_ms = int(time.time() * 1000)
+            self._latest_trades = fetch_stock_tick_details(self._symbol, tail=40)
+            if self._latest_trades:
+                self._latest_trades_ts_ms = int(time.time() * 1000)
+
+        if live_range and self._timeframe == "1d" and _ashare_trading_day():
+            book = self._latest_order_book
             spot = (
                 float(book.price)
                 if book is not None and book.price > 0
@@ -211,9 +408,9 @@ class EastMoneySource(DataSource):
                 session_volume_lots=float(book.volume) if book else 0.0,
                 session_amount=float(book.amount) if book else 0.0,
             )
-        if self._timeframe == "1d" and _ashare_trading_day():
+        if live_range and self._timeframe == "1d" and _ashare_trading_day():
             self._apply_spot_to_forming(rows_asc)
-        elif _ashare_session_open():
+        elif live_range and _ashare_session_open():
             self._apply_spot_to_forming(rows_asc)
 
         # 收盘后（15:00之后）若数据源未返回当天日线，用盘口数据补一根已收盘K线
@@ -222,7 +419,9 @@ class EastMoneySource(DataSource):
 
         rows_newest = list(reversed(rows_asc[-fetch_n:]))
         for i, row in enumerate(rows_newest):
-            row["closed"] = not (i == 0 and _ashare_head_bar_live(self._timeframe))
+            row["closed"] = not (
+                live_range and i == 0 and _ashare_head_bar_live(self._timeframe)
+            )
 
         bars = _rows_to_kline_bars(rows_newest, n)
         self._snap_cache_n = n
@@ -233,6 +432,19 @@ class EastMoneySource(DataSource):
     def _fetch_history(self, symbol: str, timeframe: str, n: int) -> list[dict[str, Any]]:
         if timeframe in ("1d", "1w", "1M"):
             return self._fetch_daily(symbol, n, timeframe=timeframe)
+        if (
+            self._date_range is not None
+            and timeframe != "1m"
+            and not is_index_symbol(symbol)
+        ):
+            start, end = self._date_range
+            return fetch_minute_history_baostock(
+                symbol,
+                timeframe,
+                n,
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+            )
         if timeframe == "1m":
             if is_index_symbol(symbol):
                 cap = eastmoney_rolling_cap("1")
@@ -282,6 +494,26 @@ class EastMoneySource(DataSource):
         timeframe: str = "1d",
     ) -> list[dict[str, Any]]:
         adjust = get_kline_adjust()
+        if self._date_range is not None:
+            range_start, range_end = self._date_range
+            code = (
+                _index_symbol_for_api(symbol)
+                if is_index_symbol(symbol)
+                else normalize_ashare_symbol(symbol)
+            )
+            try:
+                raw = fetch_stock_period(
+                    code,
+                    timeframe=timeframe,
+                    start_date=range_start.strftime("%Y%m%d"),
+                    end_date=range_end.strftime("%Y%m%d"),
+                    adjust=adjust,
+                    is_index=is_index_symbol(symbol),
+                )
+                return _em_rows_to_bars_asc(raw)[-(n + 5) :]
+            except EastMoneyTransientError as exc:
+                raise DataSourceTransientError(str(exc)) from exc
+
         if is_index_symbol(symbol):
             end = _cn_now().strftime("%Y%m%d")
             cal_days = min(max(int(n * 1.45) + 25, 75), 420)
@@ -325,9 +557,14 @@ class EastMoneySource(DataSource):
             ) from exc
 
     def _fetch_minute(self, symbol: str, period: str, n: int) -> list[dict[str, Any]]:
-        end_dt = _cn_now()
-        days = max(30, (n // 4) + 15)
-        start_dt = end_dt - timedelta(days=days)
+        if self._date_range is not None:
+            range_start, range_end = self._date_range
+            start_dt = datetime.combine(range_start, datetime.min.time(), tzinfo=_CN_TZ)
+            end_dt = datetime.combine(range_end, datetime.max.time(), tzinfo=_CN_TZ)
+        else:
+            end_dt = _cn_now()
+            days = max(30, (n // 4) + 15)
+            start_dt = end_dt - timedelta(days=days)
         start_s = start_dt.strftime("%Y-%m-%d 09:30:00")
         end_s = end_dt.strftime("%Y-%m-%d 15:00:00")
         code = normalize_ashare_symbol(symbol)
@@ -373,9 +610,8 @@ class EastMoneySource(DataSource):
 
         if daily:
             from pa_agent.data.ashare_common import apply_session_quote_to_forming_row
-            from pa_agent.data.eastmoney_client import fetch_stock_order_book, fetch_spot_price
 
-            book = fetch_stock_order_book(self._symbol)
+            book = self._latest_order_book
             if book is not None and book.price > 0:
                 apply_session_quote_to_forming_row(
                     last,
@@ -397,9 +633,12 @@ class EastMoneySource(DataSource):
             apply_session_quote_to_forming_row(last, price=price, daily=True)
             return
 
-        from pa_agent.data.eastmoney_client import fetch_spot_price
-
-        price = fetch_spot_price(self._symbol)
+        book = self._latest_order_book
+        price = (
+            float(book.price)
+            if book is not None and book.price > 0
+            else fetch_spot_price(self._symbol)
+        )
         if price is None:
             return
         from pa_agent.data.ashare_common import apply_session_quote_to_forming_row

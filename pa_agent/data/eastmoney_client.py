@@ -444,6 +444,30 @@ def fetch_stock_period_recent(
     return _fetch_kline_resilient(params)
 
 
+def fetch_stock_period(
+    symbol: str,
+    *,
+    timeframe: str,
+    start_date: str,
+    end_date: str,
+    adjust: str = "qfq",
+    is_index: bool = False,
+) -> list[dict[str, Any]]:
+    """Fetch daily / weekly / monthly bars inside an inclusive date range."""
+    klt = _KLT_MAP.get(timeframe, "101")
+    params = _daily_kline_params(
+        symbol,
+        adjust=adjust,
+        klt=klt,
+        beg=start_date,
+        end=end_date,
+    )
+    if is_index:
+        params["secid"] = index_secid(symbol)
+        params["fqt"] = "0"
+    return _fetch_kline(params)
+
+
 def fetch_stock_daily_resilient(
     symbol: str,
     *,

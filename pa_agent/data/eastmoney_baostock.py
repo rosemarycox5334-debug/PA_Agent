@@ -229,13 +229,22 @@ def fetch_minute_history_baostock(
     symbol: str,
     timeframe: str,
     n: int,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch ascending OHLCV dict rows (ts_open ms) from Baostock."""
     if is_index_symbol(symbol):
         raise DataSourceTransientError("Baostock 不提供指数分钟线，请使用日线 1d")
 
     if timeframe == "4h":
-        hourly = fetch_minute_history_baostock(symbol, "1h", n * 4 + 8)
+        hourly = fetch_minute_history_baostock(
+            symbol,
+            "1h",
+            n * 4 + 8,
+            start_date=start_date,
+            end_date=end_date,
+        )
         return _resample_rows_to_4h(hourly)[-n:]
 
     freq = _BAOSTOCK_FREQ.get(timeframe)
@@ -243,9 +252,12 @@ def fetch_minute_history_baostock(
         raise DataSourceTransientError(f"Baostock 不支持周期: {timeframe}")
 
     code = _baostock_code(symbol)
-    end = _cn_now().strftime("%Y-%m-%d")
-    days = _calendar_days_for_bars(n if timeframe != "4h" else n * 4)
-    start = (_cn_now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    end = end_date or _cn_now().strftime("%Y-%m-%d")
+    if start_date:
+        start = start_date
+    else:
+        days = _calendar_days_for_bars(n if timeframe != "4h" else n * 4)
+        start = (_cn_now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
     import baostock as bs
 

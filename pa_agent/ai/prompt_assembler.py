@@ -22,6 +22,12 @@ from pa_agent.ai.market_features import (
 )
 from pa_agent.data.base import KlineFrame
 from pa_agent.data.datetime_ts import format_epoch_for_display
+from pa_agent.indicators.bollinger import (
+    DEFAULT_BOLL_PERIOD,
+    DEFAULT_BOLL_STDDEV,
+    bollinger_full,
+)
+from pa_agent.indicators.ema import ema_full
 from pa_agent.records.schema import AnalysisRecord
 
 logger = logging.getLogger(__name__)
@@ -769,6 +775,8 @@ STAGE1_TASK_PROMPT_TXT_FILES: tuple[str, ...] = (
     "文件16-K线信号识别.txt",
 )
 
+EASTMONEY_ORDER_BOOK_PROMPT_FILE = "东方财富盘口分析规则.txt"
+
 _CHANNEL_FILE_GROUPS: dict[str, tuple[str, ...]] = {
     "bullish": (
         "上涨通道分析识别.txt",
@@ -993,6 +1001,164 @@ class PromptAssembler:
             )
         lines.append(_KLINE_INDICATOR_NOTE)
         return "\n".join(lines)
+
+    def _bollinger_params(self) -> tuple[int, float]:
+        """Return validated BOLL parameters shared with the chart controls."""
+        cfg = self._prompt_settings
+        try:
+            period = int(getattr(cfg, "boll_period", DEFAULT_BOLL_PERIOD))
+        except (TypeError, ValueError):
+            period = DEFAULT_BOLL_PERIOD
+        try:
+            stddev = float(getattr(cfg, "boll_stddev", DEFAULT_BOLL_STDDEV))
+        except (TypeError, ValueError):
+            stddev = DEFAULT_BOLL_STDDEV
+        period = max(2, min(500, period))
+        if not math.isfinite(stddev):
+            stddev = DEFAULT_BOLL_STDDEV
+        stddev = max(0.1, min(10.0, stddev))
+        return period, stddev
+
+    @staticmethod
+    def _format_chart_indicator(value: float) -> str:
+        return "N/A" if math.isnan(value) else f"{value:.4f}"
+
+    def _render_chart_indicator_table(
+        self,
+        frame: KlineFrame,
+        limit: int | None = None,
+    ) -> str:
+        """Render the same EMA/BOLL values visible on the chart for AI analysis."""
+        bars = frame.bars
+        closes = [bar.close for bar in reversed(bars)]
+        period, stddev = self._bollinger_params()
+
+        ema10 = ema_full(closes, 10)
+        if len(frame.indicators.ema20) == len(bars):
+            ema20 = list(reversed(frame.indicators.ema20))
+        else:
+            ema20 = ema_full(closes, 20)
+        ema60 = ema_full(closes, 60)
+        middle, upper, lower = bollinger_full(
+            closes,
+            period=period,
+            stddev=stddev,
+        )
+
+        series_newest_first = tuple(
+            list(reversed(values))
+            for values in (ema10, ema20, ema60, middle, upper, lower)
+        )
+        shown_bars = bars[:limit] if limit is not None else bars
+        lines = [
+            "## 图表技术指标（与当前图表参数一致，提交给 AI 作为辅助分析依据）",
+            "",
+            f"参数：EMA10 / EMA20 / EMA60；BOLL(N={period}, K={stddev:g})；"
+            "中轨=SMA(N)，上下轨=中轨±K×总体标准差。",
+            "序号 | EMA10 | EMA20 | EMA60 | BOLL中轨 | BOLL上轨 | BOLL下轨 | 收盘位置",
+            "-----+-------+-------+-------+----------+----------+----------+---------",
+        ]
+        for index, bar in enumerate(shown_bars):
+            values = [series[index] for series in series_newest_first]
+            boll_middle, boll_upper, boll_lower = values[3:]
+            if any(math.isnan(value) for value in (boll_middle, boll_upper, boll_lower)):
+                position = "N/A"
+            elif bar.close >= boll_upper:
+                position = "上轨及上方"
+            elif bar.close >= boll_middle:
+                position = "中轨至上轨"
+            elif bar.close > boll_lower:
+                position = "下轨至中轨"
+            else:
+                position = "下轨及下方"
+            formatted = [self._format_chart_indicator(value) for value in values]
+            lines.append(
+                f"K{bar.seq} | {formatted[0]} | {formatted[1]} | {formatted[2]} | "
+                f"{formatted[3]} | {formatted[4]} | {formatted[5]} | {position}"
+            )
+        lines.append(
+            "说明：EMA10/EMA60 与 BOLL 基于当前完整已收盘 K 线窗口计算；"
+            "窗口不足相应周期时显示 N/A。指标只能辅助判断趋势和波动位置，"
+            "不得脱离价格行为结构单独作为下单依据。"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_market_context_block(frame: KlineFrame) -> str:
+        """Render optional source-specific market data without analysis rules."""
+        context = getattr(frame, "market_context", None)
+        if not isinstance(context, dict) or context.get("provider") != "eastmoney":
+            return ""
+        bids = context.get("bids")
+        asks = context.get("asks")
+        trades = context.get("recent_trades")
+        bid_items = bids if isinstance(bids, list) else []
+        ask_items = asks if isinstance(asks, list) else []
+        trade_items = trades if isinstance(trades, list) else []
+        if not bid_items and not ask_items and not trade_items:
+            return ""
+
+        lines: list[str] = [
+            "## 东方财富实时盘口（分析提交时快照）",
+            "",
+            (
+                f"股票：{context.get('name') or '—'} "
+                f"({context.get('code') or frame.symbol})；"
+                f"最新价：{context.get('last_price', '—')}；"
+                f"涨跌幅：{context.get('pct_chg', '—')}%；"
+                f"快照时间戳：{context.get('snapshot_ts_ms') or '—'}"
+            ),
+        ]
+        if bid_items or ask_items:
+            # Never expose individual bid/ask levels or their volume totals.
+            lines.append(f"委比：{context.get('order_imbalance_pct', 0)}%")
+
+        if trade_items:
+            shown_trades = trade_items[-20:]
+            lines.extend(
+                [
+                    "",
+                    "### 最近成交明细（按时间升序）",
+                    (
+                        f"最近{len(shown_trades)}笔："
+                        f"主买{context.get('active_buy_lots', 0)}手；"
+                        f"主卖{context.get('active_sell_lots', 0)}手；"
+                        f"中性/竞价{context.get('neutral_trade_lots', 0)}手；"
+                        f"主买净额{context.get('active_net_lots', 0):+}手"
+                    ),
+                    "",
+                    "时间 | 成交价 | 成交量(手) | 方向",
+                    "-----+--------+------------+------",
+                ]
+            )
+            for trade in shown_trades:
+                if not isinstance(trade, dict):
+                    continue
+                try:
+                    price = (
+                        f"{float(trade.get('price')):.4f}"
+                        .rstrip("0")
+                        .rstrip(".")
+                    )
+                except (TypeError, ValueError):
+                    price = "—"
+                try:
+                    volume = str(max(0, int(trade.get("volume_lots"))))
+                except (TypeError, ValueError):
+                    volume = "—"
+                lines.append(
+                    f"{trade.get('time') or '—'} | {price} | "
+                    f"{volume} | {trade.get('side') or '—'}"
+                )
+        return "\n".join(lines)
+
+    def _render_market_context_prompt(self, frame: KlineFrame) -> str:
+        """Conditionally combine prompt-engineering rules with live market data."""
+        data_block = self._render_market_context_block(frame)
+        if not data_block:
+            return ""
+        rules = self._load(EASTMONEY_ORDER_BOOK_PROMPT_FILE)
+        return f"{rules}\n\n---\n\n{data_block}"
 
     @staticmethod
     def _render_kline_feature_table(frame: KlineFrame, limit: int | None = None) -> str:
@@ -1282,8 +1448,10 @@ class PromptAssembler:
         ]
         stage1_context = "\n\n---\n\n".join(p for p in stage1_parts if p)
         kline_table = self._render_kline_table(frame)
+        chart_indicator_table = self._render_chart_indicator_table(frame)
         feature_table = self._render_kline_feature_table(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
+        market_context_block = self._render_market_context_prompt(frame)
         n_bars = len(frame.bars)
         if n_bars > 40:
             bg_window = f"**长程背景 K{n_bars}–K41**（较老部分）：\n"
@@ -1318,10 +1486,12 @@ class PromptAssembler:
             f"## K线数据(序号1=最新已收盘K线,序号越大越早;不含当前未收盘K线;"
             f"阳阴列由程序按收盘价与开盘价计算:收盘>开盘=阳线,收盘<开盘=阴线,相等=平)\n\n"
             f"{kline_table}\n\n"
+            f"{chart_indicator_table}\n\n"
             "## K线几何特征(程序预计算；「类型」列为单字段 bar_type，判定优先级：inside/outside > doji/trend/flat/other；"
             "不替代周期判断；基于当前 N 根已收盘 K 线，指标非全历史延续)\n\n"
             f"{feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
+            + (f"{market_context_block}\n\n" if market_context_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
             + f"请根据以上数据，严格输出阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
@@ -1349,6 +1519,7 @@ class PromptAssembler:
         new_kline_table = self._render_kline_table(frame, limit=new_count)
         new_feature_table = self._render_kline_feature_table(frame, limit=new_count)
         full_kline_table = self._render_kline_table(frame)
+        chart_indicator_table = self._render_chart_indicator_table(frame)
         full_feature_table = self._render_kline_feature_table(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
         previous_summary = {
@@ -1389,6 +1560,7 @@ class PromptAssembler:
             f"{new_feature_table}\n\n"
             f"## 当前完整 K线数据(共{n_bars}根，用于必要时复核整体结构；含阳阴列)\n\n"
             f"{full_kline_table}\n\n"
+            f"{chart_indicator_table}\n\n"
             f"## 当前完整 K线几何特征(用于逐棒辅助，不替代周期判断；"
             f"基于当前 N 根已收盘 K 线，指标非全历史延续)\n\n"
             f"{full_feature_table}\n\n"
@@ -1415,11 +1587,13 @@ class PromptAssembler:
         """
         prefill_hint = self._render_program_prefill_hint(frame)
         simple_features_block = self._render_simple_market_features_block(frame)
+        market_context_block = self._render_market_context_prompt(frame)
         if simple_features_block:
             simple_features_block = _MARKET_FEATURES_AUTHORITY_NOTE + simple_features_block
         n_bars = len(frame.bars)
         new_count = max(0, min(new_bar_count, n_bars))
         new_kline_table = self._render_kline_table(frame, limit=new_count)
+        chart_indicator_table = self._render_chart_indicator_table(frame)
         new_feature_table = self._render_kline_feature_table(frame, limit=new_count)
         previous_summary = {
             "meta": previous_record.meta.model_dump(),
@@ -1460,10 +1634,12 @@ class PromptAssembler:
             f"```json\n{json.dumps(previous_summary, ensure_ascii=False, indent=2)}\n```\n\n"
             f"## 新增 K线数据(共{new_count}根，序号1=最新已收盘；含阳阴列)\n\n"
             f"{new_kline_table}\n\n"
+            f"{chart_indicator_table}\n\n"
             f"## 新增 K线几何特征(共{new_count}根；多棒形态按完整{n_bars}根窗口计算，"
             f"与前棒重叠/内包/ioi 以完整表为准)\n\n"
             f"{new_feature_table}\n\n"
             + (f"{simple_features_block}\n\n" if simple_features_block else "")
+            + (f"{market_context_block}\n\n" if market_context_block else "")
             + (f"{prefill_hint}\n\n" if prefill_hint else "")
             + "请基于上方完整K线数据、上一轮结论和新增K线，严格输出更新后的阶段一 JSON 诊断结果。\n\n"
             f"{_STAGE1_TAIL_REMINDER}"
@@ -1678,6 +1854,8 @@ class PromptAssembler:
 
         n_bars = len(frame.bars)
         breakout_tick_hint = format_breakout_tick_hint(frame)
+        market_context_block = self._render_market_context_prompt(frame)
+        chart_indicator_table = self._render_chart_indicator_table(frame)
         prev_pred_block = self._render_previous_prediction(previous_record)
         compact_s1 = json.dumps(
             self._compact_stage1_for_stage2(stage1_json),
@@ -1716,6 +1894,9 @@ class PromptAssembler:
                 kline_block += f"{simple_features_block}\n\n"
             if breakout_tick_hint:
                 kline_block += f"{breakout_tick_hint}\n\n"
+        kline_block += f"{chart_indicator_table}\n\n"
+        if market_context_block:
+            kline_block += f"{market_context_block}\n\n"
 
         kline_intro = (
             "完整 K 线表见上方阶段一用户消息。\n\n"

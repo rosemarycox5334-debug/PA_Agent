@@ -128,6 +128,29 @@ class GeneralSettingsDialog(QDialog):
 
         form_layout.addWidget(analysis_group)
 
+        # ── 数据来源 ──────────────────────────────────────────────────────────
+        data_group = QGroupBox("数据来源")
+        data_form = QFormLayout(data_group)
+
+        tushare_token_row = QHBoxLayout()
+        self._tushare_token_edit = QLineEdit()
+        self._tushare_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._tushare_token_edit.setPlaceholderText("选择 TuShare 数据源时必填")
+        self._tushare_token_edit.setToolTip(
+            "填写 tushare.pro 个人中心中的 Token。也可通过环境变量 TUSHARE_TOKEN 配置。"
+        )
+        tushare_token_row.addWidget(self._tushare_token_edit)
+        self._show_tushare_token_btn = QPushButton("显示")
+        self._show_tushare_token_btn.setCheckable(True)
+        self._show_tushare_token_btn.setFixedWidth(52)
+        self._show_tushare_token_btn.toggled.connect(
+            self._toggle_tushare_token_visibility
+        )
+        tushare_token_row.addWidget(self._show_tushare_token_btn)
+        data_form.addRow("TuShare Token:", tushare_token_row)
+
+        form_layout.addWidget(data_group)
+
         # ── 图表与界面 ────────────────────────────────────────────────────────
         ui_group = QGroupBox("图表与界面")
         ui_form = QFormLayout(ui_group)
@@ -231,6 +254,7 @@ class GeneralSettingsDialog(QDialog):
         )
         self._last_symbol_edit.setText(g.last_symbol)
         self._last_timeframe_edit.setText(g.last_timeframe)
+        self._tushare_token_edit.setText(self._settings.tushare.token)
 
         self._refresh_interval_spin.setValue(g.refresh_interval_ms)
         self._auto_resume_chart_check.setChecked(
@@ -263,6 +287,7 @@ class GeneralSettingsDialog(QDialog):
         g.cancel_keep_analysis_on_retry = self._cancel_keep_on_retry_check.isChecked()
         g.last_symbol = self._last_symbol_edit.text().strip()
         g.last_timeframe = self._last_timeframe_edit.text().strip()
+        self._settings.tushare.token = self._tushare_token_edit.text().strip()
 
         g.refresh_interval_ms = self._refresh_interval_spin.value()
         g.auto_resume_chart_after_analysis = self._auto_resume_chart_check.isChecked()
@@ -281,6 +306,12 @@ class GeneralSettingsDialog(QDialog):
 
     def set_decision_flow_play_handler(self, handler: Callable[[], None] | None) -> None:
         self._decision_flow_play_handler = handler
+
+    def _toggle_tushare_token_visibility(self, checked: bool) -> None:
+        self._tushare_token_edit.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+        )
+        self._show_tushare_token_btn.setText("隐藏" if checked else "显示")
 
     def _on_alert_on_order_changed(self, _state: int) -> None:
         if not self._alert_on_order_check.isChecked():

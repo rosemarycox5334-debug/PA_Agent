@@ -5,11 +5,13 @@ import logging
 import sys
 from typing import Any
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal, QObject
+from PyQt6.QtCore import QDate, QThread, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QAction, QCloseEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDateEdit,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -35,6 +37,37 @@ logger = logging.getLogger(__name__)
 
 # Zombie timeout in milliseconds (5 seconds)
 _WORKER_JOIN_TIMEOUT_MS = 5000
+
+# UI widths below are authored for a 1920 logical-pixel desktop.  Qt already
+# converts physical pixels according to the operating-system DPI setting, so
+# availableGeometry() is the right input here (rather than devicePixelRatio()).
+_REFERENCE_SCREEN_WIDTH = 1920
+_MIN_UI_WIDTH_SCALE = 0.72
+
+
+def _ui_width_scale(available_width: int) -> float:
+    """Return a bounded width scale for the current screen's logical pixels."""
+    if available_width <= 0:
+        return 1.0
+    return max(
+        _MIN_UI_WIDTH_SCALE,
+        min(1.0, available_width / _REFERENCE_SCREEN_WIDTH),
+    )
+
+
+def _fit_dimension_to_screen(
+    available: int,
+    *,
+    preferred: int,
+    floor: int,
+    margin: int = 64,
+) -> int:
+    """Choose an initial window dimension that stays inside available space."""
+    if available <= 0:
+        return preferred
+    usable = max(1, available - margin)
+    target = max(min(floor, available), min(preferred, usable))
+    return min(target, available)
 
 
 def _qobject_alive(obj: QObject | None) -> bool:
@@ -248,8 +281,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             "PA Agent — Trading Terminal（分析仅供参考，不构成投资建议）"
         )
-        self.resize(1440, 900)
         self._ctx = ctx
+        self._screen_change_connected = False
         self._worker: _AnalysisWorker | None = None
         self._analysis_worker_id: object | None = None
         self._prep_worker: Any = None
@@ -295,6 +328,8 @@ class MainWindow(QMainWindow):
         self._status_bar: QStatusBar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._setup_ui()
+        self._apply_responsive_dimensions()
+        self._fit_window_to_screen(initial=True)
         self._connect_event_bus()
         self._update_ai_mode_label()
         self._sync_submit_button_state()
@@ -390,9 +425,15 @@ class MainWindow(QMainWindow):
         outer_layout.setContentsMargins(8, 8, 8, 8)
         outer_layout.setSpacing(6)
 
-        # ── Control bar ───────────────────────────────────────────────────────
+        # ── Responsive control bars ───────────────────────────────────────────
+        # Keep data selectors on the first row and all fetch/analysis/chart
+        # actions on the second row at every screen width.
         ctrl_layout = QHBoxLayout()
         ctrl_layout.setSpacing(8)
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(6)
+        self._primary_controls_layout = ctrl_layout
+        self._action_controls_layout = action_layout
 
         _settings = getattr(self._ctx, "settings", None)
         _last_symbol = "000001"
@@ -424,8 +465,8 @@ class MainWindow(QMainWindow):
             self._data_source_combo.setCurrentIndex(ds_index)
         self._data_source_combo.setMinimumWidth(108)
         self._data_source_combo.setToolTip(
-            "K 线数据来源：东方财富(A股)（默认，HTTP 直连）、"
-            "MT5（需终端登录）、TradingView（tvDatafeed）"
+            "K 线数据来源：MT5、TradingView、AkShare、东方财富、TuShare；"
+            "TuShare 使用前需在「其他通用设置」中填写 Token"
         )
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed
@@ -531,6 +572,41 @@ class MainWindow(QMainWindow):
         self._populate_timeframe_combo_for_source()
         self._sync_tv_exchange_visibility()
 
+        # Optional inclusive history range, available only for East Money A-shares.
+        self._eastmoney_date_filter_checkbox = QCheckBox("日期筛选")
+        self._eastmoney_date_filter_checkbox.setToolTip(
+            "仅获取所选开始日期至结束日期（包含首尾日期）的 K 线"
+        )
+        self._eastmoney_date_start_label = QLabel("从:")
+        self._eastmoney_date_start = QDateEdit()
+        self._eastmoney_date_start.setDisplayFormat("yyyy-MM-dd")
+        self._eastmoney_date_start.setCalendarPopup(True)
+        self._eastmoney_date_start.setDate(QDate.currentDate().addMonths(-1))
+        self._eastmoney_date_start.setMaximumDate(QDate.currentDate())
+        self._eastmoney_date_end_label = QLabel("到:")
+        self._eastmoney_date_end = QDateEdit()
+        self._eastmoney_date_end.setDisplayFormat("yyyy-MM-dd")
+        self._eastmoney_date_end.setCalendarPopup(True)
+        self._eastmoney_date_end.setDate(QDate.currentDate())
+        self._eastmoney_date_end.setMaximumDate(QDate.currentDate())
+        self._eastmoney_date_end.setMinimumDate(self._eastmoney_date_start.date())
+        self._eastmoney_date_start.dateChanged.connect(
+            self._eastmoney_date_end.setMinimumDate
+        )
+        self._eastmoney_date_filter_checkbox.toggled.connect(
+            self._on_eastmoney_date_filter_toggled
+        )
+        for widget in (
+            self._eastmoney_date_filter_checkbox,
+            self._eastmoney_date_start_label,
+            self._eastmoney_date_start,
+            self._eastmoney_date_end_label,
+            self._eastmoney_date_end,
+        ):
+            ctrl_layout.addWidget(widget)
+        self._on_eastmoney_date_filter_toggled(False)
+        self._sync_eastmoney_date_filter_visibility()
+
         ctrl_layout.addStretch()
 
         self._fetch_data_btn = QPushButton("获取数据")
@@ -538,7 +614,7 @@ class MainWindow(QMainWindow):
         self._fetch_data_btn.setMinimumWidth(90)
         self._fetch_data_btn.setToolTip("开始从当前数据源持续拉取 K 线数据并实时更新图表")
         self._fetch_data_btn.clicked.connect(self._on_fetch_data_clicked)
-        ctrl_layout.addWidget(self._fetch_data_btn)
+        action_layout.addWidget(self._fetch_data_btn)
 
         self._wait_close_checkbox = QCheckBox("等待最新K线收盘后再提交分析")
         self._wait_close_checkbox.setObjectName("waitCloseCheckbox")
@@ -547,18 +623,20 @@ class MainWindow(QMainWindow):
             "勾选后，点击提交分析将先等待当前未收盘K线走完，再抓取数据并开始分析"
         )
         self._wait_close_checkbox.stateChanged.connect(self._on_wait_close_checkbox_changed)
-        ctrl_layout.addWidget(self._wait_close_checkbox)
+        action_layout.addWidget(self._wait_close_checkbox)
 
         self._wait_close_countdown_label = QLabel("")
         self._wait_close_countdown_label.setObjectName("mutedLabel")
-        self._wait_close_countdown_label.setMinimumWidth(100)
-        ctrl_layout.addWidget(self._wait_close_countdown_label)
+        # Stay compact while empty so the clickable controls can keep enough
+        # width to render their full labels.
+        self._wait_close_countdown_label.setMinimumWidth(0)
+        action_layout.addWidget(self._wait_close_countdown_label)
 
         self._submit_btn = QPushButton("提交分析")
         self._submit_btn.setObjectName("primaryButton")
         self._submit_btn.setMinimumWidth(100)
         self._submit_btn.clicked.connect(self._on_submit_analysis)
-        ctrl_layout.addWidget(self._submit_btn)
+        action_layout.addWidget(self._submit_btn)
 
         # Incremental button is kept for programmatic use but hidden from the
         # toolbar — the submit button's label changes to "增量分析" automatically
@@ -586,7 +664,7 @@ class MainWindow(QMainWindow):
             "勾选后，每当有新的K线收盘时自动开始新一轮分析"
         )
         self._keep_analysis_checkbox.stateChanged.connect(self._on_keep_analysis_checkbox_changed)
-        ctrl_layout.addWidget(self._keep_analysis_checkbox)
+        action_layout.addWidget(self._keep_analysis_checkbox)
 
         # Reset persisted keep_analysis flag so future restarts also start unchecked
         if _settings is not None:
@@ -601,24 +679,90 @@ class MainWindow(QMainWindow):
             "恢复 K 线实时刷新；最右侧未收盘 K 线为浅色空心 K 线，不参与 AI 分析"
         )
         self._resume_chart_btn.clicked.connect(self._on_resume_chart_refresh)
-        ctrl_layout.addWidget(self._resume_chart_btn)
+        action_layout.addWidget(self._resume_chart_btn)
 
         self._fit_chart_btn = QPushButton("恢复图表")
         self._fit_chart_btn.setToolTip(
             "自动调整图表缩放，将 K 线和价格线适配到可视区域"
         )
         self._fit_chart_btn.clicked.connect(self._on_fit_chart)
-        ctrl_layout.addWidget(self._fit_chart_btn)
+        action_layout.addWidget(self._fit_chart_btn)
+
+        self._eastmoney_market_panel_toggle = QPushButton("隐藏盘口/成交")
+        self._eastmoney_market_panel_toggle.setCheckable(True)
+        self._eastmoney_market_panel_toggle.setChecked(True)
+        self._eastmoney_market_panel_toggle.setMinimumWidth(112)
+        self._eastmoney_market_panel_toggle.setToolTip(
+            "显示或隐藏东方财富盘口与成交明细；隐藏后 K 线图自动扩展"
+        )
+        self._eastmoney_market_panel_toggle.toggled.connect(
+            self._on_eastmoney_market_panel_toggled
+        )
+        action_layout.addWidget(self._eastmoney_market_panel_toggle)
 
         self._decision_badge = QLabel("")
         self._decision_badge.setObjectName("mutedLabel")
-        ctrl_layout.addWidget(self._decision_badge)
+        self._decision_badge.setMinimumWidth(0)
+        action_layout.addWidget(self._decision_badge)
 
         self._ai_mode_label = QLabel("")
         self._ai_mode_label.setObjectName("mutedLabel")
-        ctrl_layout.addWidget(self._ai_mode_label)
+        self._ai_mode_label.setMinimumWidth(0)
+        self._ai_mode_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        action_layout.addWidget(self._ai_mode_label, stretch=1)
+        self._action_control_widgets = (
+            self._fetch_data_btn,
+            self._wait_close_checkbox,
+            self._wait_close_countdown_label,
+            self._submit_btn,
+            self._keep_analysis_checkbox,
+            self._resume_chart_btn,
+            self._fit_chart_btn,
+            self._eastmoney_market_panel_toggle,
+            self._decision_badge,
+            self._ai_mode_label,
+        )
+        self._controls_compact = True
 
         outer_layout.addLayout(ctrl_layout)
+        outer_layout.addLayout(action_layout)
+
+        # ── Chart indicator controls ─────────────────────────────────────────
+        indicator_layout = QHBoxLayout()
+        indicator_layout.setSpacing(8)
+        self._indicator_controls_layout = indicator_layout
+        indicator_layout.addWidget(QLabel("图表指标：EMA10 / EMA20 / EMA60 · BOLL"))
+        indicator_layout.addStretch(1)
+
+        indicator_layout.addWidget(QLabel("BOLL周期 N:"))
+        self._boll_period_spin = QSpinBox()
+        self._boll_period_spin.setRange(2, 500)
+        self._boll_period_spin.setValue(
+            int(getattr(getattr(_settings, "prompt", None), "boll_period", 20))
+        )
+        self._boll_period_spin.setMaximumWidth(80)
+        self._boll_period_spin.setToolTip(
+            "布林带移动平均周期；图表与提交给 AI 的指标表使用同一参数"
+        )
+        indicator_layout.addWidget(self._boll_period_spin)
+
+        indicator_layout.addWidget(QLabel("标准差 K:"))
+        self._boll_stddev_spin = QDoubleSpinBox()
+        self._boll_stddev_spin.setRange(0.1, 10.0)
+        self._boll_stddev_spin.setDecimals(2)
+        self._boll_stddev_spin.setSingleStep(0.1)
+        self._boll_stddev_spin.setValue(
+            float(getattr(getattr(_settings, "prompt", None), "boll_stddev", 2.0))
+        )
+        self._boll_stddev_spin.setMaximumWidth(80)
+        self._boll_stddev_spin.setToolTip(
+            "布林带上下轨标准差倍数；图表与提交给 AI 的指标表使用同一参数"
+        )
+        indicator_layout.addWidget(self._boll_stddev_spin)
+        outer_layout.addLayout(indicator_layout)
 
         self._api_key_alert_label = QLabel(
             "未配置 API Key：请点击左上角「AI 模型」按钮，在设置中填写 API Key 后才能进行 AI 分析。"
@@ -665,19 +809,45 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self._flow_bar)
 
         workbench = QSplitter(Qt.Orientation.Horizontal)
+        self._workbench_splitter = workbench
 
         self._chart_widget = ChartWidget()
+        self._chart_widget.set_bollinger_params(
+            self._boll_period_spin.value(),
+            self._boll_stddev_spin.value(),
+        )
+        self._boll_period_spin.valueChanged.connect(
+            self._on_bollinger_params_changed
+        )
+        self._boll_stddev_spin.valueChanged.connect(
+            self._on_bollinger_params_changed
+        )
         self._chart_widget.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
         )
         self._apply_chart_display_settings()
         workbench.addWidget(self._chart_widget)
 
+        from pa_agent.gui.widgets.eastmoney_order_book import EastMoneyOrderBookPanel
+
+        self._eastmoney_order_book_panel = EastMoneyOrderBookPanel()
+        self._eastmoney_order_book_panel.setMinimumWidth(270)
+        self._eastmoney_order_book_panel.setMaximumWidth(340)
+        self._eastmoney_order_book_panel.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored
+        )
+        workbench.addWidget(self._eastmoney_order_book_panel)
+
         self._ai_sidebar.setMinimumWidth(400)
+        self._ai_sidebar.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
         workbench.addWidget(self._ai_sidebar)
 
         workbench.setStretchFactor(0, 3)
-        workbench.setStretchFactor(1, 2)
+        workbench.setStretchFactor(1, 0)
+        workbench.setStretchFactor(2, 2)
+        self._sync_eastmoney_order_book_visibility()
 
         # ── SummaryStrip: 5-metric card strip above workbench ─────────────────
         from pa_agent.gui.widgets.summary_strip import SummaryStrip
@@ -714,6 +884,137 @@ class MainWindow(QMainWindow):
         if bus is None:
             return
         bus.status.connect(self._on_status_update)
+
+    def _screen_available_size(self, screen: Any = None) -> tuple[int, int]:
+        """Return current screen available size in Qt logical pixels."""
+        target = screen or self.screen()
+        if target is None:
+            return (1440, 900)
+        geometry = target.availableGeometry()
+        return (geometry.width(), geometry.height())
+
+    def _apply_responsive_dimensions(self, screen: Any = None) -> None:
+        """Scale minimum component widths for the active screen."""
+        available_width, _ = self._screen_available_size(screen)
+        scale = _ui_width_scale(available_width)
+
+        def scaled(preferred: int, floor: int) -> int:
+            return max(floor, round(preferred * scale))
+
+        control_widths = (
+            (self._data_source_combo, 108, 84),
+            (self._tv_exchange_combo, 96, 78),
+            (self._variety_combo, 120, 92),
+            (self._symbol_combo, 110, 88),
+            (self._tf_combo, 60, 52),
+            (self._eastmoney_date_start, 116, 84),
+            (self._eastmoney_date_end, 116, 84),
+        )
+        for widget, preferred, floor in control_widths:
+            widget.setFixedWidth(scaled(preferred, floor))
+            # Combo/date contents can otherwise force minimumSizeHint() back to
+            # their full text.  A screen-scaled fixed slot keeps QBoxLayout from
+            # assigning overlapping geometries when space is tight.
+            widget.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+
+        fixed_widths = (
+            (self._fetch_data_btn, 90, 76),
+            (self._wait_close_checkbox, 192, 120),
+            (self._submit_btn, 100, 84),
+            (self._incremental_submit_btn, 100, 84),
+            (self._keep_analysis_checkbox, 96, 76),
+            (self._resume_chart_btn, 86, 70),
+            (self._fit_chart_btn, 80, 66),
+            (self._eastmoney_market_panel_toggle, 112, 92),
+        )
+        for widget, preferred, floor in fixed_widths:
+            width = scaled(preferred, floor)
+            if isinstance(widget, (QPushButton, QCheckBox)):
+                width = max(width, widget.sizeHint().width())
+            widget.setFixedWidth(width)
+            widget.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+
+        self._eastmoney_order_book_panel.setMinimumWidth(scaled(270, 210))
+        self._eastmoney_order_book_panel.setMaximumWidth(scaled(340, 280))
+        self._ai_sidebar.setMinimumWidth(scaled(400, 300))
+
+        # These labels change while an analysis is running.  Ignoring their
+        # textual size hint prevents a status/model string from growing the
+        # top-level window beyond the monitor width.
+        for label in (self._decision_badge, self._ai_mode_label):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
+
+        self._arrange_control_rows(available_width)
+        self.centralWidget().layout().invalidate()
+
+    def _set_action_controls_compact(self, compact: bool) -> None:
+        """Move action widgets between one-row and two-row toolbar layouts."""
+        if compact == self._controls_compact:
+            return
+        source = (
+            self._primary_controls_layout
+            if self._controls_compact is False
+            else self._action_controls_layout
+        )
+        target = (
+            self._action_controls_layout
+            if compact
+            else self._primary_controls_layout
+        )
+        for widget in self._action_control_widgets:
+            source.removeWidget(widget)
+            stretch = 1 if widget is self._ai_mode_label else 0
+            target.addWidget(widget, stretch=stretch)
+        self._controls_compact = compact
+        source.invalidate()
+        target.invalidate()
+
+    def _arrange_control_rows(self, available_width: int) -> None:
+        """Keep selectors and action controls on separate rows."""
+        del available_width
+        self._set_action_controls_compact(True)
+
+    def _fit_window_to_screen(self, screen: Any = None, *, initial: bool = False) -> None:
+        """Keep a normal (non-maximised) window inside the active screen."""
+        available_width, available_height = self._screen_available_size(screen)
+        target_width = _fit_dimension_to_screen(
+            available_width,
+            preferred=1440,
+            floor=960,
+        )
+        target_height = _fit_dimension_to_screen(
+            available_height,
+            preferred=900,
+            floor=640,
+        )
+        minimum_hint = self.minimumSizeHint()
+        target_width = min(available_width, max(target_width, minimum_hint.width()))
+        target_height = min(available_height, max(target_height, minimum_hint.height()))
+        if self.isMaximized() or self.isFullScreen():
+            return
+        if initial:
+            self.resize(target_width, target_height)
+            return
+        if self.width() > available_width or self.height() > available_height:
+            self.resize(
+                min(self.width(), target_width),
+                min(self.height(), target_height),
+            )
+
+    def _on_screen_changed(self, screen: Any) -> None:
+        """Re-apply responsive dimensions after moving between monitors."""
+        self._apply_responsive_dimensions(screen)
+        QTimer.singleShot(0, lambda: self._fit_window_to_screen(screen))
 
     def _start_refresh_loop(self) -> None:
         """Start the RefreshLoop only when the data source is connected."""
@@ -966,6 +1267,108 @@ class MainWindow(QMainWindow):
     def _current_data_source_kind(self) -> str:
         return getattr(self, "_active_data_source_kind", "mt5")
 
+    def _sync_eastmoney_order_book_visibility(self) -> None:
+        panel = getattr(self, "_eastmoney_order_book_panel", None)
+        if panel is None:
+            return
+        available = (
+            self._current_data_source_kind() == "eastmoney"
+            and not getattr(self, "_demo_mode", False)
+        )
+        toggle = getattr(self, "_eastmoney_market_panel_toggle", None)
+        if toggle is not None:
+            toggle.setVisible(available)
+            toggle.setEnabled(available)
+            panel_enabled = bool(toggle.isChecked())
+            toggle.setText(
+                "隐藏盘口/成交" if panel_enabled else "显示盘口/成交"
+            )
+        else:
+            panel_enabled = True
+        panel.setVisible(available and panel_enabled)
+        if not available:
+            panel.clear()
+
+    def _sync_eastmoney_date_filter_visibility(self) -> None:
+        """Show the date-range controls only for the East Money A-share source."""
+        visible = (
+            self._current_data_source_kind() == "eastmoney"
+            and not getattr(self, "_demo_mode", False)
+        )
+        checked = bool(
+            getattr(self, "_eastmoney_date_filter_checkbox", None)
+            and self._eastmoney_date_filter_checkbox.isChecked()
+        )
+        for widget in (
+            getattr(self, "_eastmoney_date_filter_checkbox", None),
+            getattr(self, "_eastmoney_date_start_label", None),
+            getattr(self, "_eastmoney_date_start", None),
+            getattr(self, "_eastmoney_date_end_label", None),
+            getattr(self, "_eastmoney_date_end", None),
+        ):
+            if widget is not None:
+                widget.setVisible(visible)
+        for widget in (
+            getattr(self, "_eastmoney_date_start_label", None),
+            getattr(self, "_eastmoney_date_start", None),
+            getattr(self, "_eastmoney_date_end_label", None),
+            getattr(self, "_eastmoney_date_end", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(visible and checked)
+        if hasattr(self, "_action_control_widgets"):
+            QTimer.singleShot(0, self._apply_responsive_dimensions)
+
+    def _on_eastmoney_date_filter_toggled(self, _checked: bool) -> None:
+        self._sync_eastmoney_date_filter_visibility()
+
+    def _apply_eastmoney_date_filter_to_source(self, data_source: Any) -> bool:
+        """Copy the GUI range to EastMoneySource before a refresh starts."""
+        if self._current_data_source_kind() != "eastmoney":
+            return True
+        setter = getattr(data_source, "set_date_range", None)
+        if not callable(setter):
+            return True
+        try:
+            if self._eastmoney_date_filter_checkbox.isChecked():
+                start = self._eastmoney_date_start.date().toPyDate()
+                end = self._eastmoney_date_end.date().toPyDate()
+                setter(start, end)
+            else:
+                setter(None, None)
+            return True
+        except ValueError as exc:
+            self._status_bar.showMessage(f"日期筛选无效：{exc}")
+            return False
+
+    def _on_eastmoney_market_panel_toggled(self, _checked: bool) -> None:
+        """Apply the user's session-level market-panel visibility preference."""
+        self._sync_eastmoney_order_book_visibility()
+
+    def _update_eastmoney_order_book(self) -> None:
+        panel = getattr(self, "_eastmoney_order_book_panel", None)
+        if panel is None or self._current_data_source_kind() != "eastmoney":
+            return
+        source = getattr(self._ctx, "data_source", None)
+        getter = getattr(source, "latest_order_book", None)
+        book = getter() if callable(getter) else None
+        trades_getter = getattr(source, "latest_trades", None)
+        trades = trades_getter() if callable(trades_getter) else []
+        panel.set_market_data(book, trades)
+
+    def _attach_analysis_market_context(self, frame: Any) -> Any:
+        """Freeze optional source-specific context into the analysis snapshot."""
+        if frame is None or self._current_data_source_kind() != "eastmoney":
+            return frame
+        source = getattr(self._ctx, "data_source", None)
+        getter = getattr(source, "latest_market_context", None)
+        context = getter() if callable(getter) else None
+        if not isinstance(context, dict) or not context:
+            return frame
+        from dataclasses import replace
+
+        return replace(frame, market_context=context)
+
     def _tv_exchange_text(self) -> str:
         combo = getattr(self, "_tv_exchange_combo", None)
         if combo is None:
@@ -991,6 +1394,8 @@ class MainWindow(QMainWindow):
             if w is not None:
                 w.setVisible(visible)
                 w.setEnabled(visible)
+        if hasattr(self, "_action_control_widgets"):
+            QTimer.singleShot(0, self._apply_responsive_dimensions)
 
     def _force_tv_exchange_auto(self) -> None:
         """Force TradingView exchange UI to «auto» (empty string)."""
@@ -1224,7 +1629,7 @@ class MainWindow(QMainWindow):
 
     def _populate_timeframe_combo_for_source(self) -> None:
         data_source = getattr(self._ctx, "data_source", None)
-        preferred = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
+        preferred = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1M"]
         supported: list[str] = []
         if data_source is not None:
             try:
@@ -1262,7 +1667,7 @@ class MainWindow(QMainWindow):
             self._switch_data_source(kind)
 
     def _on_data_source_combo_changed(self, index: int) -> None:
-        """Switch K-line data source (MT5 / TradingView)."""
+        """Switch the selected GUI-visible K-line data source."""
         if getattr(self, "_switching", False):
             return
         if getattr(self, "_demo_mode", False):
@@ -1313,6 +1718,8 @@ class MainWindow(QMainWindow):
 
             self._active_data_source_kind = kind
             self._sync_tv_exchange_visibility()
+            self._sync_eastmoney_order_book_visibility()
+            self._sync_eastmoney_date_filter_visibility()
             self._apply_gold_defaults_for_data_source(kind)
 
             # Restore saved TV exchange before applying to data source
@@ -1339,6 +1746,8 @@ class MainWindow(QMainWindow):
                 new_source.on_probe_status = self._on_tv_probe_status
             new_source.connect()
             self._apply_tv_exchange_to_source(new_source)
+            if not self._apply_eastmoney_date_filter_to_source(new_source):
+                raise ValueError("东方财富日期筛选无效")
             new_source.subscribe(symbol, timeframe)
 
             self._ctx.data_source = new_source
@@ -1542,6 +1951,12 @@ class MainWindow(QMainWindow):
         if data_source is None or not getattr(data_source, "_connected", False):
             self._status_bar.showMessage("数据源未连接，请先切换数据来源")
             return
+
+        if self._current_data_source_kind() == "eastmoney":
+            # Stop first so the worker cannot read the range while it is changing.
+            self._stop_refresh_loop()
+            if not self._apply_eastmoney_date_filter_to_source(data_source):
+                return
 
         # Apply any pending symbol/timeframe change before fetching.
         # If the user typed a new symbol/tf and clicked 「获取数据」, honour it.
@@ -1789,6 +2204,7 @@ class MainWindow(QMainWindow):
 
     def _on_data_frame(self, frame: Any) -> None:
         """Forward a new KlineFrame to the chart widget (throttled by 30 Hz timer)."""
+        self._update_eastmoney_order_book()
         self._chart_widget.set_frame(frame)
 
     def _on_refresh_frame_ready(self, bars: Any) -> None:
@@ -1799,6 +2215,7 @@ class MainWindow(QMainWindow):
         """
         if bars:
             self._last_frame_ready_bars = list(bars)
+            self._update_eastmoney_order_book()
             from pa_agent.data.bar_close_wait import current_forming_ts
 
             ts = current_forming_ts(
@@ -1977,6 +2394,12 @@ class MainWindow(QMainWindow):
                         "subscribe(%s, %s) failed: %s", new_symbol, new_tf, exc
                     )
                     self._status_bar.showMessage(f"订阅失败：{exc}")
+            panel = getattr(self, "_eastmoney_order_book_panel", None)
+            if (
+                panel is not None
+                and self._current_data_source_kind() == "eastmoney"
+            ):
+                panel.clear()
 
             # ── Step 4: Reset ChartWidget ─────────────────────────────────────
             if hasattr(self, "_chart_widget"):
@@ -2643,6 +3066,8 @@ class MainWindow(QMainWindow):
         if ds_combo is not None:
             ds_combo.setEnabled(False)
         self._sync_tv_exchange_visibility()
+        self._sync_eastmoney_order_book_visibility()
+        self._sync_eastmoney_date_filter_visibility()
 
         meta = record.meta
         self._symbol_combo.blockSignals(True)
@@ -2791,6 +3216,8 @@ class MainWindow(QMainWindow):
         if ds_combo is not None:
             ds_combo.setEnabled(True)
         self._sync_tv_exchange_visibility()
+        self._sync_eastmoney_order_book_visibility()
+        self._sync_eastmoney_date_filter_visibility()
         self._demo_mode_label.hide()
         self._analysis_in_progress = False
         self._set_chart_refresh_paused(False)
@@ -3050,6 +3477,7 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
             return
 
+        frame = self._attach_analysis_market_context(frame)
         self._last_analysis_frame = frame
         previous_record = getattr(prep, "previous_record", None)
         self._analysis_previous_record = previous_record
@@ -3461,7 +3889,12 @@ class MainWindow(QMainWindow):
         stage = exc_info.get("stage", "")
         exc_type = exc_info.get("type", "")
         category = exc_info.get("category", "")
-        if exc_type == "provider_error" or category == "e":
+        if exc_type == "network_error":
+            parts.append(
+                "【说明】模型/API 网关请求失败，不属于阶段 JSON 校验错误，"
+                "ValidationSettings 自动校验重试不适用。请检查网络、模型名和网关参数后重新「提交分析」。\n"
+            )
+        elif exc_type == "provider_error" or category == "e":
             parts.append(
                 "【说明】API 提供商返回积分/额度不足（402），程序不会自动重试。"
                 "请充值 OpenClaw 积分或更换 API 后重新「提交分析」。\n"
@@ -4129,6 +4562,12 @@ class MainWindow(QMainWindow):
     def showEvent(self, event: QShowEvent | None) -> None:
         """On first show, prompt for API Key when missing."""
         super().showEvent(event)
+        if not self._screen_change_connected:
+            handle = self.windowHandle()
+            if handle is not None:
+                handle.screenChanged.connect(self._on_screen_changed)
+                self._screen_change_connected = True
+                self._apply_responsive_dimensions(handle.screen())
         if self._startup_api_key_check_done:
             return
         self._startup_api_key_check_done = True
@@ -4144,13 +4583,14 @@ class MainWindow(QMainWindow):
     def _on_startup_api_key_check(self) -> None:
         self._refresh_api_key_ui_state()
         if not self._has_api_key_configured():
-            QMessageBox.information(
-                self,
-                "需要配置 API Key",
-                "尚未配置 API Key，将打开设置窗口。\n"
-                "请填写 API Key 并点击「保存」，才能使用「提交分析」与「增量分析」。",
+            # Do not open a nested modal dialog during the first show event.
+            # On some Windows desktop/session combinations this can prevent the
+            # initial top-level window from being presented.  The persistent
+            # in-window API-key warning and the AI model settings menu remain
+            # available for configuration.
+            self._status_bar.showMessage(
+                "未配置 API Key：请点击左上角「AI 模型设置」完成配置"
             )
-            self._open_settings_dialog(focus_api_key=True)
 
     def _has_api_key_configured(self) -> bool:
         from pa_agent.config.settings import provider_api_key_configured
@@ -4247,11 +4687,38 @@ class MainWindow(QMainWindow):
             flow_viz.refit_view()
             flow_viz.schedule_refit_view()
 
+    def _on_bollinger_params_changed(self, _value: object = None) -> None:
+        """Apply and persist the BOLL parameters shared by chart and prompts."""
+        period_spin = getattr(self, "_boll_period_spin", None)
+        stddev_spin = getattr(self, "_boll_stddev_spin", None)
+        if period_spin is None or stddev_spin is None:
+            return
+        period = int(period_spin.value())
+        stddev = float(stddev_spin.value())
+
+        chart = getattr(self, "_chart_widget", None)
+        if chart is not None:
+            chart.set_bollinger_params(period, stddev)
+
+        settings = getattr(self._ctx, "settings", None)
+        prompt_settings = getattr(settings, "prompt", None)
+        if prompt_settings is None:
+            return
+        prompt_settings.boll_period = period
+        prompt_settings.boll_stddev = stddev
+        try:
+            from pa_agent.config.settings import save_settings
+
+            save_settings(settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to persist BOLL parameters: %s", exc)
+
     def _update_ai_mode_label(self) -> None:
         """Show current thinking / reasoning_effort / model in the toolbar."""
         settings = getattr(self._ctx, "settings", None)
         if settings is None:
             self._ai_mode_label.setText("")
+            self._ai_mode_label.setToolTip("")
             return
         p = settings.provider
         base = (p.base_url or "").lower()
@@ -4284,6 +4751,7 @@ class MainWindow(QMainWindow):
             self._ai_mode_label.setText(
                 f"模型: {p.model} · 思考={('开' if p.thinking else '关')}"
             )
+        self._ai_mode_label.setToolTip(self._ai_mode_label.text())
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -4311,6 +4779,11 @@ class MainWindow(QMainWindow):
             return
         reason = self._submit_block_reason()
         can = reason is None
+        boll_controls_enabled = not self._analysis_in_progress
+        for control_name in ("_boll_period_spin", "_boll_stddev_spin"):
+            control = getattr(self, control_name, None)
+            if control is not None:
+                control.setEnabled(boll_controls_enabled)
         self._submit_btn.setEnabled(can)
         if hasattr(self, "_incremental_submit_btn"):
             self._incremental_submit_btn.setEnabled(can)
@@ -4450,11 +4923,12 @@ class MainWindow(QMainWindow):
             if not bars_raw:
                 return None
 
-            return self._build_chart_frame_from_bars(
+            frame = self._build_chart_frame_from_bars(
                 bars_raw,
                 bar_count=bar_count,
                 include_forming=False,
             )
+            return self._attach_analysis_market_context(frame)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Snapshot failed: %s", exc)
             return None

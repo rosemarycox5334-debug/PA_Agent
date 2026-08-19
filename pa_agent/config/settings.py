@@ -20,6 +20,9 @@ class AIProviderSettings(BaseModel):
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "high"
     context_window: int = 2_000_000
+    #: 单次 completion 的 max_tokens 上限。0 = 按 provider/模型自动选择;>0 = 强制覆盖。
+    #: 用于某些中转网关对 max_tokens 有硬上限却不会自动钳制时(如 one-api/new-api)。
+    max_output_tokens: int = Field(default=0, ge=0)
 
 
 class PromptSettings(BaseModel):
@@ -32,6 +35,9 @@ class PromptSettings(BaseModel):
     experience_max_chars_per_entry: int = Field(default=400, ge=100, le=4000)
     #: Inject pattern判定表 + 速查 brief into Stage 1 user prompt (reduces missed tags).
     stage1_inject_pattern_briefs: bool = True
+    #: BOLL parameters shared by the chart and all AI-analysis prompts.
+    boll_period: int = Field(default=20, ge=2, le=500)
+    boll_stddev: float = Field(default=2.0, ge=0.1, le=10.0)
 
 
 class ValidationSettings(BaseModel):

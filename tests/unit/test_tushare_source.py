@@ -77,6 +77,8 @@ def test_latest_snapshot_fetches_daily_bars(monkeypatch: pytest.MonkeyPatch) -> 
                     "low": 9.0,
                     "close": 10.5,
                     "vol": 123.4,
+                    "amount": 456.7,
+                    "pct_chg": 2.35,
                 },
             ]
         )
@@ -93,6 +95,10 @@ def test_latest_snapshot_fetches_daily_bars(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert [b.close for b in bars] == [10.5, 8.5]
     assert all(b.closed for b in bars)
+    assert bars[0].amount == pytest.approx(456.7)
+    assert bars[0].pct_chg == pytest.approx(2.35)
+    assert bars[1].amount == 0.0
+    assert bars[1].pct_chg is None
     assert calls[1]["ts_code"] == "600519.SH"
     assert calls[1]["adj"] == "qfq"
 

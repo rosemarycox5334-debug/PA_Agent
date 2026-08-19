@@ -245,6 +245,72 @@ def _parse_win_rate(value: object) -> float | None:
         return None
 
 
+def compute_kelly_fraction(
+    win_rate_pct: object,
+    reward_risk_ratio: object,
+) -> dict[str, float | bool | str] | None:
+    """Return full/half Kelly risk fractions for a binary trade outcome.
+
+    ``reward_risk_ratio`` is net reward divided by loss risk (``b``). The
+    classical fraction is ``f* = (b*p - q) / b`` where ``q = 1 - p``.
+    Negative fractions are retained as ``raw_fraction`` for audit but the
+    displayed allocation fractions are floored at zero.
+    """
+    win_rate = _parse_win_rate(win_rate_pct)
+    try:
+        ratio = float(reward_risk_ratio)
+    except (TypeError, ValueError):
+        return None
+    if win_rate is None or ratio <= 0:
+        return None
+
+    p = win_rate / 100.0
+    q = 1.0 - p
+    raw_fraction = (ratio * p - q) / ratio
+    full_fraction = max(0.0, min(1.0, raw_fraction))
+    half_fraction = full_fraction / 2.0
+    return {
+        "basis": "tp1_reward_risk",
+        "win_probability": round(p, 6),
+        "loss_probability": round(q, 6),
+        "reward_risk_ratio": round(ratio, 6),
+        "raw_fraction": round(raw_fraction, 6),
+        "full_fraction": round(full_fraction, 6),
+        "full_percent": round(full_fraction * 100.0, 2),
+        "half_fraction": round(half_fraction, 6),
+        "half_percent": round(half_fraction * 100.0, 2),
+        "positive_edge": raw_fraction > 0,
+    }
+
+
+def compute_decision_kelly(
+    decision: dict[str, Any],
+) -> dict[str, float | bool | str] | None:
+    """Compute Kelly metrics from a live order's final TP1/SL geometry."""
+    if decision.get("order_type") not in ("限价单", "突破单", "市价单"):
+        return None
+    rr = compute_risk_reward(
+        decision.get("entry_price"),
+        decision.get("take_profit_price"),
+        decision.get("stop_loss_price"),
+        decision.get("order_direction"),
+    )
+    if rr is None:
+        return None
+    return compute_kelly_fraction(
+        decision.get("estimated_win_rate"),
+        rr["ratio"],
+    )
+
+
+def apply_decision_kelly_metrics(decision: dict[str, Any]) -> bool:
+    """Overwrite ``decision.kelly`` with program-derived Kelly metrics."""
+    calculated = compute_decision_kelly(decision)
+    changed = decision.get("kelly") != calculated
+    decision["kelly"] = calculated
+    return changed
+
+
 def _latest_closed_bar(kline_frame: Any) -> Any | None:
     """Return K1 (newest closed bar) from a snapshot frame."""
     bars = getattr(kline_frame, "bars", None) if kline_frame is not None else None

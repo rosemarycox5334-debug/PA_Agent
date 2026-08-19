@@ -1,31 +1,46 @@
-"""ChartWidget — pyqtgraph-based K-line chart with EMA20 and overlay lines.
+"""ChartWidget — pyqtgraph-based K-line chart with trend indicators and overlays.
 
 Tasks 14.2 + 14.5:
-  - Renders N candles, EMA20 line, and sequence-number labels.
+  - Renders N candles, EMA10/20/60, BOLL20, and sequence-number labels.
   - Draws entry/TP/SL horizontal lines when order_type != "不下单".
   - 30 Hz QTimer throttles redraws so the 1 Hz data thread never blocks the UI.
 """
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6.QtCore import QEvent, Qt, QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 
 from pa_agent.gui.widgets.candle_item import CandleItem
 from pa_agent.gui.widgets.overlay_lines import OverlayLines
 from pa_agent.gui.widgets.seq_label_item import SeqLabelItem
+from pa_agent.indicators.bollinger import (
+    DEFAULT_BOLL_PERIOD,
+    DEFAULT_BOLL_STDDEV,
+    bollinger_full,
+)
+from pa_agent.indicators.ema import ema_full
 from pa_agent.util.trade_metrics import is_long_direction
 
 if TYPE_CHECKING:
-    from pa_agent.data.base import KlineFrame
+    from pa_agent.data.base import KlineBar, KlineFrame
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _TIMER_INTERVAL_MS = 33  # ~30 Hz
-_EMA_COLOR = (255, 200, 0)  # amber
+_EMA_COLORS = {
+    10: (125, 211, 252),  # sky blue
+    20: (251, 191, 36),   # amber
+    60: (251, 146, 60),   # orange
+}
+_BOLL_PERIOD = DEFAULT_BOLL_PERIOD
+_BOLL_STDDEV = DEFAULT_BOLL_STDDEV
+_BOLL_MIDDLE_COLOR = (196, 181, 253)
+_BOLL_BAND_COLOR = (129, 140, 248)
 _NO_ORDER_TEXT = "不下单"
 _X_MARGIN_BARS = 0.65
 _Y_PADDING_RATIO = 0.07
@@ -33,6 +48,84 @@ _Y_TOP_EXTRA_RATIO = 0.04
 _FIT_VISIBLE_BARS = 20
 _AXIS_RESIZE_MIN_WIDTH = 40
 _AXIS_RESIZE_EDGE_PX = 8
+
+
+_bollinger_bands = bollinger_full
+
+
+def _ema_values_oldest_first(
+    frame: "KlineFrame",
+    closes_oldest_first: list[float],
+    period: int,
+) -> list[float]:
+    """Return an EMA series aligned to the chart's left-to-right x positions."""
+    if period == 20 and len(frame.indicators.ema20) == len(frame.bars):
+        return list(reversed(frame.indicators.ema20))
+    return ema_full(closes_oldest_first, period)
+
+
+def _format_bar_time_local(ts_ms: float, *, short: bool = True) -> str:
+    """Format a bar-open timestamp in the host's *local* timezone for display.
+
+    All data sources store ``ts_open`` as a real UTC epoch (MT5 returns UTC
+    seconds; A-share sources ``tz_localize("Asia/Shanghai")`` before converting).
+    The previous display path formatted that epoch as-is (UTC), which made
+    A-share bars show their session times 8 h early (09:30 → 01:30). Rendering
+    in the local timezone restores the actual 09:30-15:00 session on screen.
+
+    Only the chart display (axis ticks + hover) is affected; ``ts_open`` itself,
+    bar-close detection, incremental analysis, and AI prompt labels are unchanged.
+    """
+    sec = float(ts_ms)
+    if sec > 1e12:  # ms → s
+        sec /= 1000.0
+    fmt = "%Y-%m-%d %H:%M" if short else "%Y-%m-%d %H:%M:%S"
+    return datetime.fromtimestamp(sec).strftime(fmt)
+
+
+class DateTimeAxisItem(pg.AxisItem):
+    """Bottom axis that maps candle x positions to bar opening timestamps."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._timestamps_ms: tuple[float, ...] = ()
+        self._timeframe: str = ""
+
+    def set_bar_times(
+        self,
+        timestamps_ms: tuple[float, ...],
+        timeframe: str,
+    ) -> None:
+        """Set timestamps ordered from the oldest candle to the newest."""
+        self._timestamps_ms = tuple(float(value) for value in timestamps_ms)
+        self._timeframe = str(timeframe or "")
+        self.picture = None
+        self.update()
+
+    def clear_bar_times(self) -> None:
+        self.set_bar_times((), "")
+
+    def tickStrings(  # noqa: N802
+        self,
+        values: list[float],
+        scale: float,
+        spacing: float,
+    ) -> list[str]:
+        del scale, spacing
+        labels: list[str] = []
+        daily_or_higher = self._timeframe in {"1d", "1w", "1M"}
+        for value in values:
+            index = int(round(value))
+            if (
+                abs(value - index) > 0.25
+                or index < 0
+                or index >= len(self._timestamps_ms)
+            ):
+                labels.append("")
+                continue
+            text = _format_bar_time_local(self._timestamps_ms[index])
+            labels.append(text[:10] if daily_or_higher else text[5:16])
+        return labels
 
 
 class ChartWidget(pg.PlotWidget):
@@ -44,13 +137,20 @@ class ChartWidget(pg.PlotWidget):
         Optional Qt parent widget.
     """
 
+    bar_hovered = pyqtSignal(str)
+
     def __init__(self, parent=None) -> None:
-        super().__init__(parent=parent)
+        self._time_axis = DateTimeAxisItem(orientation="bottom")
+        super().__init__(
+            parent=parent,
+            axisItems={"bottom": self._time_axis},
+        )
 
         # Configure plot appearance
         self.setBackground("#0d1117")
         self.showGrid(x=False, y=True, alpha=0.3)
         self.getPlotItem().setLabel("left", "Price")
+        self.getPlotItem().setLabel("bottom", "日期 / 时间")
 
         # Internal state
         self._latest_frame: KlineFrame | None = None
@@ -58,6 +158,11 @@ class ChartWidget(pg.PlotWidget):
         self._candle_items: list[CandleItem] = []
         self._seq_labels: list[SeqLabelItem] = []
         self._ema_line: pg.PlotDataItem | None = None
+        self._ema_lines: dict[int, pg.PlotDataItem] = {}
+        self._bollinger_lines: dict[str, pg.PlotDataItem] = {}
+        self._bollinger_fill: pg.FillBetweenItem | None = None
+        self._boll_period = _BOLL_PERIOD
+        self._boll_stddev = _BOLL_STDDEV
         self._overlay = OverlayLines()
         self._sr_items: list[pg.GraphicsItem] = []  # support/resistance level lines
         self._pending_decision: dict | None = None
@@ -65,6 +170,25 @@ class ChartWidget(pg.PlotWidget):
         self._seq_label_font_pt: int = 11
         self._fit_on_next_render: bool = False
         self._first_frame_fitted: bool = False
+        self._bars_by_x: tuple[KlineBar, ...] = ()
+        self._hover_index: int | None = None
+        self._hover_timestamp: float | None = None
+        self._hover_locked: bool = False
+
+        # Hover/selection overlay.  These items stay outside the candle rebuild
+        # cycle so a live refresh does not destroy a locked selection.
+        hover_pen = pg.mkPen(color=(56, 189, 248, 180), width=1)
+        self._hover_vline = pg.PlotDataItem(pen=hover_pen)
+        self._hover_hline = pg.PlotDataItem(pen=hover_pen)
+        self._hover_detail = pg.TextItem(
+            anchor=(0.0, 0.0),
+            border=pg.mkPen(color=(56, 189, 248, 220), width=1),
+            fill=pg.mkBrush(13, 17, 23, 235),
+        )
+        for item in (self._hover_vline, self._hover_hline, self._hover_detail):
+            item.setZValue(1000)
+            item.hide()
+            self.addItem(item, ignoreBounds=True)
 
         # Price-axis resize state
         self._axis_resizing: bool = False
@@ -73,6 +197,8 @@ class ChartWidget(pg.PlotWidget):
 
         vb = self.getViewBox()
         vb.enableAutoRange(x=False, y=False)
+        self.scene().sigMouseMoved.connect(self._on_scene_mouse_moved)
+        self.scene().sigMouseClicked.connect(self._on_scene_mouse_clicked)
 
         # 30 Hz redraw timer (task 14.5)
         self._timer = QTimer(self)
@@ -90,6 +216,21 @@ class ChartWidget(pg.PlotWidget):
         self._seq_label_font_pt = point_size
         if self._latest_frame is not None:
             self._dirty = True
+
+    def set_bollinger_params(self, period: int, stddev: float) -> None:
+        """Update BOLL parameters and schedule an immediate chart redraw."""
+        period = max(2, min(500, int(period)))
+        stddev = max(0.1, min(10.0, float(stddev)))
+        if period == self._boll_period and math.isclose(stddev, self._boll_stddev):
+            return
+        self._boll_period = period
+        self._boll_stddev = stddev
+        if self._latest_frame is not None:
+            self._dirty = True
+
+    def bollinger_params(self) -> tuple[int, float]:
+        """Return the BOLL period and standard-deviation multiplier in use."""
+        return self._boll_period, self._boll_stddev
 
     def set_frame(self, frame: "KlineFrame", *, fit_view: bool = False) -> None:
         """Cache the latest KlineFrame; actual redraw happens on the timer."""
@@ -346,13 +487,15 @@ class ChartWidget(pg.PlotWidget):
         return super().viewportEvent(ev)
 
     def reset(self) -> None:
-        """Clear all chart items (candles, labels, EMA, overlay lines)."""
+        """Clear all chart items (candles, indicators, labels, and overlays)."""
         self.clear_decision_overlay()
         self._clear_candles_and_labels()
-        if self._ema_line is not None:
-            self.removeItem(self._ema_line)
-            self._ema_line = None
+        self._clear_indicator_overlays()
         self._latest_frame = None
+        self._time_axis.clear_bar_times()
+        self._bars_by_x = ()
+        self._hover_locked = False
+        self._hide_bar_details()
         self._dirty = False
         self._fit_on_next_render = False
         self._first_frame_fitted = False
@@ -369,21 +512,25 @@ class ChartWidget(pg.PlotWidget):
     # ── Internal rendering ────────────────────────────────────────────────────
 
     def _render_frame(self, frame: "KlineFrame") -> None:
-        """Rebuild all candle items, EMA line, and sequence labels."""
+        """Rebuild candles, trend indicators, and sequence labels."""
+        hovered_ts = self._hover_timestamp
         self._clear_candles_and_labels()
-        if self._ema_line is not None:
-            self.removeItem(self._ema_line)
-            self._ema_line = None
+        self._clear_indicator_overlays()
         bars = frame.bars
         n = len(bars)
         if n == 0:
+            self._time_axis.clear_bar_times()
+            self._bars_by_x = ()
+            self._hover_locked = False
+            self._hide_bar_details()
             return
+        self._bars_by_x = tuple(reversed(bars))
+        self._time_axis.set_bar_times(
+            tuple(float(bar.ts_open) for bar in reversed(bars)),
+            frame.timeframe,
+        )
 
-        # bars[0] is newest (seq=1); we want x=0 for oldest, x=n-1 for newest
-        # so x_pos for bars[i] = (n - 1 - i)
-        ema_x: list[float] = []
-        ema_y: list[float] = []
-
+        # bars[0] is newest (seq=1); we want x=0 for oldest, x=n-1 for newest.
         for i, bar in enumerate(bars):
             x_pos = n - 1 - i  # oldest bar at x=0, newest at x=n-1
 
@@ -407,30 +554,256 @@ class ChartWidget(pg.PlotWidget):
                 self.addItem(seq_label)
                 self._seq_labels.append(seq_label)
 
-            # EMA20 point (skip NaN)
-            ema_val = frame.indicators.ema20[i]
-            if not math.isnan(ema_val):
-                ema_x.append(float(x_pos))
-                ema_y.append(ema_val)
-
-        # EMA20 line (slightly dimmed through forming bar)
-        if ema_x:
-            newest_forming = len(bars) > 0 and not bars[0].closed
-            ema_color: tuple[int, ...] = _EMA_COLOR
-            if newest_forming:
-                ema_color = (255, 200, 0, 140)
-            self._ema_line = pg.PlotDataItem(
-                x=np.array(ema_x),
-                y=np.array(ema_y),
-                pen=pg.mkPen(color=ema_color, width=1),
-            )
-            self.addItem(self._ema_line)
+        self._render_indicator_overlays(frame)
 
         self._update_direction_marker()
 
         if self._fit_on_next_render:
             self._fit_on_next_render = False
             self.fit_view()
+
+        if hovered_ts is not None:
+            restored_index = next(
+                (
+                    index
+                    for index, bar in enumerate(self._bars_by_x)
+                    if float(bar.ts_open) == hovered_ts
+                ),
+                None,
+            )
+            if restored_index is None:
+                self._hover_locked = False
+                self._hide_bar_details()
+            else:
+                self._show_bar_details(restored_index, self._bars_by_x[restored_index].close)
+
+    @staticmethod
+    def _curve_for_values(
+        values: list[float],
+        *,
+        color: tuple[int, ...],
+        width: float = 1.0,
+        style: Qt.PenStyle = Qt.PenStyle.SolidLine,
+    ) -> pg.PlotDataItem | None:
+        y_values = np.asarray(values, dtype=float)
+        valid = np.isfinite(y_values)
+        if not valid.any():
+            return None
+        x_values = np.arange(len(values), dtype=float)
+        curve = pg.PlotDataItem(
+            x=x_values[valid],
+            y=y_values[valid],
+            pen=pg.mkPen(color=color, width=width, style=style),
+        )
+        curve.setZValue(10)
+        return curve
+
+    def _render_indicator_overlays(self, frame: "KlineFrame") -> None:
+        """Draw EMA10/20/60 plus the BOLL20 channel over the candles."""
+        bars = frame.bars
+        closes = [bar.close for bar in reversed(bars)]
+        newest_forming = bool(bars and not bars[0].closed)
+        alpha = 150 if newest_forming else 255
+
+        for period, base_color in _EMA_COLORS.items():
+            values = _ema_values_oldest_first(frame, closes, period)
+            color = (*base_color, alpha)
+            curve = self._curve_for_values(values, color=color, width=1.2)
+            if curve is None:
+                continue
+            self.addItem(curve)
+            self._ema_lines[period] = curve
+
+        # Retain the original attribute for callers that inspect the EMA20 item.
+        self._ema_line = self._ema_lines.get(20)
+
+        middle, upper, lower = _bollinger_bands(
+            closes,
+            period=self._boll_period,
+            stddev=self._boll_stddev,
+        )
+        boll_specs = {
+            "middle": (middle, _BOLL_MIDDLE_COLOR, Qt.PenStyle.DotLine),
+            "upper": (upper, _BOLL_BAND_COLOR, Qt.PenStyle.DashLine),
+            "lower": (lower, _BOLL_BAND_COLOR, Qt.PenStyle.DashLine),
+        }
+        for name, (values, base_color, style) in boll_specs.items():
+            curve = self._curve_for_values(
+                values,
+                color=(*base_color, alpha),
+                width=1.0,
+                style=style,
+            )
+            if curve is not None:
+                self._bollinger_lines[name] = curve
+
+        upper_curve = self._bollinger_lines.get("upper")
+        lower_curve = self._bollinger_lines.get("lower")
+        if upper_curve is not None and lower_curve is not None:
+            fill_alpha = 24 if not newest_forming else 16
+            self._bollinger_fill = pg.FillBetweenItem(
+                upper_curve,
+                lower_curve,
+                brush=pg.mkBrush(*_BOLL_BAND_COLOR, fill_alpha),
+            )
+            self._bollinger_fill.setZValue(-20)
+            self.addItem(self._bollinger_fill)
+
+        for curve in self._bollinger_lines.values():
+            self.addItem(curve)
+
+    def _clear_indicator_overlays(self) -> None:
+        """Remove every moving-average and Bollinger graphics item."""
+        if self._bollinger_fill is not None:
+            self.removeItem(self._bollinger_fill)
+            self._bollinger_fill = None
+        for curve in self._bollinger_lines.values():
+            self.removeItem(curve)
+        self._bollinger_lines.clear()
+        for curve in self._ema_lines.values():
+            self.removeItem(curve)
+        self._ema_lines.clear()
+        self._ema_line = None
+
+    # ── K-line hover / selection details ─────────────────────────────────────
+
+    def _bar_index_at_x(self, x_value: float) -> int | None:
+        """Return the nearest candle index when *x_value* is over a candle."""
+        index = int(round(x_value))
+        if index < 0 or index >= len(self._bars_by_x):
+            return None
+        if abs(x_value - index) > 0.5:
+            return None
+        return index
+
+    @staticmethod
+    def _format_price(value: float) -> str:
+        return f"{float(value):,.6f}".rstrip("0").rstrip(".")
+
+    def _bar_detail_parts(self, bar: "KlineBar") -> tuple[str, str]:
+        """Build rich chart details and a compact footer summary for *bar*."""
+        timeframe = self._latest_frame.timeframe if self._latest_frame is not None else ""
+        time_text = _format_bar_time_local(bar.ts_open)
+        if timeframe in {"1d", "1w", "1M"}:
+            time_text = time_text[:10]
+
+        pct_chg = bar.pct_chg
+        if pct_chg is None and bar.open:
+            pct_chg = (bar.close / bar.open - 1.0) * 100.0
+        pct_text = "—" if pct_chg is None else f"{pct_chg:+.2f}%"
+        change_color = "#22c55e" if (pct_chg or 0.0) >= 0 else "#ef4444"
+        status = "已收盘" if bar.closed else "形成中"
+        amount_row = ""
+        if bar.amount:
+            amount_row = (
+                "<br><span style='color:#8b949e'>成交额</span> "
+                f"<span style='color:#e6edf3'>{bar.amount:,.2f}</span>"
+            )
+
+        html = (
+            "<div style='font-family:monospace; font-size:12px; color:#e6edf3'>"
+            f"<b>{time_text}</b> "
+            f"<span style='color:#8b949e'>· {status}</span><br>"
+            "<span style='color:#8b949e'>开</span> "
+            f"{self._format_price(bar.open)}　"
+            "<span style='color:#8b949e'>高</span> "
+            f"{self._format_price(bar.high)}<br>"
+            "<span style='color:#8b949e'>低</span> "
+            f"{self._format_price(bar.low)}　"
+            "<span style='color:#8b949e'>收</span> "
+            f"{self._format_price(bar.close)}<br>"
+            "<span style='color:#8b949e'>涨跌</span> "
+            f"<span style='color:{change_color}'>{pct_text}</span>　"
+            "<span style='color:#8b949e'>成交量</span> "
+            f"{bar.volume:,.2f}"
+            f"{amount_row}</div>"
+        )
+        summary = (
+            f"{time_text}  开 {self._format_price(bar.open)}  "
+            f"高 {self._format_price(bar.high)}  低 {self._format_price(bar.low)}  "
+            f"收 {self._format_price(bar.close)}  涨跌 {pct_text}  "
+            f"量 {bar.volume:,.2f}"
+        )
+        return html, summary
+
+    def _show_bar_details(self, index: int, cursor_y: float) -> None:
+        if index < 0 or index >= len(self._bars_by_x):
+            self._hide_bar_details()
+            return
+
+        bar = self._bars_by_x[index]
+        self._hover_index = index
+        self._hover_timestamp = float(bar.ts_open)
+
+        selected_color = (250, 204, 21, 230) if self._hover_locked else (56, 189, 248, 210)
+        pen = pg.mkPen(color=selected_color, width=1)
+        self._hover_vline.setPen(pen)
+        self._hover_hline.setPen(pen)
+        self._hover_detail.border = pg.mkPen(color=selected_color, width=1)
+        self._hover_detail.update()
+
+        html, summary = self._bar_detail_parts(bar)
+        self._hover_detail.setHtml(html)
+        x_range, y_range = self.getViewBox().viewRange()
+        self._hover_vline.setData(
+            x=(float(index), float(index)),
+            y=(y_range[0], y_range[1]),
+        )
+        self._hover_hline.setData(
+            x=(x_range[0], x_range[1]),
+            y=(float(cursor_y), float(cursor_y)),
+        )
+        right_side = float(index) > (x_range[0] + x_range[1]) / 2.0
+        self._hover_detail.setAnchor((1.0, 0.0) if right_side else (0.0, 0.0))
+        x_offset = -0.25 if right_side else 0.25
+        y_top = y_range[1] - (y_range[1] - y_range[0]) * 0.02
+        self._hover_detail.setPos(float(index) + x_offset, y_top)
+
+        self._hover_vline.show()
+        self._hover_hline.show()
+        self._hover_detail.show()
+        self.bar_hovered.emit(("已选中 · " if self._hover_locked else "") + summary)
+
+    def _hide_bar_details(self) -> None:
+        self._hover_vline.hide()
+        self._hover_hline.hide()
+        self._hover_detail.hide()
+        self._hover_index = None
+        self._hover_timestamp = None
+        self.bar_hovered.emit("")
+
+    def _on_scene_mouse_moved(self, scene_pos) -> None:
+        if self._hover_locked:
+            return
+        view_box = self.getViewBox()
+        if not self._bars_by_x or not view_box.sceneBoundingRect().contains(scene_pos):
+            self._hide_bar_details()
+            return
+        view_pos = view_box.mapSceneToView(scene_pos)
+        index = self._bar_index_at_x(float(view_pos.x()))
+        if index is None:
+            self._hide_bar_details()
+            return
+        self._show_bar_details(index, float(view_pos.y()))
+
+    def _on_scene_mouse_clicked(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        view_box = self.getViewBox()
+        scene_pos = event.scenePos()
+        if not self._bars_by_x or not view_box.sceneBoundingRect().contains(scene_pos):
+            self._hover_locked = False
+            self._hide_bar_details()
+            return
+        view_pos = view_box.mapSceneToView(scene_pos)
+        index = self._bar_index_at_x(float(view_pos.x()))
+        if index is None:
+            return
+        if self._hover_locked and self._hover_index == index:
+            self._hover_locked = False
+        else:
+            self._hover_locked = True
+        self._show_bar_details(index, float(view_pos.y()))
 
     def _view_ranges_for_frame(
         self,
@@ -441,15 +814,32 @@ class ChartWidget(pg.PlotWidget):
         n = len(bars)
         visible_count = min(_FIT_VISIBLE_BARS, n)
         visible_bars = bars[:visible_count]
-        visible_ema = frame.indicators.ema20[:visible_count]
+        closes_oldest_first = [bar.close for bar in reversed(bars)]
+        boll_middle, boll_upper, boll_lower = _bollinger_bands(
+            closes_oldest_first,
+            period=self._boll_period,
+            stddev=self._boll_stddev,
+        )
+        visible_indicator_values = [
+            *boll_middle[-visible_count:],
+            *boll_upper[-visible_count:],
+            *boll_lower[-visible_count:],
+        ]
+        for period in _EMA_COLORS:
+            ema_values = _ema_values_oldest_first(
+                frame,
+                closes_oldest_first,
+                period,
+            )
+            visible_indicator_values.extend(ema_values[-visible_count:])
 
         y_min = min(b.low for b in visible_bars)
         y_max = max(b.high for b in visible_bars)
 
-        for ema_val in visible_ema:
-            if not math.isnan(ema_val):
-                y_min = min(y_min, ema_val)
-                y_max = max(y_max, ema_val)
+        for indicator_value in visible_indicator_values:
+            if not math.isnan(indicator_value):
+                y_min = min(y_min, indicator_value)
+                y_max = max(y_max, indicator_value)
 
         decision = self._pending_decision
         if decision is not None:

@@ -238,10 +238,10 @@ def _adaptive_output_effort(reasoning_effort: str | None) -> str:
     return _EFFORT_TO_ADAPTIVE_OUTPUT.get(key, "medium")
 
 
-# Sent to OpenAI-compatible gateways; upstream may clamp below these values.
-_PRACTICAL_UNLIMITED_MAX_TOKENS = 524288
+# 通用 OpenAI 兼容网关的安全上限;部分网关(如 one-api/new-api)不自动钳制而是直接 400。
+_PRACTICAL_UNLIMITED_MAX_TOKENS = 131072
 # Anthropic-style thinking requires budget_tokens < max_tokens.
-_PRACTICAL_UNLIMITED_THINKING_BUDGET = 524287
+_PRACTICAL_UNLIMITED_THINKING_BUDGET = 131071
 
 
 def _effort_budget_tokens(effort: str | None, *, max_output: int) -> int:
@@ -304,10 +304,15 @@ def _prepare_api_messages(
 
 def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
     """Per-gateway completion cap (max_tokens); avoids 400 from provider limits."""
+    override = int(getattr(settings, "max_output_tokens", 0) or 0)
+    if override > 0:
+        return override  # 用户手动指定,优先于自动判断
     model = (settings.model or "").lower()
     if _is_packyapi(settings.base_url) and "claude" in model:
         return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
-    if _is_deepseek_native(settings.base_url):
+    # DeepSeek output limits apply to the model even when it is served through
+    # an OpenAI-compatible distributor/proxy rather than api.deepseek.com.
+    if _is_deepseek_native(settings.base_url) or _is_deepseek_model(model):
         return _DEEPSEEK_MAX_OUTPUT_TOKENS
     if _is_sensenova(settings.base_url):
         _smodel = (settings.model or "").lower()

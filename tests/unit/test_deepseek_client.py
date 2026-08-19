@@ -92,6 +92,13 @@ def test_completion_max_tokens_deepseek_cap():
     assert _completion_max_tokens(settings, extra_body={}, effort="max") == 393_216
 
 
+def test_completion_max_tokens_deepseek_proxy_cap():
+    settings = _make_settings()
+    settings.base_url = "http://distributor.example/v1"
+    settings.model = "deepseek-v4-pro"
+    assert _completion_max_tokens(settings, extra_body={}, effort="max") == 393_216
+
+
 def test_completion_max_tokens_packy_claude_cap():
     settings = _make_settings()
     settings.base_url = "https://www.packyapi.com/v1"
@@ -416,3 +423,39 @@ def test_mimo_chat_patches_tool_call_messages_before_send() -> None:
 
     sent_messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
     assert sent_messages[1]["reasoning_content"] == ""
+
+
+def test_provider_max_output_tokens_override_takes_priority():
+    """用户手动设置的 max_output_tokens 优先于模型/网关自动判断。"""
+    from pa_agent.ai.deepseek_client import _provider_max_output_tokens
+
+    settings = _make_settings()
+    settings.base_url = "https://api.deepseek.com"
+    settings.model = "deepseek-v4-pro"  # 自动分支本应取 393216
+    settings.max_output_tokens = 131072
+    assert _provider_max_output_tokens(settings) == 131072
+
+
+def test_provider_max_output_tokens_auto_zero_falls_through():
+    """max_output_tokens=0 时不覆盖,沿用自动分支(deepseek 仍 393216)。"""
+    from pa_agent.ai.deepseek_client import _provider_max_output_tokens
+
+    settings = _make_settings()
+    settings.base_url = "https://api.deepseek.com"
+    settings.model = "deepseek-v4-pro"
+    settings.max_output_tokens = 0
+    assert _provider_max_output_tokens(settings) == 393_216
+
+
+def test_provider_max_output_tokens_auto_unknown_model_is_safe_default():
+    """未识别模型(glm 等)走兜底,返回 131072 而非激进的 524288,避免网关 400。
+
+    复现用户场景:私有中转网关(http://...:3000/v1)+ glm-5.2,网关上限 131072。
+    """
+    from pa_agent.ai.deepseek_client import _provider_max_output_tokens
+
+    settings = _make_settings()
+    settings.base_url = "http://198.200.42.42:3000/v1"
+    settings.model = "glm-5.2"
+    settings.max_output_tokens = 0  # 自动
+    assert _provider_max_output_tokens(settings) == 131072

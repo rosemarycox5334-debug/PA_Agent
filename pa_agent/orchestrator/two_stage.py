@@ -26,6 +26,7 @@ STAGE2_VALIDATION_AUTO_RETRY = False
 import copy
 import dataclasses
 import logging
+import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -56,6 +57,9 @@ def _latency_ms_label(latency_ms: object) -> str:
 
 # When the gateway buffers the full reply, emit pseudo-stream chunks to the UI.
 _FALLBACK_STREAM_CHUNK = 48
+
+# Wait before retrying the same provider after a transient network error.
+_NETWORK_RETRY_DELAY_S = 2.0
 
 
 def _json_truncation_hint(content: str, err: ValidationError) -> str | None:
@@ -1011,6 +1015,7 @@ class TwoStageOrchestrator:
         tried_cursor = False
         tried_workbuddy = False
         tried_trae_cn = False
+        same_provider_retries = 0
         while True:
             try:
                 return self._client.stream_chat(
@@ -1024,6 +1029,22 @@ class TwoStageOrchestrator:
             except Exception as exc:
                 if not self._is_network_error(exc):
                     raise
+                # 瞬时断连（peer closed connection / connection reset）很常见，
+                # 先短暂等待后对同一 provider 直接重试一次，再走 fallback 链；
+                # 这样普通（非 openclaw）模型也有一次重试机会。
+                if same_provider_retries < 1:
+                    same_provider_retries += 1
+                    if cancel_token.is_set():
+                        from pa_agent.ai.deepseek_client import CancelledError
+
+                        raise CancelledError("Request cancelled during retry backoff")
+                    time.sleep(_NETWORK_RETRY_DELAY_S)
+                    logger.info(
+                        "%s network error (%s); retrying same provider",
+                        stage_label,
+                        exc,
+                    )
+                    continue
                 # Try WorkBuddy fallback first (if model is openclaw_wb),
                 # then TRAE Work CN (if model is openclaw_twc),
                 # then Cursor (if model is openclaw_cs),
@@ -1237,21 +1258,27 @@ class TwoStageOrchestrator:
         except ImportError:
             pass
 
-        try:
-            import httpx  # type: ignore[import]
-
-            if isinstance(
-                exc,
-                (
-                    httpx.ReadError,
-                    httpx.ConnectError,
-                    httpx.TimeoutException,
-                    httpx.RemoteProtocolError,
-                ),
+        # 环境可能同时安装 httpx 1.x 与 httpx 2.x（包名 httpx2）：新版 openai SDK
+        # 依赖 httpx2，其异常类与旧版 httpx 的同名类互不兼容，isinstance 会漏判
+        # （如 httpx2.RemoteProtocolError 不是 httpx.RemoteProtocolError 的实例），
+        # 因此按「模块前缀 + 类名」识别，兼容 httpx/httpx2/httpcore/httpcore2。
+        exc_module = (type(exc).__module__ or "").split(".", 1)[0]
+        if exc_module in ("httpx", "httpx2", "httpcore", "httpcore2"):
+            if type(exc).__name__ in (
+                "ConnectError",
+                "ConnectTimeout",
+                "ReadError",
+                "ReadTimeout",
+                "WriteError",
+                "WriteTimeout",
+                "PoolTimeout",
+                "TimeoutException",
+                "TransportError",
+                "NetworkError",
+                "RemoteProtocolError",
+                "ConnectionNotAvailable",
             ):
                 return True
-        except ImportError:
-            pass
 
         if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, TimeoutError)):
             return True
