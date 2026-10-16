@@ -154,10 +154,16 @@ class PendingWriter:
         return _walk(data)
 
     def _write_json(self, path: Path, data: dict) -> None:
-        """Write *data* as pretty-printed JSON to *path*, handling errors."""
+        """Write *data* as pretty-printed JSON to *path*, handling errors.
+
+        Atomic (temp file + ``os.replace``) so a crash mid-write cannot leave a
+        truncated analysis record behind.
+        """
         try:
+            from pa_agent.util.atomic_write import atomic_write_text
+
             text = json.dumps(data, ensure_ascii=False, indent=2)
-            path.write_text(text, encoding="utf-8")
+            atomic_write_text(path, text)
         except OSError as exc:
             self._handle_disk_error(exc, path)
 

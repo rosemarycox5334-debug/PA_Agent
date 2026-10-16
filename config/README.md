@@ -12,9 +12,9 @@
    copy config\settings.example.json config\settings.json
    ```
 
-2. 启动程序，在 **设置** 中填写你的 **API Key**（会加密写入 `api_key_encrypted`）。
+2. 启动程序，在 **设置** 中填写你的 **API Key**（写入 `config/settings.json` 的 `provider.api_key` 字段）。
 
-   也可直接编辑 `config/settings.json` 中的 `base_url`、`model` 等字段，Key 仍建议通过 GUI 保存以便自动加密。
+   也可直接编辑 `config/settings.json` 中的 `base_url`、`model` 等字段。该文件已在 `.gitignore` 中排除，且 pre-commit 会拦截误提交；但它本身是**明文 JSON**，请勿分享或提交。
 
 3. `config/exception_state.json` 由程序在需要时自动创建，一般无需手动复制。结构可参考 `exception_state.example.json`。
 
@@ -34,11 +34,13 @@
 |------|------|--------|------|
 | `provider.model` | string | `"deepseek-v4-flash"` | 模型名称（须与网关支持的名称一致） |
 | `provider.base_url` | string | `"https://api.deepseek.com"` | OpenAI 兼容 API 根地址。DeepSeek：`https://api.deepseek.com`；MiMo：`https://api.xiaomimimo.com/v1`（程序自动处理 `enable_thinking` 与 `reasoning_content` 回放） |
-| `provider.api_key` | string | `""` | API Key（明文，内存中临时使用；不持久化到文件） |
-| `provider.api_key_encrypted` | string | `""` | 加密后的 Key；留空表示未配置（通过 GUI 保存时自动加密写入） |
+| `provider.api_key` | string | `""` | API Key；**以明文保存在本文件中**（该文件已 gitignore + pre-commit 拦截，仍请勿分享） |
+| `provider.api_key_encrypted` | string | `""` | 历史遗留字段，程序不再读写（早期版本的加密存储，现已改为明文；保留以避免旧配置报错） |
 | `provider.thinking` | bool | `true` | 是否启用思考/推理类扩展参数（依模型与网关而定）。关闭可 3–5 倍提速但分析质量下降 |
-| `provider.reasoning_effort` | string | `"high"` | 推理深度：`low` / `medium` / `high` / `max` |
+| `provider.reasoning_effort` | string | `"low"` | 推理深度：`low` / `medium` / `high` / `max`（代码默认 `low`；提高档位会更慢更贵） |
 | `provider.context_window` | int | `2000000` | 用于上下文占用提示的窗口大小（tokens） |
+| `provider.response_cache_enabled` | bool | `true` | **响应缓存**：输入指纹（模型+全部消息+思考参数）相同时直接复用上次输出，跳过网络调用。实测「无新增K线复核」这类重复调用从 29s 降到 ~0s，并省下约 21.5 万 tokens |
+| `provider.response_cache_ttl_s` | int | `1800` | 响应缓存存活秒数（0=永不过期）。缓存在 `records/llm_cache/`（已 gitignore） |
 
 ### general — 通用设置
 
@@ -86,6 +88,16 @@
 | `validation.retry_max` | int | `3` | 格式错误（category a）最大重试次数（0–5） |
 | `validation.retry_max_semantic` | int | `1` | 语义错误（category c）最大重试次数（0–3） |
 | `validation.retry_stage2` | bool | `true` | 阶段二校验失败时是否重试 |
+| `validation.cost_viability_check` | bool | `false` | **成本可行性闸门**：拒掉"付不起手续费"的方案（见下方说明） |
+| `validation.min_reward_cost_ratio` | float | `3.0` | 止盈距离至少是双边成本的多少倍（1–50） |
+| `validation.min_win_rate_margin_pct` | float | `5.0` | 自评胜率至少要比"扣成本盈亏平衡胜率"高多少个百分点（0–50） |
+| `validation.assumed_round_trip_cost_pct` | float | `0.30` | 假设的双边总成本（%）：taker 手续费 + 滑点，单边各计一次（0–5） |
+
+> **成本可行性闸门（`cost_viability_check`）为什么值得开**：真实 BTC 数据下，
+> 止盈距离 0.40% 时双边成本 0.30% 已占 75%，该结构需要 **87% 胜率**才不亏；
+> 2 笔/天的交易频率意味着每年 **151%** 本金的手续费。开启后，方案必须同时满足
+> 「止盈 ≥ N× 成本」和「自评胜率 ≥ 扣成本盈亏平衡胜率 + 余量」，否则被拒并回退为
+> 等待（模型会收到失败原因并重试）。默认关闭以保持原有行为。
 
 ## 安全提醒
 

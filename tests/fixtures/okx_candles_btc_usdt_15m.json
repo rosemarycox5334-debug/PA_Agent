@@ -1,0 +1,13 @@
+{
+  "_comment": "SYNTHETIC fixture for pa_agent.data.okx_source. okx.com is unreachable from the review machine (HTTP 000), so this payload was written from the documented /api/v5/market/candles schema ([ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm], newest first, confirm='0' while forming) cross-checked against three public OKX clients. It is NOT a recorded live response. Rows are SPOT BTC-USDT 15m: vol = base (BTC), volCcy = quote (USDT), volCcyQuote = quote (USDT).",
+  "code": "0",
+  "msg": "",
+  "data": [
+    ["1792065600000", "80980.0", "80998.1", "80837.5", "80894.1", "22.38694", "1812104.22", "1812104.22", "0"],
+    ["1792064700000", "81118.0", "81134.0", "80970.0", "80980.0", "79.73037", "6462343.42", "6462343.42", "1"],
+    ["1792063800000", "81050.87", "81189.67", "81008.01", "81118.0", "73.83616", "5989759.61", "5989759.61", "1"],
+    ["1792062900000", "80900.0", "81060.0", "80850.0", "81050.87", "61.20411", "4956781.10", "4956781.10", "1"],
+    ["1792062000000", "80750.0", "80920.0", "80690.0", "80900.0", "58.11223", "4701234.55", "4701234.55", "1"],
+    ["1792061100000", "80600.0", "80780.0", "80540.0", "80750.0", "44.90011", "3623456.78", "3623456.78", "1"]
+  ]
+}

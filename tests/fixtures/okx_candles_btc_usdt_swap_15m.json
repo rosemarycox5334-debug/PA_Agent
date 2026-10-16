@@ -1,0 +1,13 @@
+{
+  "_comment": "SYNTHETIC fixture for pa_agent.data.okx_source (SWAP). Same documented schema as the spot fixture; here vol counts CONTRACTS and volCcy is the base-currency (BTC) size, so the source must take volume from volCcy and turnover from volCcyQuote. Not a recorded live response — okx.com is unreachable from the review machine.",
+  "code": "0",
+  "msg": "",
+  "data": [
+    ["1792065600000", "80980.0", "80998.1", "80837.5", "80894.1", "2238", "22.38694", "1812104.22", "0"],
+    ["1792064700000", "81118.0", "81134.0", "80970.0", "80980.0", "7973", "79.73037", "6462343.42", "1"],
+    ["1792063800000", "81050.87", "81189.67", "81008.01", "81118.0", "7383", "73.83616", "5989759.61", "1"],
+    ["1792062900000", "80900.0", "81060.0", "80850.0", "81050.87", "6120", "61.20411", "4956781.10", "1"],
+    ["1792062000000", "80750.0", "80920.0", "80690.0", "80900.0", "5811", "58.11223", "4701234.55", "1"],
+    ["1792061100000", "80600.0", "80780.0", "80540.0", "80750.0", "4490", "44.90011", "3623456.78", "1"]
+  ]
+}

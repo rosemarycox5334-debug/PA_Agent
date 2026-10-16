@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    env:
+      # Qt widgets run headless in CI; the offscreen platform plugin needs no display.
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
 
@@ -22,3 +25,55 @@ jobs:
 
       - name: Verify install
         run: python -c "import pa_agent; print('OK')"
+
+      # Blocking correctness gate: undefined names, redefinitions, syntax errors.
+      - name: Lint — correctness rules (blocking)
+        run: ruff check . --select F821,F822,F823,F811,E9,F7
+
+      # Blocking suite: the modules this iteration touched (crypto data sources,
+      # validator hardening, atomic writes, refresh loop, settings/factory wiring).
+      # Green as of 2026-10-15; extend it as the rest of the suite is repaired.
+      - name: Tests — changed-area gate (blocking)
+        run: >-
+          pytest -q -p no:cacheprovider
+          tests/unit/test_crypto_sources.py
+          tests/unit/test_crypto_symbols.py
+          tests/unit/test_crypto_gui_wiring.py
+          tests/unit/test_atomic_write.py
+          tests/unit/test_cost_viability.py
+          tests/unit/test_trading_ledger.py
+          tests/unit/test_decision_panel_cost.py
+          tests/unit/test_stall_recovery.py
+          tests/unit/test_response_cache.py
+          tests/unit/test_continuity_guard_audit.py
+          tests/unit/test_decision_panel_suppressed.py
+          tests/unit/test_cost_guard_downgrade.py
+          tests/unit/test_trace_normalize_gate_guard.py
+          tests/unit/test_json_validator.py
+          tests/unit/test_trace_normalize.py
+          tests/unit/test_stage1_normalizer.py
+          tests/unit/test_stage2_normalizer.py
+          tests/unit/test_validation_lenient_fixes.py
+          tests/unit/test_validation_retry.py
+          tests/unit/test_coherence_checks.py
+          tests/unit/test_settings_round_trip.py
+          tests/unit/test_market_defaults.py
+          tests/unit/test_data_source_factory.py
+          tests/unit/test_pending_writer_sanitize.py
+          tests/unit/test_pending_writer_no_plaintext_key.py
+          tests/property/test_json_validator_categories.py
+
+      # Advisory until the pre-existing failures are triaged: ~35 failing tests
+      # (network-dependent or stale assertions) and the 4 e2e smoke tests, which
+      # fail *and* hang headless on HEAD — see docs/源码分析报告.md §B.6/§B.7.
+      - name: Tests — full suite (advisory)
+        run: pytest -q -m "not live and not e2e" --timeout=120
+        continue-on-error: true
+
+      - name: Lint — full rule set (advisory)
+        run: ruff check . --statistics
+        continue-on-error: true
+
+      - name: Format check — black (advisory)
+        run: black --check .
+        continue-on-error: true

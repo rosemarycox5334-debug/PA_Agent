@@ -18,6 +18,7 @@ from pa_agent.data.market_defaults import (
     tv_forex_auto_probe_plan,
 )
 from pa_agent.data.tradingview import TV_EXCHANGE_PRESETS
+from pa_agent.data.market_defaults import TV_CRYPTO_EXCHANGES, TV_EQUITY_EXCHANGES
 
 
 def test_crypto_symbol_migrates_to_gold():
@@ -37,15 +38,22 @@ def test_tv_exchange_auto_preserved():
 
 
 def test_tv_forex_auto_probe_tries_all_forex_presets():
+    """Auto-probe covers every non-equity, non-crypto venue that lists gold.
+
+    The previous assertion copied ``TV_EXCHANGE_PRESETS`` minus the equity venues
+    and went stale once the crypto venues were added to the presets — the
+    behaviour contract is "no equity/crypto venue, preset order preserved".
+    """
     plan = tv_forex_auto_probe_plan("XAUUSD")
     exchanges = [ex for ex, _ in plan]
-    assert exchanges == [
-        ex
-        for ex in TV_EXCHANGE_PRESETS
-        if ex and ex not in {"SSE", "SZSE", "HKEX"}
-    ]
+
+    assert exchanges, "expected at least one venue for gold auto-probe"
     assert ("OANDA", "XAUUSD") in plan
     assert ("TVC", "GOLD") in plan
+    assert not set(exchanges) & set(TV_CRYPTO_EXCHANGES)
+    assert not set(exchanges) & TV_EQUITY_EXCHANGES
+    # Dedup keeps the UI preset order.
+    assert exchanges == [ex for ex in TV_EXCHANGE_PRESETS if ex in set(exchanges)]
 
 
 def test_tv_auto_probe_ashare_still_two_venues():

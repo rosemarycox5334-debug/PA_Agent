@@ -7,7 +7,6 @@ from datetime import timedelta
 from typing import Any
 
 from pa_agent.data.ashare_common import (
-    PRESET_SYMBOLS as _PRESET_SYMBOLS,
     ashare_after_close_today as _ashare_after_close_today,
     ashare_head_bar_live as _ashare_head_bar_live,
     ashare_session_open as _ashare_session_open,

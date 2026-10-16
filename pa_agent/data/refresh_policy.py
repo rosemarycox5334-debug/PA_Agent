@@ -1,7 +1,12 @@
 """Refresh interval, cache TTL, and zombie-loop timing for data sources."""
+
 from __future__ import annotations
 
-HTTP_POLL_SOURCES: frozenset[str] = frozenset({"eastmoney", "akshare"})
+# Sources that poll a public REST API and therefore need a floor on the refresh
+# interval (and a longer grace period before a worker is declared a zombie).
+# Crypto venues are included: Binance/OKX weight limits are generous but not
+# infinite, and the extra interval keeps the UI smooth.
+HTTP_POLL_SOURCES: frozenset[str] = frozenset({"eastmoney", "akshare", "tushare", "binance", "okx"})
 
 HTTP_MIN_REFRESH_MS = 2500
 HTTP_SNAPSHOT_CACHE_TTL_S = 8.0
@@ -20,7 +25,12 @@ def effective_refresh_interval_ms(
     *,
     timeframe: str = "",
 ) -> int:
-    """Clamp user refresh interval for slow HTTP/Baostock sources."""
+    """Clamp user refresh interval for slow HTTP/Baostock sources.
+
+    This is the single source of truth for the refresh floor: the GUI used to
+    inline a partial copy of this rule (which missed the 1d floor and treated
+    ``tushare`` inconsistently) — see the 2026-10 code review.
+    """
     ms = max(500, int(user_ms or 1000))
     if kind in HTTP_POLL_SOURCES:
         ms = max(ms, HTTP_MIN_REFRESH_MS)

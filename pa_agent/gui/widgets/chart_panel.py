@@ -1,8 +1,13 @@
 """ChartPanel — wrapper around ChartWidget with titlebar, legend, and footer."""
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+
+if TYPE_CHECKING:  # runtime import stays inside __init__ (circular import guard)
+    from pa_agent.gui.chart_widget import ChartWidget
 
 
 class ChartPanel(QWidget):

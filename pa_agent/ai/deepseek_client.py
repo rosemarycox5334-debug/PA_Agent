@@ -330,6 +330,19 @@ def _prepare_api_messages(
     return api_messages, system_param
 
 
+def _response_cache_enabled(settings: AIProviderSettings) -> bool:
+    """响应缓存开关（默认开）。设置项缺失时也按开处理。"""
+    return bool(getattr(settings, "response_cache_enabled", True))
+
+
+def _response_cache_ttl_s(settings: AIProviderSettings) -> int:
+    """响应缓存存活秒数（默认 1800）。"""
+    try:
+        return int(getattr(settings, "response_cache_ttl_s", 1800))
+    except (TypeError, ValueError):
+        return 1800
+
+
 def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
     """Per-gateway completion cap (max_tokens); avoids 400 from provider limits."""
     model = (settings.model or "").lower()
@@ -752,6 +765,62 @@ class DeepSeekClient:
             len(api_messages),
         )
 
+        # ── 响应缓存：输入指纹相同就跳过网络调用 ───────────────────────────────
+        # 一次分析 99% 的时间在模型（实测阶段一 31s + 阶段二 43s，本地仅 ~6ms），
+        # 而"无新增K线，基于上一轮结论复核"这类重跑的输入与上一次完全相同。
+        _cache_key: str | None = None
+        if _response_cache_enabled(self._settings):
+            from pa_agent.ai.response_cache import load as _cache_load
+            from pa_agent.ai.response_cache import make_key as _cache_key_of
+
+            _cache_key = _cache_key_of(
+                base_url=self._settings.base_url,
+                model=_effective_api_model(self._settings),
+                api_messages=api_messages,
+                system_param=system_param,
+                thinking=_thinking_on,
+                effort=_effort,
+                max_tokens=_max_tokens,
+            )
+            _cached = _cache_load(_cache_key, ttl_s=_response_cache_ttl_s(self._settings))
+            if _cached is not None:
+                # 把上次输出"重放"给界面，用户看到的是瞬间完成
+                if _cached.reasoning_content and on_reasoning_token is not None:
+                    on_reasoning_token(_cached.reasoning_content)
+                if _cached.content and on_content_token is not None:
+                    on_content_token(_cached.content)
+                self._log.info(
+                    "LLM 响应缓存命中：跳过网络调用（节省 %d prompt / %d completion tokens）",
+                    _cached.prompt_tokens,
+                    _cached.completion_tokens,
+                )
+                return AIReply(
+                    content=_cached.content,
+                    reasoning_content=_cached.reasoning_content,
+                    raw={
+                        "id": f"cache:{_cached.request_id}",
+                        "model": _cached.model or self._settings.model,
+                        "content": _cached.content,
+                        "reasoning_content": _cached.reasoning_content,
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "cached_prompt_tokens": 0,
+                            "cache_miss_tokens": 0,
+                            "cache_hit_rate_pct": 100.0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "saved_prompt_tokens": _cached.prompt_tokens,
+                            "saved_completion_tokens": _cached.completion_tokens,
+                        },
+                        "latency_ms": 0,
+                        "from_cache": True,
+                        "cached_at": _cached.stored_at,
+                    },
+                    usage=AIUsage(),
+                    request_id=f"cache:{_cached.request_id}",
+                    latency_ms=0.0,
+                )
+
         if _OpenAI is None:
             raise RuntimeError("openai package is not installed") from _OPENAI_IMPORT_ERROR
 
@@ -942,6 +1011,20 @@ class DeepSeekClient:
                     "reasoning_content": reasoning_content,
                 },
                 _MIMO_REASONING_CACHE,
+            )
+
+        # 写入响应缓存，供下一次相同输入的调用直接复用（失败不影响主流程）
+        if _cache_key:
+            from pa_agent.ai.response_cache import store as _cache_store
+
+            _cache_store(
+                _cache_key,
+                content=content,
+                reasoning_content=reasoning_content,
+                request_id=request_id,
+                prompt_tokens=int(usage.prompt_tokens or 0),
+                completion_tokens=int(usage.completion_tokens or 0),
+                model=model_name or self._settings.model,
             )
 
         return AIReply(

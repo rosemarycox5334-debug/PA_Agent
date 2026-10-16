@@ -465,8 +465,6 @@ def test_incremental_stage1_normalizes_fenced_previous_response(
     assembler: PromptAssembler,
 ) -> None:
     """Previous assistant with prose + ```json fence becomes bare diagnosis JSON."""
-    import json
-
     from pa_agent.records.schema import AnalysisRecord, RecordMeta
 
     frame = _make_frame(5)

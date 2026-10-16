@@ -94,7 +94,6 @@ _QUIET_LOGGER_NAMES = (
     "httpx",
     "tvDatafeed",
     "tvDatafeed.main",
-    "root",  # tvdatafeed uses logging.getLogger("root") for websocket
     "websocket",
 )
 

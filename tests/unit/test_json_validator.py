@@ -21,6 +21,11 @@ from tests.fixtures.validators import schema_test_validator
 _validator = schema_test_validator()
 
 
+@pytest.mark.skipif(
+    not _SAMPLE.exists(),
+    reason="fixture tools/stage2_raw_sample.txt is not committed to the repo "
+    "(tracked in docs/源码分析报告.md)",
+)
 def test_stage2_raw_sample_repair_then_parse():
     """Broken stage-2 sample with inner quotes must parse after repair."""
     raw = _SAMPLE.read_text(encoding="utf-8")
@@ -31,6 +36,11 @@ def test_stage2_raw_sample_repair_then_parse():
     assert "在区间中部入场" in obj["decision"]["reasoning"]
 
 
+@pytest.mark.skipif(
+    not _SAMPLE.exists(),
+    reason="fixture tools/stage2_raw_sample.txt is not committed to the repo "
+    "(tracked in docs/源码分析报告.md)",
+)
 def test_strip_fences_includes_repair():
     """_strip_fences applies quote repair so json.loads succeeds directly."""
     raw = _SAMPLE.read_text(encoding="utf-8")

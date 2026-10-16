@@ -1535,6 +1535,84 @@ def _fix_9_0_for_planned_limit(out: dict[str, Any]) -> bool:
     return changed
 
 
+def apply_cost_guard(out: dict[str, Any], validation: Any) -> dict[str, Any]:
+    """把"扣成本后不划算"的方案降级为「不下单」（与连续性守卫同一模式）。
+
+    为什么放在归一化阶段而不是校验阶段：校验错误会让**整轮分析中止**，用户看到的是
+    "分析失败"；而正确的语义是"这一单不做"。降级后仍保留完整诊断，并写明原因与被改写
+    的原始方案（`cost_guard`），界面与台账都能据此说明"为什么不下单"。
+    """
+    if not isinstance(out, dict) or validation is None:
+        return out
+    if not getattr(validation, "cost_viability_check", False):
+        return out
+    decision = out.get("decision")
+    if not isinstance(decision, dict):
+        return out
+    if str(decision.get("order_type") or "") == "不下单":
+        return out
+
+    from pa_agent.util.trade_metrics import validate_cost_viability
+
+    msgs = validate_cost_viability(
+        decision,
+        round_trip_cost_pct=float(getattr(validation, "assumed_round_trip_cost_pct", 0.30)),
+        min_reward_cost_ratio=float(getattr(validation, "min_reward_cost_ratio", 3.0)),
+        min_win_rate_margin_pct=float(getattr(validation, "min_win_rate_margin_pct", 5.0)),
+    )
+    if not msgs:
+        return out
+
+    original_plan = {
+        k: decision.get(k)
+        for k in (
+            "order_direction",
+            "order_type",
+            "entry_price",
+            "stop_loss_price",
+            "take_profit_price",
+            "take_profit_price_2",
+            "estimated_win_rate",
+        )
+        if decision.get(k) is not None
+    }
+
+    new_decision = dict(decision)
+    new_decision["order_type"] = "不下单"
+    for key in (
+        "order_direction",
+        "entry_price",
+        "stop_loss_price",
+        "take_profit_price",
+        "take_profit_price_2",
+        "entry_rule",
+        "entry_basis_bar",
+        "entry_basis_extreme",
+        "estimated_win_rate",
+    ):
+        new_decision[key] = None
+
+    reason = str(msgs[0])
+    prefix = f"【程序成本闸门】{reason}；改为不下单。 "
+    max_len = 280  # 与 DECISION_REASONING_MAX_LEN / schema maxLength 保持一致
+    budget = max_len - len(prefix)
+    body = str(new_decision.get("reasoning") or "")
+    if budget < 1:
+        new_decision["reasoning"] = prefix[:max_len]
+    else:
+        if len(body) > budget:
+            body = body[: budget - 1] + "…"
+        new_decision["reasoning"] = prefix + body
+
+    out = dict(out)
+    out["decision"] = new_decision
+    terminal = dict(out.get("terminal") or {})
+    terminal.update({"outcome": "wait", "node_id": "cost", "label": "成本可行性闸门"})
+    out["terminal"] = terminal
+    out["cost_guard"] = {"applied": True, "reason": reason, "original_plan": original_plan}
+    return out
+
+
 def normalize_stage2(
     obj: dict[str, Any],
     *,
@@ -1545,6 +1623,7 @@ def normalize_stage2(
     skip_next_bar: bool = False,
     previous_record: Any | None = None,
     structure_flip_cooldown_bars: int = 3,
+    validation: Any = None,
 ) -> dict[str, Any]:
     """Return a copy of *obj* with decision_trace quirks corrected."""
     out = copy.deepcopy(obj)
@@ -1755,6 +1834,9 @@ def normalize_stage2(
             out = apply_continuity_guard(out, ctx)
         except Exception as exc:  # noqa: BLE001
             logger.warning("apply_continuity_guard failed: %s", exc)
+
+    # 成本闸门：不达标的方案降级为「不下单」，而不是让整轮分析中止
+    out = apply_cost_guard(out, validation)
 
     decision = out.get("decision")
     if isinstance(decision, dict):

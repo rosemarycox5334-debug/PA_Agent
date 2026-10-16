@@ -17,6 +17,12 @@ GOLD_TV_EXCHANGE = "OANDA"
 A_SHARE_DEFAULT_SYMBOL = "000001"
 A_SHARE_DEFAULT_TIMEFRAME = "1h"
 
+# Crypto exchange defaults (public REST market data, no API key).
+# Binance spells pairs concatenated; OKX uses BASE-QUOTE (spot) / -SWAP (perp).
+CRYPTO_DEFAULT_SYMBOL_BINANCE = "BTCUSDT"
+CRYPTO_DEFAULT_SYMBOL_OKX = "BTC-USDT"
+CRYPTO_DEFAULT_TIMEFRAME = "15m"
+
 # Exchange → correct gold symbol on TradingView (do not use XAUUSD on TVC)
 TV_GOLD_SYMBOL_BY_EXCHANGE: dict[str, str] = {
     "OANDA": "XAUUSD",
@@ -99,8 +105,20 @@ def is_likely_crypto_symbol(symbol: str) -> bool:
 def normalize_gold_symbol_for_kind(kind: str, symbol: str) -> str:
     """Map crypto / MT5-style names to gold defaults for *kind*."""
     from pa_agent.data.ashare_common import normalize_ashare_symbol
+    from pa_agent.data.crypto_symbols import looks_like_crypto_pair
 
     sym = (symbol or "").strip()
+    if kind in ("binance", "okx"):
+        # Crypto kinds keep a crypto pair; anything else falls back to the
+        # venue default so switching from MT5/TradingView does not carry a
+        # gold ticker (XAUUSDm) into a crypto endpoint.
+        if looks_like_crypto_pair(sym):
+            return sym
+        return (
+            CRYPTO_DEFAULT_SYMBOL_BINANCE
+            if kind == "binance"
+            else CRYPTO_DEFAULT_SYMBOL_OKX
+        )
     if kind in ("akshare", "eastmoney", "tushare"):
         code = normalize_ashare_symbol(sym)
         if not code or not _looks_like_ashare_code(code):

@@ -89,3 +89,4 @@ class AISidebar(QWidget):
     def bind_settings(self, settings: Optional["Settings"]) -> None:
         self.stream.bind_settings(settings)
         self.decision_flow_viz.bind_settings(settings)
+        self.decision.bind_settings(settings)

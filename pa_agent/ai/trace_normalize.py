@@ -785,6 +785,13 @@ def _repair_gate_result(obj: dict[str, Any]) -> None:
     - §1.3 answer=是 (market is extremely chaotic)
 
     If neither condition holds but gate_result is wait/unknown, force to proceed.
+
+    Positive evidence is required: the §1.2/§1.3 gate nodes must actually be
+    present in ``gate_trace``. A truncated stage-1 response gets an ``AUTO`` stub
+    trace injected by ``json_validator._inject_stage1_missing_tail`` (plus
+    ``gate_result="unknown"``); inferring "gates passed" from *missing* nodes
+    would promote an un-diagnosed chart straight to stage-2 order evaluation, so
+    in that case the status is left as-is and the orchestrator short-circuits.
     """
     gate_result = str(obj.get("gate_result", "")).strip().lower()
     if gate_result not in ("wait", "unknown"):
@@ -792,19 +799,28 @@ def _repair_gate_result(obj: dict[str, Any]) -> None:
     gate = obj.get("gate_trace")
     if not isinstance(gate, list) or not gate:
         return
+
+    def _answers(node_id: str) -> list[str]:
+        return [
+            str(item.get("answer", "")).strip()
+            for item in gate
+            if isinstance(item, dict) and str(item.get("node_id", "")) == node_id
+        ]
+
+    answers_12 = _answers("1.2")
+    answers_13 = _answers("1.3")
+    if not answers_12 and not answers_13:
+        logger.warning(
+            "gate_result %r kept: gate_trace has %d entries but no §1.2/§1.3 node "
+            "— refusing to infer 'proceed' from an incomplete trace",
+            gate_result,
+            len(gate),
+        )
+        return
+
     # Check for valid blocking conditions
-    node_12_block = any(
-        isinstance(item, dict)
-        and str(item.get("node_id", "")) == "1.2"
-        and str(item.get("answer", "")).strip() != "是"
-        for item in gate
-    )
-    node_13_block = any(
-        isinstance(item, dict)
-        and str(item.get("node_id", "")) == "1.3"
-        and str(item.get("answer", "")).strip() == "是"
-        for item in gate
-    )
+    node_12_block = any(answer != "是" for answer in answers_12)
+    node_13_block = any(answer == "是" for answer in answers_13)
     if not node_12_block and not node_13_block:
         obj["gate_result"] = "proceed"
         logger.debug(

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PA Agent 交易信号流程图</title>
+<style>
+  :root{ --bg:#020617; --card:#0f172a; --line:#1e293b; --txt:#e2e8f0; --dim:#94a3b8;
+         --cyan:#22d3ee; --green:#34d399; --violet:#a78bfa; --amber:#fbbf24; --rose:#fb7185; }
+  *{box-sizing:border-box}
+  body{margin:0;padding:22px;background:var(--bg);color:var(--txt);
+       font-family:ui-monospace,"JetBrains Mono",Consolas,"Microsoft YaHei",monospace}
+  .wrap{width:100%;max-width:1340px}
+  svg{display:block;width:100%;height:auto}
+  header{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--green);animation:p 1.8s infinite}
+  @keyframes p{0%,100%{opacity:1}50%{opacity:.25}}
+  h1{font-size:19px;margin:0;letter-spacing:.3px}
+  .sub{color:var(--dim);font-size:11.5px;margin:2px 0 16px 19px}
+  .canvas{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .card h3{font-size:12.5px;margin:0 0 8px;display:flex;align-items:center;gap:7px}
+  .card ul{margin:0;padding-left:14px;color:var(--dim);font-size:11px;line-height:1.75}
+  .cd{width:7px;height:7px;border-radius:50%}
+  footer{color:var(--dim);font-size:10.5px;margin-top:14px}
+  .warn{color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><span class="dot"></span><h1>PA Agent — 交易信号产生流程</h1></header>
+<div class="sub">两阶段 LLM 管线（诊断 → 决策）+ 五道硬闸门 · 行号取自 D:/PA_Agent 工作副本 @ 2026-10-16</div>
+
+<div class="canvas">
+<svg width="1300" height="1470" viewBox="0 0 1300 1470" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#64748b"/></marker>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#fb7185"/></marker>
+  </defs>
+  <rect width="1300" height="1470" fill="url(#grid)"/>
+
+  <!-- ═══ 主干箭头（先画，压在盒子下面） ═══ -->
+  <g stroke="#64748b" stroke-width="1.6" marker-end="url(#a)" fill="none">
+    <path d="M480,126 L480,172"/>
+    <path d="M480,262 L480,308"/>
+    <path d="M480,388 L480,434"/>
+    <path d="M480,554 L480,600"/>
+    <path d="M480,700 L480,746"/>
+    <path d="M480,866 L480,912"/>
+    <path d="M480,1032 L480,1078"/>
+    <path d="M480,1168 L480,1214"/>
+  </g>
+  <!-- 拒单/终止：虚线玫瑰 -->
+  <g stroke="#fb7185" stroke-width="1.4" stroke-dasharray="5,4" marker-end="url(#ar)" fill="none">
+    <path d="M920,350 L956,350"/>
+    <path d="M920,496 L956,496"/>
+    <path d="M920,808 L956,808"/>
+    <path d="M920,974 L956,974"/>
+  </g>
+
+  <!-- ═══ ① 数据层 ═══ -->
+  <g>
+    <rect x="40" y="40" width="880" height="86" rx="6" fill="#0f172a"/>
+    <rect x="40" y="40" width="880" height="86" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="54" y="60" font-size="9" fill="#22d3ee">数据层 · 只读</text>
+    <text x="54" y="80" font-size="13" fill="#e2e8f0">① 行情数据：RefreshLoop 轮询 → KlineFrame（已收盘 K 线 + 指标）</text>
+    <text x="54" y="98" font-size="10" fill="#94a3b8">pa_agent/data/refresh_loop.py:20 QThread · 2.5s 间隔 · 8s 快照缓存 · 币安现货/永续 · OKX · 火币（公共行情，无 API Key）</text>
+    <text x="54" y="114" font-size="10" fill="#94a3b8">断流自愈：数据源已连接但 &gt;15s 无新帧 ⇒ 自动重启刷新循环（30s 冷却）</text>
+  </g>
+
+  <!-- ═══ ② 触发 ═══ -->
+  <g>
+    <rect x="40" y="176" width="880" height="86" rx="6" fill="#0f172a"/>
+    <rect x="40" y="176" width="880" height="86" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="54" y="196" font-size="9" fill="#22d3ee">GUI / 编排入口</text>
+    <text x="54" y="216" font-size="13" fill="#e2e8f0">② 触发：点「提交分析」（无新 K 线时自动变「增量分析」）</text>
+    <text x="54" y="234" font-size="10" fill="#94a3b8">gui/main_window.py:2944 _on_submit_analysis → 3010 _start_analysis → 3040 异步取数 → 3102 _start_analysis_with_bars</text>
+    <text x="54" y="250" font-size="10" fill="#94a3b8">→ 编排器 orchestrator/two_stage.py:359 submit(frame, ...)（内部 24 个编号步骤）</text>
+  </g>
+
+  <!-- ═══ ③ 闸门1 ═══ -->
+  <g>
+    <rect x="40" y="312" width="880" height="76" rx="6" fill="#0f172a"/>
+    <rect x="40" y="312" width="880" height="76" rx="6" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="54" y="332" font-size="9" fill="#fb7185">闸门 1 / 5</text>
+    <text x="54" y="352" font-size="13" fill="#e2e8f0">③ 数据预检（Step 2.5）：不够数据就不烧 token</text>
+    <text x="54" y="370" font-size="10" fill="#94a3b8">two_stage.py:406 check_preflight_data(frame) · ai/decision_nodes.py</text>
+    <text x="54" y="386" font-size="10" fill="#94a3b8">不通过 ⇒ 直接落盘 partial 并结束，一次模型调用都不发起</text>
+  </g>
+
+  <!-- ═══ ④ 阶段一 ═══ -->
+  <g>
+    <rect x="40" y="438" width="880" height="116" rx="6" fill="#0f172a"/>
+    <rect x="40" y="438" width="880" height="116" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="54" y="458" font-size="9" fill="#34d399">LLM 调用 #1 · 阶段一</text>
+    <text x="54" y="478" font-size="13" fill="#e2e8f0">④ 市场诊断：先判断"现在是什么市场"</text>
+    <text x="54" y="496" font-size="10" fill="#94a3b8">Step 4 :432 组装消息 → Step 5 :444 调用 → Step 7 :552 校验（validate_with_retry）</text>
+    <text x="54" y="513" font-size="10" fill="#94a3b8">消息 = 系统提示 + 诊断框架 + 完整 K 线表 + 历史经验 top-5（experience_reader）</text>
+    <text x="54" y="530" font-size="10" fill="#94a3b8">流式输出（界面实时显示思考）；输入指纹命中 ⇒ 复用上次结果，跳过网络（ai/response_cache.py）</text>
+    <text x="54" y="547" font-size="10" fill="#fbbf24">产物：stage1_diagnosis —— 市场状态机 / 所处阶段 / 关键位 / 各项闸门结论</text>
+  </g>
+
+  <!-- ═══ ⑤ 路由 ═══ -->
+  <g>
+    <rect x="40" y="604" width="880" height="96" rx="6" fill="#0f172a"/>
+    <rect x="40" y="604" width="880" height="96" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="54" y="624" font-size="9" fill="#a78bfa">路由</text>
+    <text x="54" y="644" font-size="13" fill="#e2e8f0">⑤ 策略路由：决定阶段二读哪本"规则书"</text>
+    <text x="54" y="662" font-size="10" fill="#94a3b8">Step 10 :712 → ai/router.py:89 route_strategy_files(stage1_json)</text>
+    <text x="54" y="679" font-size="10" fill="#94a3b8">例：诊断出"交易区间" ⇒ 载入区间交易策略文件（实测约 5 万 tokens）</text>
+    <text x="54" y="696" font-size="10" fill="#94a3b8">Step 11 :718 同时载入经验条目（ExperienceReader，top-5）</text>
+  </g>
+
+  <!-- ═══ ⑥ 阶段二 ═══ -->
+  <g>
+    <rect x="40" y="750" width="880" height="116" rx="6" fill="#0f172a"/>
+    <rect x="40" y="750" width="880" height="116" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="54" y="770" font-size="9" fill="#34d399">LLM 调用 #2 · 阶段二</text>
+    <text x="54" y="790" font-size="13" fill="#e2e8f0">⑥ 交易决策：在选定规则下产出可执行的订单方案</text>
+    <text x="54" y="808" font-size="10" fill="#94a3b8">Step 14 :801 组装消息 → Step 15 :827 调用 → Step 17 :943 校验</text>
+    <text x="54" y="825" font-size="10" fill="#94a3b8">消息 = 阶段一诊断 + 策略文件 + 规则条款 + 成本口径要求</text>
+    <text x="54" y="842" font-size="10" fill="#94a3b8">校验含成本闸门：json_validator.py:709 _check_trade_metrics（交易方程）</text>
+    <text x="54" y="859" font-size="10" fill="#94a3b8">· :716 调用 / :868 def _check_cost_viability（启用时：止盈距离须 ≥ N× 双边成本）</text>
+  </g>
+
+  <!-- ═══ ⑦ 归一化 + 硬闸门 ═══ -->
+  <g>
+    <rect x="40" y="916" width="880" height="116" rx="6" fill="#0f172a"/>
+    <rect x="40" y="916" width="880" height="116" rx="6" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="54" y="936" font-size="9" fill="#fb7185">闸门 2–5 / 5</text>
+    <text x="54" y="956" font-size="13" fill="#e2e8f0">⑦ 归一化与硬闸门：把不合规的信号改写成「不下单」</text>
+    <text x="54" y="974" font-size="10" fill="#94a3b8">ai/stage2_normalizer.py:1538 normalize_stage2（结构规范化 + 兜底修复）</text>
+    <text x="54" y="991" font-size="10" fill="#94a3b8">· §10.3 交易方程闸门 ⇒ 不满足则 order_type 改写为「不下单」（stage2_normalizer.py:699）</text>
+    <text x="54" y="1008" font-size="10" fill="#94a3b8">· 连续性守卫 apply_continuity_guard（ai/decision_continuity.py:597，:1755 调用）</text>
+    <text x="54" y="1025" font-size="10" fill="#94a3b8">  判定违规 ⇒ 静默改写为「不下单」并清空全部价格字段（这个动作不报错、不提示）</text>
+  </g>
+
+  <!-- ═══ ⑧ 信号 ═══ -->
+  <g>
+    <rect x="40" y="1082" width="880" height="86" rx="6" fill="#0f172a"/>
+    <rect x="40" y="1082" width="880" height="86" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="54" y="1102" font-size="9" fill="#fbbf24">最终信号</text>
+    <text x="54" y="1122" font-size="13" fill="#e2e8f0">⑧ stage2_decision：这才是"交易信号"本体</text>
+    <text x="54" y="1140" font-size="10" fill="#94a3b8">order_type（市价/限价/不下单）· 入场价 · TP1 · TP2 · 止损 · 预估胜率 · 盈亏比</text>
+    <text x="54" y="1157" font-size="10" fill="#94a3b8">面板另算「扣成本所需胜率」并三档判定（✓ / ≈基本持平 / ⚠ 不达标）——决策面板 + 图标注</text>
+  </g>
+
+  <!-- ═══ ⑨ 产物 ═══ -->
+  <g>
+    <rect x="40" y="1218" width="880" height="116" rx="6" fill="#0f172a"/>
+    <rect x="40" y="1218" width="880" height="116" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="54" y="1238" font-size="9" fill="#a78bfa">产物 · 留痕</text>
+    <text x="54" y="1258" font-size="13" fill="#e2e8f0">⑨ 三个出口：全程留痕 / 上屏 / 可证伪验证</text>
+    <text x="54" y="1276" font-size="10" fill="#94a3b8">records/pending/&lt;时间&gt;_&lt;品种&gt;.json —— 含送入模型的提示词原文、模型原文、token 计量</text>
+    <text x="54" y="1293" font-size="10" fill="#94a3b8">决策面板与图表标注：main_window.py:3491 set_decision（图上画入场/止盈/止损）· :3497 面板</text>
+    <text x="54" y="1310" font-size="10" fill="#94a3b8">trade_records/&lt;品种&gt;.csv（records/trade_logger.py:431，main_window.py:4117 调用）</text>
+    <text x="54" y="1327" font-size="10" fill="#94a3b8">预测台账 records/predictions/predictions.jsonl（tools/trading_ledger.py：到期用真实行情结算）</text>
+  </g>
+
+  <!-- ═══ 右列：拒单 / 终止 ═══ -->
+  <g font-size="10">
+    <rect x="960" y="315" width="340" height="70" rx="6" fill="#0f172a"/>
+    <rect x="960" y="315" width="340" height="70" rx="6" fill="rgba(136,19,55,0.35)" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="4,4"/>
+    <text x="974" y="336" font-size="12" fill="#fb7185">■ 数据不足 ⇒ 终止</text>
+    <text x="974" y="354" fill="#94a3b8">落盘 partial：insufficient_data</text>
+    <text x="974" y="370" fill="#94a3b8">不产生任何信号，也不消耗 token</text>
+
+    <rect x="960" y="456" width="340" height="80" rx="6" fill="#0f172a"/>
+    <rect x="960" y="456" width="340" height="80" rx="6" fill="rgba(136,19,55,0.35)" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="4,4"/>
+    <text x="974" y="477" font-size="12" fill="#fb7185">■ 校验失败 ⇒ 重试后终止</text>
+    <text x="974" y="495" fill="#94a3b8">阶段一/二任一校验不通 ⇒ 分析中止</text>
+    <text x="974" y="511" fill="#94a3b8">记录仍会保存（partial，可复查原因）</text>
+    <text x="974" y="527" fill="#94a3b8">JSON 修复 9 种招式：json_validator.py:212-400</text>
+
+    <rect x="960" y="768" width="340" height="80" rx="6" fill="#0f172a"/>
+    <rect x="960" y="768" width="340" height="80" rx="6" fill="rgba(136,19,55,0.35)" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="4,4"/>
+    <text x="974" y="789" font-size="12" fill="#fb7185">■ 成本不达标 ⇒ 警示/拒单</text>
+    <text x="974" y="807" fill="#94a3b8">止盈距离 &lt; N× 双边成本，或自评胜率</text>
+    <text x="974" y="823" fill="#94a3b8">低于「扣成本盈亏平衡胜率 + 余量」</text>
+    <text x="974" y="839" fill="#94a3b8">默认只警示，可将闸门开启为硬拒单</text>
+
+    <rect x="960" y="929" width="340" height="90" rx="6" fill="#0f172a"/>
+    <rect x="960" y="929" width="340" height="90" rx="6" fill="rgba(136,19,55,0.35)" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="4,4"/>
+    <text x="974" y="950" font-size="12" fill="#fb7185">■ 信号被改写成「不下单」</text>
+    <text x="974" y="968" fill="#94a3b8">§10.3 方程闸门不通过，或连续性违规</text>
+    <text x="974" y="984" fill="#94a3b8">⇒ order_type = 不下单，价格字段全部清空</text>
+    <text x="974" y="1000" fill="#94a3b8">静默发生：界面只看到"不下单"这个结果</text>
+  </g>
+
+  <!-- ═══ 关键边界提示 ═══ -->
+  <g>
+    <rect x="960" y="40" width="340" height="120" rx="6" fill="#0f172a"/>
+    <rect x="960" y="40" width="340" height="120" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="974" y="62" font-size="12" fill="#fbbf24">⚠ 流程的边界（重要）</text>
+    <text x="974" y="82" fill="#94a3b8">全流程只产出「信号文本 + 落盘记录」。</text>
+    <text x="974" y="99" fill="#94a3b8">程序不连券商、不持交易所凭证、</text>
+    <text x="974" y="116" fill="#94a3b8">代码里没有任何下单实现。</text>
+    <text x="974" y="136" fill="#94a3b8">行情端点亦为公共只读接口。</text>
+    <text x="974" y="153" fill="#94a3b8">⇒ 人工看盘决策，全程可追溯。</text>
+  </g>
+
+  <!-- ═══ 图例 ═══ -->
+  <g font-size="10.5">
+    <rect x="40" y="1370" width="1260" height="70" rx="6" fill="#0f172a"/>
+    <rect x="40" y="1370" width="1260" height="70" rx="6" fill="none" stroke="#1e293b" stroke-width="1"/>
+    <text x="56" y="1392" font-size="11" fill="#e2e8f0">图例</text>
+    <rect x="56" y="1404" width="12" height="12" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="76" y="1414" fill="#94a3b8">行情数据 / 界面触发</text>
+    <rect x="236" y="1404" width="12" height="12" rx="3" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="256" y="1414" fill="#94a3b8">路由与产物</text>
+    <rect x="386" y="1404" width="12" height="12" rx="3" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="406" y="1414" fill="#94a3b8">模型阶段（唯一真正耗时处）</text>
+    <rect x="606" y="1404" width="12" height="12" rx="3" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="626" y="1414" fill="#94a3b8">闸门：可以拦掉 / 改写成「不下单」</text>
+    <rect x="886" y="1404" width="12" height="12" rx="3" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="906" y="1414" fill="#94a3b8">最终信号载体</text>
+    <text x="1056" y="1414" fill="#94a3b8">虚线 = 拒绝 / 终止路径</text>
+    <text x="56" y="1432" fill="#64748b">阶段一、阶段二各一次真实 LLM 调用（实测约 31s + 43s，本地代码合计仅 ~6ms）；输入指纹相同则响应缓存直接复用</text>
+  </g>
+</svg>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <h3><span class="cd" style="background:#fb7185"></span>五道闸门（按顺序）</h3>
+    <ul>
+      <li>① 数据预检（Step 2.5）</li>
+      <li>② 阶段一 JSON 校验 + 重试</li>
+      <li>③ 阶段二 JSON 校验（交易方程）</li>
+      <li>④ 成本可行性（止盈 ≥ N× 双边成本）</li>
+      <li>⑤ §10.3 方程闸门 + 连续性守卫（直接改写为「不下单」）</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3><span class="cd" style="background:#34d399"></span>耗时构成（实测）</h3>
+    <ul>
+      <li>本地代码合计：约 6ms（占比 0.008%）</li>
+      <li>阶段一 LLM：约 31.4s</li>
+      <li>阶段二 LLM：约 42.7s</li>
+      <li>输入指纹命中缓存：重复分析 42.7s → 0.2s</li>
+      <li>行情轮询 2.5s / 次，快照缓存 8s</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3><span class="cd" style="background:#a78bfa"></span>信号落地到哪里</h3>
+    <ul>
+      <li>records/pending/*.json（提示词 + 模型原文 + token）</li>
+      <li>决策面板 + 图表标注（入场/止盈/止损）</li>
+      <li>trade_records/*.csv（人工复核用）</li>
+      <li>records/predictions/*.jsonl（台账，到期真实结算）</li>
+    </ul>
+  </div>
+</div>
+
+<footer>PA Agent · 只读分析（不连券商、不下单）· 行号为 <span class="warn">D:/PA_Agent</span> 工作副本实测，非上游版本</footer>
+</div>
+</body>
+</html>

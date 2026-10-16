@@ -610,6 +610,22 @@ def apply_continuity_guard(
     if not reason:
         return stage2
 
+    # 审计用：先把模型给的原始方案留下来。下面会清空价格字段——若不保留，
+    # “模型本来想做什么”就永久丢失，台账/复盘都无法评估这次改写是否值得。
+    original_plan = {
+        k: decision.get(k)
+        for k in (
+            "order_direction",
+            "order_type",
+            "entry_price",
+            "stop_loss_price",
+            "take_profit_price",
+            "take_profit_price_2",
+            "estimated_win_rate",
+        )
+        if decision.get(k) is not None
+    }
+
     decision = dict(decision)
     decision["order_type"] = "不下单"
     for key in (
@@ -646,6 +662,13 @@ def apply_continuity_guard(
     stage2 = dict(stage2)
     stage2["decision"] = decision
     stage2["terminal"] = terminal
+    # 审计用：把被改写的原始方案挂回 stage2 根节点（归一化在 schema 校验之后执行，
+    # 不会触发校验失败）。台账/报告据此评估“守卫这次拦得对不对”。
+    stage2["continuity_guard"] = {
+        "applied": True,
+        "reason": reason,
+        "original_plan": original_plan,
+    }
     return stage2
 
 

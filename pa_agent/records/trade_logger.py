@@ -617,10 +617,17 @@ def _save_trade_record_impl(
         if k in _CSV_FIELDNAMES:
             merged_row[k] = "" if v is None else str(v)
     existing_rows.append(merged_row)
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDNAMES, extrasaction="ignore")
-        writer.writeheader()
-        for r in existing_rows:
-            writer.writerow({k: r.get(k, "") for k in _CSV_FIELDNAMES})
+    # Atomic replace: the previous in-place ``open(..., "w")`` destroyed the
+    # whole trade history if the process died mid-write.
+    import io
+
+    from pa_agent.util.atomic_write import atomic_write_text
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=_CSV_FIELDNAMES, extrasaction="ignore")
+    writer.writeheader()
+    for r in existing_rows:
+        writer.writerow({k: r.get(k, "") for k in _CSV_FIELDNAMES})
+    atomic_write_text(csv_path, buffer.getvalue(), encoding="utf-8-sig", newline="")
 
     logger.info("Trade record appended: %s", csv_path)

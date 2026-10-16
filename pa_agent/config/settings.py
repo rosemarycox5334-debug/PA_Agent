@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
-DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney", "eastmoney_futures", "tushare"]
+DataSourceKind = Literal["mt5", "tradingview", "binance", "okx", "akshare", "eastmoney", "eastmoney_futures", "tushare"]
 NormalizationMode = Literal["strict", "lenient"]
 
 
@@ -20,6 +20,10 @@ class AIProviderSettings(BaseModel):
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "low"
     context_window: int = 2_000_000
+    #: 响应缓存：输入指纹相同（同模型/同消息/同思考参数）时复用上次输出，省时省 token。
+    response_cache_enabled: bool = True
+    #: 响应缓存存活秒数（0=永不过期）。默认 30 分钟。
+    response_cache_ttl_s: int = Field(default=1800, ge=0, le=86_400)
 
 
 class PromptSettings(BaseModel):
@@ -45,6 +49,14 @@ class ValidationSettings(BaseModel):
     stage2_coherence_checks: bool = False
     trace_semantic_checks: bool = False
     strict_bar_by_bar_features: bool = False
+    #: 成本可行性检查：止盈距离必须显著大于双边成本，否则扣成本后属负期望。Off by default.
+    cost_viability_check: bool = False
+    #: 止盈距离 / 双边成本 的最小倍数（cost_viability_check 开启时生效）。
+    min_reward_cost_ratio: float = Field(default=3.0, gt=0, le=50)
+    #: 自评胜率必须比"扣成本盈亏平衡胜率"高出多少个百分点，否则判为不可做。
+    min_win_rate_margin_pct: float = Field(default=5.0, ge=0, le=50)
+    #: 假设的双边总成本（%）：taker 手续费 + 滑点，单边各计一次。
+    assumed_round_trip_cost_pct: float = Field(default=0.30, ge=0, le=5)
     #: Allow Stage 1 truncated JSON tail repair before failing syntax validation.
     disable_truncation_repair: bool = False
     #: Re-call API with structured feedback when validation fails (format errors).
@@ -275,6 +287,9 @@ def save_settings(settings: "Settings", path: Path | None = None) -> None:
     path = path or SETTINGS_JSON_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Atomic write: settings.json used to be truncated by a crash mid-write.
+    from pa_agent.util.atomic_write import atomic_write_text
+
     data = settings.model_dump()
 
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))

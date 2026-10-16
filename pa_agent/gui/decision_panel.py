@@ -5,7 +5,11 @@ from PyQt6.QtCore import Qt
 from typing import Any
 
 from pa_agent.util.trade_metrics import (
+    DEFAULT_MIN_WIN_RATE_MARGIN_PCT,
+    DEFAULT_ROUND_TRIP_COST_PCT,
+    MIN_REWARD_COST_RATIO_DEFAULT,
     compute_risk_reward,
+    cost_viability,
     format_estimated_win_rate,
     max_risk_reward_ratio,
     min_risk_reward_ratio,
@@ -114,9 +118,39 @@ class DecisionPanel(QWidget):
       交易决策区 → 交易决策置信度 (Stage 2 trade_confidence, inline on summary row)
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        cost_config: tuple[float, float, float] | None = None,
+    ) -> None:
+        """*cost_config* = (双边成本%, 止盈/成本最小倍数, 胜率余量百分点)；缺省用模块默认值。"""
         super().__init__(parent)
+        (
+            self._cost_pct,
+            self._min_reward_cost_ratio,
+            self._min_win_rate_margin,
+        ) = cost_config or (
+            DEFAULT_ROUND_TRIP_COST_PCT,
+            MIN_REWARD_COST_RATIO_DEFAULT,
+            DEFAULT_MIN_WIN_RATE_MARGIN_PCT,
+        )
         self._setup_ui()
+
+    def bind_settings(self, settings: Any) -> None:
+        """从 settings.validation 读取成本口径（运行期改配置也会生效）。"""
+        validation = getattr(settings, "validation", settings)
+        if validation is None:
+            return
+        self._cost_pct = float(
+            getattr(validation, "assumed_round_trip_cost_pct", DEFAULT_ROUND_TRIP_COST_PCT)
+        )
+        self._min_reward_cost_ratio = float(
+            getattr(validation, "min_reward_cost_ratio", MIN_REWARD_COST_RATIO_DEFAULT)
+        )
+        self._min_win_rate_margin = float(
+            getattr(validation, "min_win_rate_margin_pct", DEFAULT_MIN_WIN_RATE_MARGIN_PCT)
+        )
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -288,6 +322,17 @@ class DecisionPanel(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._reasoning_edit.setMinimumHeight(120)
+
+        # 程序改写提示：连续性守卫把模型方案改成「不下单」时，这里显眼地说出来。
+        # 原先该动作只写进 reasoning 文本，容易被当成"模型自己不想下单"。
+        self._suppressed_note_label = QLabel("")
+        self._suppressed_note_label.setWordWrap(True)
+        self._suppressed_note_label.setObjectName("suppressedNote")
+        self._suppressed_note_label.setStyleSheet(
+            "color: #d29922; font-size: 13px; font-weight: bold; padding: 4px 0;"
+        )
+        self._suppressed_note_label.setVisible(False)
+        layout.addWidget(self._suppressed_note_label)
         layout.addWidget(self._reasoning_edit, stretch=1)
 
         self.clear()
@@ -428,6 +473,7 @@ class DecisionPanel(QWidget):
         stage1_diagnosis: dict | None = None,
         decision_stance: str | None = None,
         confidence_threshold: int | None = None,
+        suppressed_note: str | None = None,
     ) -> None:
         self._apply_market_diagnosis(diagnosis_summary, stage1_diagnosis)
 
@@ -532,12 +578,7 @@ class DecisionPanel(QWidget):
                 )
                 self._rr_inline_label.setVisible(True)
 
-            win_rate = format_estimated_win_rate(decision)
-            if win_rate:
-                self._win_rate_inline_label.setText(f"预估胜率  {win_rate}")
-            else:
-                self._win_rate_inline_label.setText("预估胜率  —")
-            self._win_rate_inline_label.setVisible(True)
+            self._render_cost_note(decision)
 
             self._apply_trade_confidence_inline(
                 trade_conf, trade_conf_reasoning,
@@ -546,7 +587,50 @@ class DecisionPanel(QWidget):
 
         self._reasoning_edit.setPlainText(str(reasoning) if reasoning else "")
 
+        note = str(suppressed_note or "").strip()
+        self._suppressed_note_label.setText(note)
+        self._suppressed_note_label.setVisible(bool(note))
+
+    def _render_cost_note(self, decision: dict) -> None:
+        """预估胜率 + 扣成本后所需的盈亏平衡胜率（成本不达标标红）。
+
+        依据：``p* = (风险% + 成本%) / (风险% + 止盈%)``。止盈距离小于
+        ``min_reward_cost_ratio`` × 双边成本时，需要的胜率会高到不切实际——
+        这类方案扣成本后是负期望，与方向判断对错无关。
+        """
+        label = self._win_rate_inline_label
+        win_rate = format_estimated_win_rate(decision)
+        head = f"预估胜率  {win_rate}" if win_rate else "预估胜率  —"
+        v = cost_viability(decision, round_trip_cost_pct=self._cost_pct)
+        if v is None:
+            label.setText(head)
+            label.setStyleSheet("font-size: 13px; font-weight: bold; color: #a371f7;")
+        else:
+            need = float(v["breakeven_win_rate_pct"])
+            ratio = float(v["reward_cost_ratio"])
+            ratio_ok = ratio >= self._min_reward_cost_ratio
+            win_pct = v.get("win_rate_pct")
+            gap = need - float(win_pct) if isinstance(win_pct, (int, float)) else None
+            if not ratio_ok:
+                # 止盈相对成本太小：扣成本后需要的胜率不切实际
+                mark, color = f"⚠ 成本不达标 {ratio:.2f}×", "#f85149"
+            elif gap is None:
+                mark, color = "✓", "#3fb950"
+            elif gap <= 0:
+                mark, color = "✓", "#3fb950"
+            elif gap <= self._min_win_rate_margin:
+                # 与盈亏平衡基本持平：不拒单，但也不能显示成"通过"
+                mark, color = f"≈ 基本持平（差 {gap:.1f}pt）", "#d29922"
+            else:
+                mark, color = f"⚠ 自评胜率低 {gap:.1f}pt", "#f85149"
+            label.setText(f"{head}（扣成本需 ≥{need:.1f}% {mark}）")
+            label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {color};")
+            label.setToolTip(str(v["text"]))
+        label.setVisible(True)
+
     def clear(self) -> None:
+        self._suppressed_note_label.setText("")
+        self._suppressed_note_label.setVisible(False)
         self._trend_label.setText("趋势：—")
         self._apply_diag_chip_style(self._trend_label, color="#6e7681")
         self._cycle_label.setText("周期：—")

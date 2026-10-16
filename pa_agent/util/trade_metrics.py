@@ -228,12 +228,159 @@ def passes_trader_equation(
     win_rate_pct: float,
     risk: float,
     reward: float,
+    cost: float = 0.0,
 ) -> bool:
-    """Brooks equation: win_rate × reward > (1 - win_rate) × risk."""
-    if risk <= 0 or reward <= 0:
+    """Brooks equation, cost-aware: p × (reward − cost) > (1 − p) × (risk + cost).
+
+    *cost* is a **price distance** (``entry_price × round_trip_cost_pct / 100``),
+    charged once for the entry and once for the exit leg; ``0.0`` keeps the
+    cost-free behaviour.
+
+    A zero-expectancy trade (breakeven) does **not** pass: the comparison carries
+    a relative epsilon, because without it a 50/50 setup crossed the strict ``>``
+    on floating-point noise alone (measured: risk 325.8399999999965 vs reward
+    325.84000000001106 → "passing" a coin-flip trade).
+    """
+    if risk <= 0 or reward <= 0 or cost < 0:
         return False
     p = max(0.0, min(100.0, float(win_rate_pct))) / 100.0
-    return p * reward > (1.0 - p) * risk
+    gross_gain = reward - cost
+    gross_loss = risk + cost
+    if gross_gain <= 0:
+        return False
+    return p * gross_gain > (1.0 - p) * gross_loss + _EQUATION_EPS * (risk + reward)
+
+
+#: 默认双边总成本（%）：现货 taker 0.10%/边 + 滑点 0.05%/边
+DEFAULT_ROUND_TRIP_COST_PCT = 0.30
+#: 默认要求：止盈距离 ≥ 3× 双边成本（低于此值扣成本后需要的胜率不切实际）
+MIN_REWARD_COST_RATIO_DEFAULT = 3.0
+#: 自评胜率至少要比"扣成本盈亏平衡胜率"高这么多个百分点，否则拒单
+DEFAULT_MIN_WIN_RATE_MARGIN_PCT = 5.0
+
+#: 方程比较的相对容差（乘以 risk+reward），用于吞掉浮点噪声而非吞掉零期望
+_EQUATION_EPS = 1e-9
+
+
+def round_trip_cost_price(entry: object, round_trip_cost_pct: float) -> float:
+    """双边总成本折算成**价格距离**：``entry × cost% / 100``。"""
+    try:
+        e = float(entry)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, float(round_trip_cost_pct)) / 100.0 * e
+
+
+def breakeven_win_rate_pct(risk: float, reward: float, cost: float = 0.0) -> float:
+    """扣成本后的盈亏平衡胜率（%）：(risk + cost) / (risk + reward)。"""
+    denom = risk + reward
+    if denom <= 0:
+        return 100.0
+    return (risk + cost) / denom * 100.0
+
+
+def cost_viability(
+    decision: dict[str, Any],
+    *,
+    round_trip_cost_pct: float = DEFAULT_ROUND_TRIP_COST_PCT,
+) -> dict[str, float | str] | None:
+    """A plan's cost-aware viability, computed from the *decision prices*.
+
+    Uses TP2 when present (the plan's further target) so the verdict is the most
+    generous reading of the plan. Returns ``None`` when prices are unusable.
+    """
+    target = decision.get("take_profit_price_2")
+    try:
+        if target is None or float(target) <= 0:  # type: ignore[arg-type]
+            target = decision.get("take_profit_price")
+    except (TypeError, ValueError):
+        target = decision.get("take_profit_price")
+
+    rr = compute_risk_reward(
+        decision.get("entry_price"),
+        target,
+        decision.get("stop_loss_price"),
+        decision.get("order_direction"),
+    )
+    if rr is None:
+        return None
+
+    entry = float(decision.get("entry_price"))  # type: ignore[arg-type]
+    risk = float(rr["risk"])
+    reward = float(rr["reward"])
+    cost = round_trip_cost_price(entry, round_trip_cost_pct)
+    ratio = reward / cost if cost > 0 else float("inf")
+    return {
+        "risk": risk,
+        "reward": reward,
+        "risk_pct": risk / entry * 100,
+        "reward_pct": reward / entry * 100,
+        "rr": float(rr["ratio"]),
+        "cost": cost,
+        "round_trip_cost_pct": float(round_trip_cost_pct),
+        "reward_cost_ratio": ratio,
+        "cost_share_of_reward_pct": cost / reward * 100 if reward > 0 else float("inf"),
+        "breakeven_win_rate_pct": breakeven_win_rate_pct(risk, reward, cost),
+        "win_rate_pct": _parse_win_rate(decision.get("estimated_win_rate")),
+        "text": (
+            f"止盈距离 {reward / entry * 100:.3f}% 为双边成本 {round_trip_cost_pct:.2f}% 的 "
+            f"{ratio:.2f} 倍（成本占止盈 {cost / reward * 100:.1f}%），"
+            f"盈亏比 {float(rr['ratio']):.2f}，扣成本后需胜率 ≥ "
+            f"{breakeven_win_rate_pct(risk, reward, cost):.1f}% 才不亏"
+        ),
+    }
+
+
+def validate_cost_viability(
+    decision: dict[str, Any],
+    *,
+    round_trip_cost_pct: float = DEFAULT_ROUND_TRIP_COST_PCT,
+    min_reward_cost_ratio: float = MIN_REWARD_COST_RATIO_DEFAULT,
+    min_win_rate_margin_pct: float = DEFAULT_MIN_WIN_RATE_MARGIN_PCT,
+) -> list[str]:
+    """Reject plans that cannot pay for their own costs.
+
+    Two independent rules, both cheap and both fatal to profitability:
+
+    1. **Target too small vs cost** — a 0.4% target with a 0.3% round trip needs
+       an 87% win rate; negative-expectancy no matter how good the read is.
+    2. **Model's own win rate below the cost-inclusive breakeven** — when the
+       model claims 52% but this geometry needs 63.4%, the plan fails on its own
+       numbers, so nothing is gained by relaxing rule 1.
+
+    The margin (``min_win_rate_margin_pct``) keeps rounding noise from failing a
+    plan that is essentially at breakeven.
+    """
+    order_type = decision.get("order_type")
+    if order_type not in ("限价单", "突破单", "市价单"):
+        return []
+    v = cost_viability(decision, round_trip_cost_pct=round_trip_cost_pct)
+    if v is None:
+        return []
+
+    errors: list[str] = []
+    ratio = float(v["reward_cost_ratio"])
+    need = float(v["breakeven_win_rate_pct"])
+    if ratio < float(min_reward_cost_ratio):
+        errors.append(
+            f"decision prices: reward distance is only {ratio:.2f}× the "
+            f"round-trip cost {round_trip_cost_pct:.2f}% (need ≥ {min_reward_cost_ratio:.2f}×); "
+            f"cost eats {float(v['cost_share_of_reward_pct']):.1f}% of the target, so the plan "
+            f"needs a {need:.1f}% win rate to break even — "
+            "widen the target, tighten the stop, or set order_type=不下单"
+        )
+
+    win_rate = v.get("win_rate_pct")
+    if isinstance(win_rate, (int, float)) and need - float(win_rate) > float(
+        min_win_rate_margin_pct
+    ):
+        errors.append(
+            f"decision prices: estimated_win_rate {float(win_rate):.1f}% is below the "
+            f"cost-inclusive breakeven {need:.1f}% by {need - float(win_rate):.1f} points "
+            f"(round-trip cost {round_trip_cost_pct:.2f}%) — the plan fails on its own "
+            "numbers; set order_type=不下单 or propose a geometry whose target clears the cost"
+        )
+    return errors
 
 
 def _parse_win_rate(value: object) -> float | None:

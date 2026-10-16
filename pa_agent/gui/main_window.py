@@ -296,6 +296,8 @@ class MainWindow(QMainWindow):
         self._demo_waiting_flow_playback = False
         self._startup_api_key_check_done = False
         self._startup_tv_connectivity_check_done = False
+        #: 启动后是否已自动开始拉取行情（只做一次）
+        self._startup_autostart_fetch_done = False
         self._symbol_switch_timer: QTimer | None = None
         self._pending_symbol_switch: tuple[str, str] | None = None
         # RefreshLoop runs in its own QThread
@@ -669,6 +671,8 @@ class MainWindow(QMainWindow):
         status_row = QHBoxLayout()
         status_row.addStretch()
         self._last_refresh_ts: float = 0.0
+        #: 上次数据流自愈（重启 RefreshLoop）的时间戳，用于冷却
+        self._last_stall_recovery_ts: float = 0.0
         self._refresh_elapsed_label = QLabel("距上次刷新: —")
         self._refresh_elapsed_label.setObjectName("mutedLabel")
         status_row.addWidget(self._refresh_elapsed_label)
@@ -767,8 +771,16 @@ class MainWindow(QMainWindow):
         if settings is not None:
             interval_ms = getattr(settings.general, "refresh_interval_ms", 1000)
             n_bars = self._analysis_bar_count()
-        if self._current_data_source_kind() in ("akshare", "eastmoney", "tushare") and interval_ms < 2500:
-            interval_ms = 2500
+        # Single source of truth for the refresh floor (HTTP/poll sources and
+        # crypto venues). Previously inlined here with an incomplete copy of
+        # the rule — see pa_agent.data.refresh_policy.
+        from pa_agent.data.refresh_policy import effective_refresh_interval_ms
+
+        interval_ms = effective_refresh_interval_ms(
+            self._current_data_source_kind(),
+            interval_ms,
+            timeframe=self._tf_combo.currentText(),
+        )
 
         self._refresh_cancel_token = CancelToken()
         self._refresh_loop = RefreshLoop(
@@ -1131,6 +1143,14 @@ class MainWindow(QMainWindow):
             line.setPlaceholderText(
                 "A股 6 位 / 港股 1810 / 名称 小米集团；交易所可自动；或 XAUUSD+OANDA"
             )
+        elif kind == "binance":
+            line.setPlaceholderText(
+                "币安交易对：BTCUSDT（现货）或 BTCUSDT.perp（U 本位永续）；也接受 BTC/USDT"
+            )
+        elif kind == "okx":
+            line.setPlaceholderText(
+                "OKX 交易对：BTC-USDT（现货）或 BTC-USDT-SWAP（永续）；也接受 BTCUSDT"
+            )
         elif kind == "eastmoney_futures":
             line.setPlaceholderText("选择左侧品种后在此选合约, 或直接输入如 AO2509")
         elif kind in ("akshare", "eastmoney", "tushare"):
@@ -1321,7 +1341,11 @@ class MainWindow(QMainWindow):
     def _switch_data_source(self, kind: str) -> None:
         """Replace ctx.data_source, reconnect, and restart RefreshLoop."""
         from pa_agent.config.settings import save_settings
-        from pa_agent.data.factory import create_data_source, data_source_label
+        from pa_agent.data.factory import (
+            create_data_source,
+            data_source_label,
+            subscribe_with_fallback,
+        )
 
         if self._switching:
             return
@@ -1365,7 +1389,28 @@ class MainWindow(QMainWindow):
                 new_source.on_probe_status = self._on_tv_probe_status
             new_source.connect()
             self._apply_tv_exchange_to_source(new_source)
-            new_source.subscribe(symbol, timeframe)
+            used_symbol, used_tf = subscribe_with_fallback(
+                new_source, kind, symbol, timeframe
+            )
+            if used_symbol != symbol or used_tf != timeframe:
+                logger.info(
+                    "Data source %s rejected %s %s — switched to %s %s",
+                    kind,
+                    symbol,
+                    timeframe,
+                    used_symbol,
+                    used_tf,
+                )
+                self._symbol_combo.blockSignals(True)
+                self._symbol_combo.setCurrentText(used_symbol)
+                self._symbol_combo.blockSignals(False)
+                self._tf_combo.blockSignals(True)
+                self._tf_combo.setCurrentText(used_tf)
+                self._tf_combo.blockSignals(False)
+                self._status_bar.showMessage(
+                    f"{data_source_label(kind)} 不支持 {symbol} {timeframe}，"
+                    f"已切换为 {used_symbol} {used_tf}"
+                )
 
             self._ctx.data_source = new_source
 
@@ -1809,9 +1854,45 @@ class MainWindow(QMainWindow):
         # Turn red if stale (> 10 seconds without update)
         if elapsed > 10:
             label.setStyleSheet("color: #f85149; font-size: 11px;")
+            # 长时间没有新帧 → 尝试自愈（重启刷新循环）
+            self._maybe_recover_stalled_feed(float(elapsed))
         else:
             label.setObjectName("mutedLabel")
             label.setStyleSheet("")
+
+    #: 数据流卡死自愈阈值：超过这么多秒没有新帧就重启刷新循环
+    _STALL_RECOVER_S = 15.0
+    #: 自愈冷却时间，避免重启风暴
+    _STALL_RECOVER_COOLDOWN_S = 30.0
+
+    def _maybe_recover_stalled_feed(self, elapsed_s: float) -> None:
+        """行情长时间未更新时自动重启 RefreshLoop（自愈）。
+
+        实测场景（2026-10-15 22:09）：切换数据源到 OKX 失败再切回币安后，刷新循环
+        被停掉却没有任何路径再启动它 —— 之后 7 分钟**零次行情请求**，界面继续显示
+        旧价格（80,859.74 vs 市场 81,057，差 0.4%），状态格还写着「已就绪」。
+        用户会把过期价格当成实时价，这是最危险的一类缺陷。
+        """
+        import time as _time
+
+        if elapsed_s < self._STALL_RECOVER_S:
+            return
+        if getattr(self, "_analysis_in_progress", False) or getattr(self, "_switching", False):
+            return  # 分析/切换进行中会自己重启，不要抢
+        data_source = getattr(self._ctx, "data_source", None)
+        if data_source is None or not getattr(data_source, "_connected", False):
+            return
+        now = _time.monotonic()
+        if now - getattr(self, "_last_stall_recovery_ts", 0.0) < self._STALL_RECOVER_COOLDOWN_S:
+            return
+        self._last_stall_recovery_ts = now
+        logger.warning("行情已 %d 秒未更新（数据源已连接）→ 自动重启 RefreshLoop", int(elapsed_s))
+        self._stop_refresh_loop()
+        self._set_chart_refresh_paused(False)
+        self._start_refresh_loop()
+        bar = getattr(self, "_status_bar", None)
+        if bar is not None:
+            bar.showMessage(f"行情 {int(elapsed_s)} 秒未更新，已自动重启数据刷新")
 
     def _on_data_frame(self, frame: Any) -> None:
         """Forward a new KlineFrame to the chart widget (throttled by 30 Hz timer)."""
@@ -2082,6 +2163,7 @@ class MainWindow(QMainWindow):
             # "获取数据" again.
             data_source = getattr(self._ctx, "data_source", None)
             if data_source is not None and getattr(data_source, "_connected", False):
+                self._set_chart_refresh_paused(False)
                 self._start_refresh_loop()
 
             # Check for prior analysis record — if found, show a hint in the
@@ -3371,6 +3453,45 @@ class MainWindow(QMainWindow):
         s1 = getattr(self, "_last_stage1_diagnosis", None)
         return s1 if isinstance(s1, dict) else {}
 
+    @staticmethod
+    def _continuity_override_note(decision: dict) -> str | None:
+        """把"程序改写了模型方案"变成界面上一句显眼提示。
+
+        两类改写（都在归一化阶段发生，属于**程序**行为而非模型意愿，必须让用户看见）：
+        - `continuity_guard`：方案自相矛盾（如 direction=neutral 却给方向性订单、
+          上一轮方案未失效就在同结构位反手）；
+        - `cost_guard`：扣成本后不划算（止盈距离 < N× 双边成本，或自评胜率低于
+          扣成本盈亏平衡胜率 + 余量）。
+        """
+        if not isinstance(decision, dict):
+            return None
+        for key, label in (("continuity_guard", "连续性守卫"), ("cost_guard", "成本闸门")):
+            guard = decision.get(key)
+            if not isinstance(guard, dict) or not guard.get("applied"):
+                continue
+            plan = guard.get("original_plan") if isinstance(guard.get("original_plan"), dict) else {}
+            bits: list[str] = []
+            if plan.get("order_direction"):
+                bits.append(str(plan["order_direction"]))
+            if plan.get("order_type"):
+                bits.append(str(plan["order_type"]))
+            for pkey, tag in (
+                ("entry_price", "入场"),
+                ("stop_loss_price", "止损"),
+                ("take_profit_price", "止盈"),
+            ):
+                val = plan.get(pkey)
+                if isinstance(val, (int, float)):
+                    bits.append(f"{tag} {val:g}")
+            reason = str(guard.get("reason") or "").strip()
+            note = f"⚠ 程序{label}已把模型方案改写为「不下单」"
+            if reason:
+                note += f"：{reason}"
+            if bits:
+                note += f"（模型原方案：{' · '.join(bits)}）"
+            return note
+        return None
+
     def _on_analysis_finished(self, decision: dict) -> None:
         """Called on the main thread when the AI worker completes.
 
@@ -3418,6 +3539,7 @@ class MainWindow(QMainWindow):
                 stage1_diagnosis=stage1_diag or None,
                 decision_stance=stance,
                 confidence_threshold=self._confidence_threshold(),
+                suppressed_note=self._continuity_override_note(decision),
             )
             self._future_trend_panel.set_prediction(inner)
             self._bind_decision_tree(decision, stage1_diag or None)
@@ -4191,6 +4313,28 @@ class MainWindow(QMainWindow):
         if not self._startup_tv_connectivity_check_done:
             self._startup_tv_connectivity_check_done = True
             QTimer.singleShot(0, self._on_startup_tv_connectivity_check)
+        if not self._startup_autostart_fetch_done:
+            self._startup_autostart_fetch_done = True
+            QTimer.singleShot(0, self._on_startup_autostart_fetch)
+
+    def _on_startup_autostart_fetch(self) -> None:
+        """启动后自动开始拉取行情，省掉一次「刷新数据」点击。
+
+        2026-10 交互审查：此前启动后图表一直是空的、五个状态格显示「等待数据」，
+        用户必须先点「刷新数据」才看得到行情——对「打开就想看图」的使用方式不友好。
+        复用「刷新数据」同一条代码路径（``_on_fetch_data_clicked``）。
+
+        TradingView 保持原行为：它需要联网探测，作者有意不在启动时探测
+        （见 ``_on_startup_tv_connectivity_check``），否则启动即弹连通性对话框。
+        """
+        if self._current_data_source_kind() == "tradingview":
+            return
+        data_source = getattr(self._ctx, "data_source", None)
+        if data_source is None or not getattr(data_source, "_connected", False):
+            return
+        logger.info("启动自动拉取行情：%s", self._current_data_source_kind())
+        self._on_fetch_data_clicked()
+
     def _on_startup_tv_connectivity_check(self) -> None:
         if self._current_data_source_kind() != "tradingview":
             return

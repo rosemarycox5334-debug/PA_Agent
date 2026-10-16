@@ -10,9 +10,17 @@ run:
 test:
 	pytest -q
 
-# 代码检查
+# CI 门禁用例集：排除需联网的 live 与无头下挂死的 e2e（见 docs/源码分析报告.md §B.7）
+test-ci:
+	pytest -q -m "not live and not e2e" --timeout=120
+
+# 代码检查（全量：当前仓库仍有历史债，见 docs/源码分析报告.md）
 lint:
 	ruff check . && black --check .
+
+# CI 阻断门：真实错误规则（未定义名/重复定义/语法错误），当前全仓可通过
+lint-critical:
+	ruff check . --select F821,F822,F823,F811,E9,F7
 
 # ===== 对应 uv 隔离环境版本 =====
 
@@ -36,4 +44,4 @@ uv-lint: .venv
 setup-secrets:
 	powershell -ExecutionPolicy Bypass -File tools/setup_git_secrets.ps1
 
-.PHONY: run test lint uv-run uv-test uv-lint setup-secrets
+.PHONY: run test test-ci lint lint-critical uv-run uv-test uv-lint setup-secrets

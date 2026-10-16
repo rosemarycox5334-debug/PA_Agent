@@ -50,7 +50,7 @@ pa-agent
 1. 程序启动后自动创建 `config/settings.json`（默认配置）
 2. 如提示 MT5 未连接，确保 MetaTrader 5 终端已打开并登录
 3. 首次使用需在 **菜单 → 设置** 中填写 API Key
-4. API Key 通过 Windows DPAPI 加密存储，不会明文写入磁盘
+4. API Key 保存在 `config/settings.json` 的 `provider.api_key` 字段（**明文 JSON**；该文件已 gitignore，仍请勿分享）
 
 ### 环境要求
 
@@ -456,7 +456,7 @@ PA Agent 内置一套**二元决策树**（基于 `prompt_engineering/二元决�
 | ---------------- | ---------------- | ----------------------------- |
 | 模型 (model)       | AI 模型名称          | `claude-sonnet-4-6`           |
 | Base URL         | API 接口地址         | `https://www.packyapi.com/v1` |
-| API Key          | API 密钥（加密存储）     | 空                             |
+| API Key          | API 密钥（明文存于 `config/settings.json`） | 空                             |
 | Thinking         | 是否启用扩展思考         | 开启                            |
 | Reasoning Effort | 思考深度             | `max`                         |
 | Context Window   | 上下文窗口大小          | 2,000,000                     |
@@ -571,6 +571,19 @@ PA Agent 内置一套**二元决策树**（基于 `prompt_engineering/二元决�
 - 通过 tvDatafeed 拉取（可无账号匿名，数据可能受限）
 - 现货黄金等需配置 **交易所**（如 OANDA + XAUUSD）
 
+### 币安 Binance 数据源
+
+- 公共行情 REST，**无需 API Key**（只读行情，程序不会下单）
+- 现货：`BTCUSDT`、`ETH/USDT`；U 本位永续：`BTCUSDT.perp`
+- 时间周期 1m ~ 1M；`api.binance.com` 不可达时自动切换官方行情域 `data-api.binance.vision`
+- 永续走 `fapi.binance.com`，该域无公共镜像，被墙时需配置代理
+
+### OKX 欧易数据源
+
+- 公共行情 REST，**无需 API Key**
+- 现货：`BTC-USDT`；永续：`BTC-USDT-SWAP`（也可直接输入 `BTCUSDT`，程序自动转换）
+- `okx.com` 在部分网络被拦截，请设置环境变量 `HTTPS_PROXY`（如 `http://127.0.0.1:7890`）后重启程序
+
 ### 刷新循环（RefreshLoop）
 
 - 默认每 1 秒从当前数据源拉取最新 K 线
@@ -650,12 +663,12 @@ experience/
 
 ## 19. 安全与密钥管理
 
-### API Key 加密
+### API Key 存储
 
-- 使用 Windows DPAPI（Data Protection API）加密
-- 存储在 `settings.json` 中的 `api_key_encrypted` 字段（Base64 编码）
-- 明文 `api_key` **永远不会写入磁盘**
-- 加密/解密类：`pa_agent.security.secret_store.SecretStore`
+- API Key 保存在 `config/settings.json` 的 `provider.api_key` 字段，**为明文 JSON**
+- 该文件已在 `.gitignore` 中排除；仓库 pre-commit 钩子会拦截误提交（`make setup-secrets` 启用）
+- 请通过系统文件权限保护该文件，不要把 `settings.json`、日志或分析记录分享给他人
+- 历史字段 `api_key_encrypted` 已废弃，程序不再读写（早期版本曾计划加密存储）
 
 ### 日志脱敏
 

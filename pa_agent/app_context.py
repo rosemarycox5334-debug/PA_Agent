@@ -103,8 +103,6 @@ class AppContext:
             app_logger.warning("Initial data source subscription failed: %s", exc)
 
         # ── AI client ─────────────────────────────────────────────────────────
-        from pa_agent.ai.client_factory import create_ai_client
-
         client = create_ai_client(settings.provider, logger_=app_logger)
 
         # ── Prompt assembler ──────────────────────────────────────────────────

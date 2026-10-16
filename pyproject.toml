@@ -35,6 +35,7 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",
+    "pytest-timeout>=2.3",
     "hypothesis>=6",
     "ruff>=0.5",
     "black>=24.4",
@@ -56,7 +57,11 @@ target-version = "py311"
 
 [tool.ruff.lint]
 extend-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]
+# E501: line length is handled by black (line-length = 100).
+# RUF001/002/003: the source and UI text are intentionally Chinese; the
+# "ambiguous unicode character" rules fire on every full-width punctuation mark
+# (：，（）) and would flag the whole codebase.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

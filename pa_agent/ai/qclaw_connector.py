@@ -14,10 +14,16 @@ Usage::
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import json
 import logging
 from pathlib import Path
 from typing import Any
+
+if TYPE_CHECKING:  # type-checker-only import (annotations stay lazy at runtime)
+    from pa_agent.config.settings import AIProviderSettings
+
 
 logger = logging.getLogger(__name__)
 

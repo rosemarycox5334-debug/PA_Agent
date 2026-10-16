@@ -487,6 +487,7 @@ class JsonValidator:
             decision_stance=decision_stance,
             stage1_json=stage1_json,
             skip_next_bar=False,
+            validation=self._validation,
             previous_record=previous_record,
             structure_flip_cooldown_bars=structure_flip_cooldown_bars,
         )
@@ -605,9 +606,14 @@ class JsonValidator:
         # ── Schema validation (b and c) ───────────────────────────────────────
         try:
             import jsonschema  # type: ignore[import]
-        except ImportError:
-            logger.warning("jsonschema not installed; skipping schema validation")
-            return Ok(obj=obj)
+        except ImportError as exc:  # pragma: no cover - declared hard dependency
+            # Fail closed. Returning Ok() here accepted *any* parsed object as a
+            # valid model response, which silently disables the guard against
+            # hallucinated/invalid trade decisions (2026-10 code review).
+            raise RuntimeError(
+                "jsonschema 未安装，无法校验模型输出，已中止本次分析。"
+                "请执行 pip install 'jsonschema>=4.22' 后重试。"
+            ) from exc
 
         errors = list(jsonschema.Draft7Validator(schema).iter_errors(obj))
 
@@ -707,6 +713,10 @@ class JsonValidator:
                 kline_frame=kline_frame,
             ):
                 invalid.append(f"metrics:{msg}")
+
+            # 成本可行性**不再**作为校验错误（那会让整轮分析中止、用户只看到"分析失败"）。
+            # 改由归一化阶段的 stage2_normalizer.apply_cost_guard() 把这类方案降级为
+            # 「不下单」并写明原因；数学仍在 util.trade_metrics 里统一实现。
 
             if getattr(self._validation, "stage2_coherence_checks", False):
                 from pa_agent.ai.decision_tree import validate_stage2_trace_consistency
@@ -856,6 +866,15 @@ class JsonValidator:
             if isinstance(obj.get("bar_analysis"), dict)
             else None,
         )
+
+    def _check_cost_viability(self, obj: dict) -> list[str]:
+        """已停用（保留仅为兼容旧调用；不要重新接进校验错误列表）。
+
+        历史：早期把成本不达标当作校验错误 → 模型改不出方案时整轮分析以
+        `validation_error` 中止（实测 16 个窗口里有 1 个如此，用户看到"分析失败"）。
+        现在改由 `stage2_normalizer.apply_cost_guard()` 在归一化阶段降级为「不下单」。
+        """
+        return []
 
     @staticmethod
     def _check_breakout_price_extreme(obj: dict, kline_frame: Any = None) -> list[str]:
