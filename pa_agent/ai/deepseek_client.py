@@ -220,6 +220,19 @@ def _is_bai(base_url: str) -> bool:
     return "b.ai" in (base_url or "").lower()
 
 
+def _is_bailian(base_url: str) -> bool:
+    """Aliyun Bailian (DashScope) OpenAI-compatible gateway.
+
+    百炼 OpenAI 兼容网关要求 max_tokens 落在 [1, 131072]；未识别的 base_url
+    一律使用 _PRACTICAL_UNLIMITED_MAX_TOKENS，超出上限网关会直接返回错误。
+    通过 base_url 含 aliyuncs.com 或 dashscope 识别，公共端点
+    （dashscope.aliyuncs.com）与专属部署（<workspace>.<region>.maas.aliyuncs.com）
+    均能匹配。
+    """
+    url = (base_url or "").lower()
+    return "aliyuncs.com" in url or "dashscope" in url
+
+
 # Packy claude-officially returns 400 if max_tokens exceeds model output cap.
 _PACKY_CLAUDE_MAX_OUTPUT_TOKENS = 128_000
 # DeepSeek API: max_tokens must be in [1, 393216].
@@ -233,6 +246,10 @@ _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 # B.AI (api.b.ai) 网关：deepseek-v4-flash 的 completion 上限（官方路由配 8192）。
 # 超过此值 B.AI 会返回 400，因此单独限流。
 _BAI_MAX_OUTPUT_TOKENS = 8_192
+# Aliyun Bailian (DashScope) OpenAI 兼容网关：max_tokens 上限 131072，
+# 超出会被网关拒绝。覆盖公共端点（dashscope.aliyuncs.com）与专属部署
+# （<workspace>.<region>.maas.aliyuncs.com）。
+_BAILIAN_MAX_OUTPUT_TOKENS = 131_072
 
 
 def _model_uses_claude_adaptive(model: str) -> bool:
@@ -335,6 +352,11 @@ def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
         cap = _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
     elif _is_deepseek_native(settings.base_url):
         cap = _DEEPSEEK_MAX_OUTPUT_TOKENS
+    elif _is_bailian(settings.base_url):
+        # 百炼 / DashScope OpenAI 兼容网关 max_tokens 上限 131072，
+        # 超出会被网关拒绝。检测 base_url 优先于 _is_deepseek_model —— 通过
+        # 百炼代理调用 deepseek 模型时，max_tokens 上限随网关而非 DeepSeek 原生。
+        cap = _BAILIAN_MAX_OUTPUT_TOKENS
     elif _is_sensenova(settings.base_url):
         _smodel = (settings.model or "").lower()
         if "glm" in _smodel:
