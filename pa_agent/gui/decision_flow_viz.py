@@ -486,7 +486,7 @@ class _DecisionNode(QGraphicsObject):
         painter.drawText(
             QRectF(w / 2 - pad_x - 108, h - 44, 96, 30),
             int(Qt.AlignmentFlag.AlignCenter),
-            "AI NODE",
+            "NODE" if self._item.get("source") == "local_rules" else "AI NODE",
         )
         # Show override badge if AI overrode the program decision
         if self._overridden:
@@ -850,6 +850,8 @@ class DecisionFlowVizPanel(QWidget):
             "卡片 = 判断节点 · 左 = 否 / 右 = 是 · 亮线 = AI 实际路径\n"
             "虚线框 = 未走分支含义（二元决策树） · 拖拽平移 · Ctrl + 滚轮缩放"
         )
+        self._legend_label = sub
+        self._normal_legend = sub.text()
         sub.setObjectName("mutedLabel")
         sub.setWordWrap(True)
         sub.setStyleSheet(
@@ -876,6 +878,9 @@ class DecisionFlowVizPanel(QWidget):
         layout.setSpacing(6)
         layout.addLayout(title_row)
         layout.addWidget(sub)
+        from pa_agent.gui.analysis_details import AnalysisDetails
+        self._analysis_details = AnalysisDetails()
+        layout.addWidget(self._analysis_details)
         layout.addWidget(self._hud_label)
         layout.addWidget(self._play_status)
         layout.addWidget(self._view, stretch=1)
@@ -946,6 +951,9 @@ class DecisionFlowVizPanel(QWidget):
 
     def _default_zoom_factor(self) -> float:
         """Scale applied after fitInView (1.0 = fit size; no upper cap—uses settings % / 100)."""
+        trace = (self._last_trace_kw or {}).get("decision_trace") or []
+        if any(item.get("source") == "local_rules" for item in trace if isinstance(item, dict)):
+            return 1.0
         if self._settings is None:
             return 6.0
         pct = int(getattr(self._settings.general, "decision_flow_default_zoom_pct", 600))
@@ -1038,8 +1046,17 @@ class DecisionFlowVizPanel(QWidget):
         terminal_id = str(terminal.get("node_id", "--")) if terminal else "--"
         gate_text = gate_result or ("short" if gate_shortcircuited else "ready")
         status_color = _OUTCOME_COLOR.get(outcome, _NEON_CYAN)
+        local = any(x.get("source") == "local_rules" for x in merged)
+        from pa_agent.ai.decision_display import SOURCE_DETAILS
+        self._analysis_details.set_details(SOURCE_DETAILS if local else "")
+        if local:
+            self._legend_label.setText("卡片 = 判断节点 · 亮线 = 当前决策路径\n拖拽平移 · Ctrl + 滚轮缩放")
+            gate_text = "路径展示"
+        else:
+            self._legend_label.setText(self._normal_legend)
+        title = "DECISION MATRIX" if local else "AI TACTICAL DECISION MATRIX"
         self._hud_label.setText(
-            "<span style='color:{cyan}; font-weight:700;'>AI TACTICAL DECISION MATRIX</span>"
+            "<span style='color:{cyan}; font-weight:700;'>{title}</span>"
             " &nbsp; <span style='color:{muted};'>|</span> &nbsp; "
             "GATE <span style='color:{amber};'>{gate}</span>"
             " &nbsp; <span style='color:{muted};'>|</span> &nbsp; "
@@ -1049,6 +1066,7 @@ class DecisionFlowVizPanel(QWidget):
             " &nbsp; <span style='color:{muted};'>|</span> &nbsp; "
             "TERMINAL <span style='color:{status};'>§{terminal_id} {outcome}</span>"
             .format(
+                title=title,
                 cyan=_NEON_CYAN,
                 muted=T.TEXT_MUTED,
                 amber=_NEON_AMBER,
@@ -1142,6 +1160,10 @@ class DecisionFlowVizPanel(QWidget):
         gate_shortcircuited: bool = False,
     ) -> bool:
         """Build flowchart; return True if there is a path to play."""
+        if any(isinstance(x, dict) and x.get("source") == "local_rules" for x in (decision_trace or [])):
+            from pa_agent.ai.decision_display import compact_trace, compact_terminal
+            decision_trace = compact_trace(decision_trace)
+            terminal = compact_terminal(terminal)
         self._last_trace_kw = {
             "gate_trace": gate_trace,
             "decision_trace": decision_trace,

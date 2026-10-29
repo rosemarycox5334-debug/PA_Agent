@@ -346,6 +346,24 @@ class TwoStageOrchestrator:
         self._pending_writer = pending_writer
         self._exp_reader = exp_reader
         self._settings = settings
+        # Set to True as soon as a provider fallback (GLM-4-flash, ...) takes
+        # over. While True, schema / enum validation is relaxed: the fallback
+        # model's free-text answers are accepted so the GUI can still render,
+        # instead of retrying forever on strict enums it does not understand.
+        self._on_fallback_provider: bool = False
+        # Provider actually used for THIS analysis after any in-run fallback.
+        # It must never be written back into settings.provider, otherwise the
+        # user's saved configuration would silently turn into the fallback model.
+        self._active_provider: Any | None = None
+        # Set by _stream_chat_resilient when the spare channel rescued a stage,
+        # so the stage can attach the fallback trace to the reply it returns.
+        self._pending_free_meta: dict[str, Any] | None = None
+
+    def _provider(self) -> Any:
+        """Provider for the current request: in-run fallback wins, else config."""
+        if self._active_provider is not None:
+            return self._active_provider
+        return getattr(self._settings, "provider", None)
 
     def _validation_settings(self) -> Any:
         if self._settings is not None and hasattr(self._settings, "validation"):
@@ -394,8 +412,12 @@ class TwoStageOrchestrator:
         """
         # ── Step 1: Build partial record ──────────────────────────────────────
         record = _build_empty_record(frame, self._settings)
+        # Every analysis starts from the user's configured provider again.
+        self._active_provider = None
+        self._on_fallback_provider = False
         # Clear stale free-fallback traces from a previous submit on this instance.
         self._last_sensenova_fallback_failure = None  # type: ignore[attr-defined]
+        self._pending_free_meta = None
 
         # ── Step 2: Pre-Stage-1 cancel check ─────────────────────────────────
         if cancel_token.is_set():
@@ -430,7 +452,10 @@ class TwoStageOrchestrator:
             )
 
         # ── Step 4: Build Stage 1 messages ───────────────────────────────────
-        if previous_record is not None and incremental_new_bar_count is not None:
+        if self._glm_flash_lite():
+            from pa_agent.ai.glm_flash_lite import build_messages
+            messages_s1 = build_messages(frame, "stage1")
+        elif previous_record is not None and incremental_new_bar_count is not None:
             messages_s1 = self._assembler.build_incremental_stage1(
                 frame,
                 previous_record,
@@ -452,7 +477,9 @@ class TwoStageOrchestrator:
         logger.debug("="*80 + "\n")
 
         # Notify conversation tab of the prompt being sent
-        if on_stage_prompt is not None:
+        if on_stage_prompt is not None and not self._glm_flash_lite():
+            # Lite route: stage headers are written together with the readable
+            # summary, so the pane never shows an empty stage section first.
             s1_system = next((m.get("content", "") for m in messages_s1 if m.get("role") == "system"), "")
             s1_user = next((m.get("content", "") for m in messages_s1 if m.get("role") == "user"), "")
             on_stage_prompt("stage1", s1_system, s1_user)
@@ -483,6 +510,14 @@ class TwoStageOrchestrator:
             "incremental_previous_stage1": prev_s1,
         }
 
+        def _s1_validation_settings() -> Any:
+            """Resolve contract after routing, including mid-call switches."""
+            base = self._validation_settings()
+            s1_validate_kwargs["glm_flash_lite"] = self._glm_flash_lite()
+            if not self._on_fallback_provider and not self._glm_flash_lite():
+                return base
+            return base.model_copy(update={"retry_enabled": False})
+
         def _validate_s1_reply(reply: Any) -> Any:
             from pa_agent.ai.json_validator import coalesce_model_json_text
 
@@ -490,10 +525,15 @@ class TwoStageOrchestrator:
                 getattr(reply, "content", None) or "",
                 getattr(reply, "reasoning_content", None) or "",
             )
-            return self._validator.validate("stage1", content, **s1_validate_kwargs)
+            return self._validator.validate(
+                "stage1", content, relaxed=self._on_fallback_provider, **s1_validate_kwargs
+            )
 
         s1_usage_calls: list[Any] = []
         s1_fallback_meta: dict[str, Any] | None = None
+        # Shared with _stream_chat_resilient so the spare channel is attempted
+        # once, before the configured provider chain, and never twice.
+        s1_free_lane_state: dict[str, bool] = {"tried": False}
         reply_s1: Any = None
         result_s1: Any = None
         s1_validation_attempts = 0
@@ -509,6 +549,19 @@ class TwoStageOrchestrator:
                 thinking=_thinking,
                 reasoning_effort=_effort,
                 stage_label="Stage 1",
+                frame=frame,
+                free_lane=lambda exc: self._try_sensenova_free_stage(
+                    stage="stage1",
+                    messages=messages_s1,
+                    validate_reply=_validate_s1_reply,
+                    on_reasoning_token=_on_s1_reasoning,
+                    on_content_token=_on_s1_content,
+                    cancel_token=cancel_token,
+                    on_progress=on_stage1_content,
+                    reason=str(exc),
+                    frame=frame,
+                ),
+                free_lane_state=s1_free_lane_state,
             )
         except Exception as exc:
             from pa_agent.ai.sensenova_fallback import is_cancel_or_interrupt
@@ -530,11 +583,20 @@ class TwoStageOrchestrator:
             else:
                 raise
 
+        # A spare-channel success inside the resilient call is already final;
+        # its meta travels back through the orchestrator instance.
+        if self._pending_free_meta is not None:
+            s1_fallback_meta = self._pending_free_meta
+            self._pending_free_meta = None
+
         if s1_primary_error is None and reply_s1 is not None:
-            if not s1_streamed_reasoning and reply_s1.reasoning_content:
-                _emit_buffered_stream(reply_s1.reasoning_content, on_stage1_reasoning)
-            if not s1_streamed_content and reply_s1.content:
-                _emit_buffered_stream(reply_s1.content, on_stage1_content)
+            from pa_agent.ai.lite_output_normalize import is_local_stage1
+            local_stage1 = is_local_stage1(raw=getattr(reply_s1, "raw", None))
+            if not local_stage1:
+                if not s1_streamed_reasoning and reply_s1.reasoning_content:
+                    _emit_buffered_stream(reply_s1.reasoning_content, on_stage1_reasoning)
+                if not s1_streamed_content and reply_s1.content:
+                    _emit_buffered_stream(reply_s1.content, on_stage1_content)
 
             # ── Step 6: Post-Stage-1-call cancel check ────────────────────────────
             if cancel_token.is_set():
@@ -592,7 +654,7 @@ class TwoStageOrchestrator:
                     messages=messages_s1,
                     reply=reply_s1,
                     validator=self._validator,
-                    validation_settings=self._validation_settings(),
+                    validation_settings=_s1_validation_settings(),
                     validate_kwargs=s1_validate_kwargs,
                     call_api=_call_s1_retry,
                     provider_settings=getattr(self._settings, "provider", None),
@@ -622,8 +684,12 @@ class TwoStageOrchestrator:
                 else:
                     raise
 
-        # SenseNova free fallback: primary Exception / ValidationError recoveries
-        if s1_primary_error is not None or isinstance(result_s1, ValidationError):
+        # SenseNova free fallback: primary Exception / ValidationError recoveries.
+        # Skipped when the resilient call already ran the spare channel (it is
+        # attempted once, ahead of the configured provider chain).
+        if not s1_free_lane_state["tried"] and (
+            s1_primary_error is not None or isinstance(result_s1, ValidationError)
+        ):
             recovered = self._try_sensenova_free_stage(
                 stage="stage1",
                 messages=messages_s1,
@@ -637,6 +703,7 @@ class TwoStageOrchestrator:
                     if s1_primary_error is not None
                     else "阶段一输出未通过校验"
                 ),
+                frame=frame,
             )
             if recovered is not None:
                 reply_s1, result_s1, s1_fallback_meta = recovered
@@ -810,19 +877,23 @@ class TwoStageOrchestrator:
             )
             or 3
         )
-        messages_s2 = self._assembler.build_stage2_continuation(
-            frame=frame,
-            stage1_messages=messages_s1,
-            stage1_reply_content=reply_s1.content,
-            stage1_json=stage1_json,
-            strategy_files=strategy_files,
-            experience_entries=experience_entries,
-            decision_stance=record.meta.decision_stance,
-            previous_record=previous_record,
-            enable_next_bar_prediction=_enable_next_bar,
-            provider_settings=getattr(self._settings, "provider", None),
-            structure_flip_cooldown_bars=_flip_cooldown,
-        )
+        if self._glm_flash_lite():
+            from pa_agent.ai.glm_flash_lite import build_messages
+            messages_s2 = build_messages(frame, "stage2")
+        else:
+            messages_s2 = self._assembler.build_stage2_continuation(
+                frame=frame,
+                stage1_messages=messages_s1,
+                stage1_reply_content=reply_s1.content,
+                stage1_json=stage1_json,
+                strategy_files=strategy_files,
+                experience_entries=experience_entries,
+                decision_stance=record.meta.decision_stance,
+                previous_record=previous_record,
+                enable_next_bar_prediction=_enable_next_bar,
+                provider_settings=getattr(self._settings, "provider", None),
+                structure_flip_cooldown_bars=_flip_cooldown,
+            )
 
         # ── Step 15: Call AI for Stage 2 ──────────────────────────────────────
         logger.debug("\n" + "="*80)
@@ -835,7 +906,7 @@ class TwoStageOrchestrator:
         logger.debug("="*80 + "\n")
 
         # Notify conversation tab of the prompt being sent
-        if on_stage_prompt is not None:
+        if on_stage_prompt is not None and not self._glm_flash_lite():
             s2_system = next((m.get("content", "") for m in messages_s2 if m.get("role") == "system"), "")
             s2_user = next((m.get("content", "") for m in reversed(messages_s2) if m.get("role") == "user"), "")
             on_stage_prompt("stage2", s2_system, s2_user)
@@ -851,6 +922,12 @@ class TwoStageOrchestrator:
 
         def _on_s2_content(chunk: str) -> None:
             nonlocal s2_streamed_content
+            if self._glm_flash_lite():
+                # The lite contract streams raw JSON, which is unreadable in the
+                # chat pane. The readable summary is pushed once the record is
+                # ready; skip chunk replay so the pane is not filled with JSON.
+                s2_streamed_content = True
+                return
             s2_streamed_content = True
             if on_stage2_content is not None:
                 on_stage2_content(chunk)
@@ -864,6 +941,14 @@ class TwoStageOrchestrator:
             "structure_flip_cooldown_bars": _flip_cooldown,
         }
 
+        def _s2_validation_settings() -> Any:
+            """Resolve contract after routing, including mid-call switches."""
+            base = self._validation_settings()
+            s2_validate_kwargs["glm_flash_lite"] = self._glm_flash_lite()
+            if not self._on_fallback_provider and not self._glm_flash_lite():
+                return base
+            return base.model_copy(update={"retry_enabled": False})
+
         def _validate_s2_reply(reply: Any) -> Any:
             from pa_agent.ai.json_validator import coalesce_model_json_text
 
@@ -871,10 +956,15 @@ class TwoStageOrchestrator:
                 getattr(reply, "content", None) or "",
                 getattr(reply, "reasoning_content", None) or "",
             )
-            return self._validator.validate("stage2", content, **s2_validate_kwargs)
+            return self._validator.validate(
+                "stage2", content, relaxed=self._on_fallback_provider, **s2_validate_kwargs
+            )
 
         s2_usage_calls: list[Any] = []
         s2_fallback_meta: dict[str, Any] | None = None
+        # Shared with _stream_chat_resilient so the spare channel is attempted
+        # once, before the configured provider chain, and never twice.
+        s2_free_lane_state: dict[str, bool] = {"tried": False}
         reply_s2: Any = None
         result_s2: Any = None
         s2_validation_attempts = 0
@@ -894,6 +984,20 @@ class TwoStageOrchestrator:
                 thinking=_thinking,
                 reasoning_effort=_effort,
                 stage_label="Stage 2",
+                frame=frame,
+                free_lane=lambda exc: self._try_sensenova_free_stage(
+                    stage="stage2",
+                    messages=messages_s2,
+                    validate_reply=_validate_s2_reply,
+                    on_reasoning_token=_on_s2_reasoning,
+                    on_content_token=_on_s2_content,
+                    cancel_token=cancel_token,
+                    on_progress=on_stage2_content,
+                    reason=str(exc),
+                    frame=frame,
+                    stage1_json=stage1_json,
+                ),
+                free_lane_state=s2_free_lane_state,
             )
         except Exception as exc:
             from pa_agent.ai.sensenova_fallback import is_cancel_or_interrupt
@@ -916,7 +1020,8 @@ class TwoStageOrchestrator:
         if s2_primary_error is None and reply_s2 is not None:
             if not s2_streamed_reasoning and reply_s2.reasoning_content:
                 _emit_buffered_stream(reply_s2.reasoning_content, on_stage2_reasoning)
-            if not s2_streamed_content and reply_s2.content:
+            # Lite replies are raw JSON; main_window pushes a readable summary.
+            if not s2_streamed_content and reply_s2.content and not self._glm_flash_lite():
                 _emit_buffered_stream(reply_s2.content, on_stage2_content)
 
             # ── Step 16: Post-Stage-2-call cancel check ───────────────────────────
@@ -983,7 +1088,7 @@ class TwoStageOrchestrator:
                     messages=messages_s2,
                     reply=reply_s2,
                     validator=self._validator,
-                    validation_settings=self._validation_settings(),
+                    validation_settings=_s2_validation_settings(),
                     validate_kwargs=s2_validate_kwargs,
                     call_api=_call_s2_retry,
                     provider_settings=getattr(self._settings, "provider", None),
@@ -1013,7 +1118,16 @@ class TwoStageOrchestrator:
                 else:
                     raise
 
-        if s2_primary_error is not None or isinstance(result_s2, ValidationError):
+        # A spare-channel success inside the resilient call is already final.
+        if self._pending_free_meta is not None:
+            s2_fallback_meta = self._pending_free_meta
+            self._pending_free_meta = None
+
+        # Skipped when the resilient call already ran the spare channel (it is
+        # attempted once, ahead of the configured provider chain).
+        if not s2_free_lane_state["tried"] and (
+            s2_primary_error is not None or isinstance(result_s2, ValidationError)
+        ):
             recovered = self._try_sensenova_free_stage(
                 stage="stage2",
                 messages=messages_s2,
@@ -1027,6 +1141,8 @@ class TwoStageOrchestrator:
                     if s2_primary_error is not None
                     else "阶段二输出未通过校验"
                 ),
+                frame=frame,
+                stage1_json=stage1_json,
             )
             if recovered is not None:
                 reply_s2, result_s2, s2_fallback_meta = recovered
@@ -1184,10 +1300,10 @@ class TwoStageOrchestrator:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _thinking_params(self) -> tuple[bool, str]:
-        """Return (thinking, reasoning_effort) from settings defaults."""
-        if self._settings is None:
+        """Return (thinking, reasoning_effort) from the provider in use."""
+        p = self._provider()
+        if p is None:
             return True, "low"
-        p = self._settings.provider
         return p.thinking, p.reasoning_effort
 
     def _sensenova_free_eligible(self) -> bool:
@@ -1205,6 +1321,103 @@ class TwoStageOrchestrator:
             return ""
         return str(getattr(self._settings.provider, "api_key", "") or "")
 
+    def _accept_fallback_stage2(self, result: Any, content: str) -> Any:
+        """Never reject a free-fallback stage-2 reply: rerun relaxed, else salvage.
+
+        The free lane runs the small lite prompt on third-party models. A strict
+        ValidationError here used to rotate to the next candidate, which burned
+        the whole pool on contract mismatches the model never saw. Since this
+        lane is explicitly best-effort, accept whatever parses and let the
+        normalizer and the continuity/trade guards decide the plan.
+        """
+        from pa_agent.ai.json_validator import Ok, ValidationError
+
+        if isinstance(result, Ok):
+            return result
+        # Preferred: the lite contract. It renders the model's plan as-is and
+        # skips every RR / trader-equation / win-rate gate, which is exactly
+        # what "do not validate the free lane" means here. Its own
+        # check_contract is structural only (order_type, reasoning strings).
+        lite = self._validator.validate(
+            "stage2", content, relaxed=False, glm_flash_lite=True,
+            **self._relaxed_kwargs("stage2"),
+        )
+        if isinstance(lite, Ok):
+            logger.warning(
+                "Free fallback stage2 accepted via lite contract (strict: %s)",
+                getattr(result, "message", "")[:200],
+            )
+            return lite
+        # Next: relaxed parse. No schema/enum checks, but the normalizer (and
+        # therefore the trade-metric gate) still runs, so a structurally broken
+        # plan can end up as 不下单 — acceptable as a last resort.
+        relaxed = self._validator.validate(
+            "stage2", content, relaxed=True, **self._relaxed_kwargs("stage2")
+        )
+        if isinstance(relaxed, Ok):
+            logger.warning(
+                "Free fallback stage2 accepted in relaxed mode (strict: %s, lite: %s)",
+                getattr(result, "message", "")[:200],
+                getattr(lite, "message", "")[:200],
+            )
+            return relaxed
+        from pa_agent.ai.json_salvage import salvage_stage2
+
+        try:
+            salvaged = salvage_stage2(content)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Free fallback stage2 salvage failed: %s", exc)
+            return ValidationError(
+                category="c", stage="stage2", raw_text=content,
+                message=f"free fallback unrecoverable: {getattr(result, 'message', '')}",
+            )
+        logger.warning(
+            "Free fallback stage2 rebuilt from raw text (strict: %s)",
+            getattr(result, "message", "")[:200],
+        )
+        return Ok(obj=salvaged)
+
+    def _accept_fallback_stage1(self, result: Any, content: str) -> Any:
+        """Never reject a free-fallback stage-1 reply: fill from local diagnosis."""
+        from pa_agent.ai.json_validator import Ok
+
+        if isinstance(result, Ok):
+            return result
+        logger.warning(
+            "Free fallback stage1 rejected by contract (%s); using local diagnosis",
+            getattr(result, "message", "")[:200],
+        )
+        return Ok(obj=self._local_stage1_obj())
+
+    def _local_stage1_obj(self) -> dict[str, Any]:
+        """Rule-based stage-1 context used when the free lane cannot comply."""
+        from pa_agent.ai.glm_flash_lite import local_diagnosis
+
+        frame = getattr(self, "_fallback_frame", None)
+        if frame is None:
+            return {
+                "cycle_position": "trading_range", "direction": "neutral",
+                "diagnosis_confidence": 0, "market_phase": "stable",
+                "detected_patterns": [], "key_signals": [],
+                "htf_context": "本地规则示意（非模型推理，非逐节点验证）",
+                "entry_setup": "由决策阶段独立判断", "strategy_files_needed": [],
+                "bar_by_bar_summary": [], "gate_trace": [], "gate_result": "proceed",
+                "trace_source": "local_rules", "diagnosis_source": "local_compatibility",
+            }
+        return local_diagnosis(frame)
+
+    def _relaxed_kwargs(self, stage: str) -> dict[str, Any]:
+        # relaxed=True already skips schema/enum/coherence checks and runs the
+        # normalizer. Passing glm_flash_lite here would re-enable the lite
+        # contract checks, which is stricter than intended for this lane.
+        frame = getattr(self, "_fallback_frame", None)
+        if stage == "stage1":
+            return {"kline_frame": frame}
+        return {
+            "kline_frame": frame,
+            "stage1_json": getattr(self, "_fallback_stage1", None),
+        }
+
     def _try_sensenova_free_stage(
         self,
         *,
@@ -1216,6 +1429,8 @@ class TwoStageOrchestrator:
         cancel_token: CancelToken,
         on_progress: Callable[[str], None] | None = None,
         reason: str = "",
+        frame: Any = None,
+        stage1_json: dict[str, Any] | None = None,
     ) -> tuple[Any, Any, dict[str, Any]] | None:
         """On SenseNova primary failure, try bounded free candidates.
 
@@ -1252,15 +1467,37 @@ class TwoStageOrchestrator:
             "[提示] 界面会显示当前处理进度，请稍候。\n",
         )
         self._last_sensenova_fallback_failure = None  # type: ignore[attr-defined]
+        self._fallback_frame = frame
+        self._fallback_stage1 = stage1_json
+
+        # The free lane is explicitly best-effort: never reject an upstream
+        # reply on contract grounds and never rotate to the next candidate just
+        # because a third-party model ignored the lite schema. Accept whatever
+        # parses, re-validating in relaxed mode, then salvage, then fall back to
+        # local rules. Only the strict/relaxed path is affected; the primary
+        # provider keeps full validation.
+        def _accept_any(reply: Any) -> Any:
+            result = validate_reply(reply)
+            from pa_agent.ai.json_validator import coalesce_model_json_text
+
+            content = coalesce_model_json_text(
+                getattr(reply, "content", None) or "",
+                getattr(reply, "reasoning_content", None) or "",
+            )
+            if stage == "stage1":
+                return self._accept_fallback_stage1(result, content)
+            return self._accept_fallback_stage2(result, content)
+
         try:
             outcome = run_free_stage_fallback(
                 messages=messages,
-                validate=validate_reply,
+                validate=_accept_any,
                 primary_api_key=self._primary_api_key(),
                 cancel_token=cancel_token,
                 on_reasoning_token=on_reasoning_token,
                 on_content_token=on_content_token,
                 on_progress=on_progress,
+                stream=True,
             )
         except Exception as exc:
             if is_cancel_or_interrupt(exc):
@@ -1330,6 +1567,11 @@ class TwoStageOrchestrator:
             meta.update(extra)
         return meta
 
+    def _glm_flash_lite(self) -> bool:
+        from pa_agent.ai.glm_flash_lite import is_glm_flash
+
+        return is_glm_flash(self._provider())
+
     def _stream_chat_resilient(
         self,
         messages: list[dict[str, Any]],
@@ -1340,27 +1582,108 @@ class TwoStageOrchestrator:
         thinking: bool,
         reasoning_effort: str,
         stage_label: str,
+        frame: KlineFrame | None = None,
+        free_lane: Callable[[BaseException], Any] | None = None,
+        free_lane_state: dict[str, bool] | None = None,
     ) -> Any:
-        """Call stream_chat; on connection error, switch to QClaw and retry once."""
+        """Call stream_chat with layered fallbacks.
+
+        Layer 0: spare channel (``free_lane``), tried once, only when supplied.
+        Layer 1: settings.provider.fallbacks chain (any non-cancel exception).
+        Layer 2: on network error, WorkBuddy / TRAE Work CN / QClaw for openclaw_* models.
+        Provider-chain switching is in-memory only; settings.json is never rewritten.
+        """
         original_model = (
             self._settings.provider.model if self._settings is not None else ""
         )
         tried_qclaw = False
         tried_workbuddy = False
         tried_trae_cn = False
+        tried_provider_keys: set[tuple[str, str]] = set()
+        last_provider_exc: Exception | None = None
+        # Capture the fallback chain once. After a successful switch,
+        # settings.provider points at the fallback candidate (whose own
+        # fallbacks list is empty), so re-reading it inside the loop would
+        # lose the remaining candidates.
+        if self._settings is not None:
+            from pa_agent.ai.glm_backup import ensure_glm_fallback
+
+            # SenseNova primary + configured GLM key => glm-4-flash backup.
+            ensure_glm_fallback(self._settings.provider)
+        provider_fallback_chain = (
+            list(getattr(self._settings.provider, "fallbacks", []) or [])
+            if self._settings is not None else []
+        )
         while True:
+            lite = self._glm_flash_lite()
+            if lite:
+                from pa_agent.ai.glm_flash_lite import build_messages, local_diagnosis
+                if frame is None:
+                    raise ValueError("备用通道精简分析缺少K线快照")
+                stage = "stage1" if stage_label == "Stage 1" else "stage2"
+                # Mutate the audit list too: record what was actually sent,
+                # including when the primary failed midway through this call.
+                messages[:] = build_messages(frame, stage)
+                if stage == "stage1":
+                    import json
+                    from pa_agent.ai.deepseek_client import AIReply, AIUsage
+                    context = local_diagnosis(frame)
+                    return AIReply(
+                        content=json.dumps(context, ensure_ascii=False),
+                        reasoning_content="", raw={"source": "local_compatibility", "context": context},
+                        usage=AIUsage(), request_id="local-stage1", latency_ms=0,
+                    )
             try:
                 return self._client.stream_chat(
                     messages,
                     on_reasoning_token=on_reasoning_token,
                     on_content_token=on_content_token,
                     cancel_token=cancel_token,
-                    thinking=thinking,
-                    reasoning_effort=reasoning_effort,
+                    thinking=False if lite else thinking,
+                    reasoning_effort="low" if lite else reasoning_effort,
                 )
             except Exception as exc:
-                if not self._is_network_error(exc):
+                from pa_agent.ai.sensenova_fallback import is_cancel_or_interrupt
+
+                if is_cancel_or_interrupt(exc):
                     raise
+                # Layer 0: spare channel. Preferred over the configured provider
+                # chain because it costs nothing and usually answers faster than
+                # moving the whole session onto another paid provider. The lane
+                # validates internally and returns (reply, Ok, meta) only when a
+                # candidate passed, so a failure here falls through unchanged.
+                if (
+                    free_lane is not None
+                    and free_lane_state is not None
+                    and not free_lane_state.get("tried")
+                ):
+                    free_lane_state["tried"] = True
+                    recovered = None
+                    try:
+                        recovered = free_lane(exc)
+                    except Exception as lane_exc:  # noqa: BLE001
+                        if is_cancel_or_interrupt(lane_exc):
+                            raise
+                        logger.warning(
+                            "%s spare-channel attempt failed: %s", stage_label, lane_exc
+                        )
+                    if recovered is not None:
+                        reply_free = recovered[0]
+                        self._pending_free_meta = recovered[2]
+                        return reply_free
+                # Layer 1: generic provider chain. Triggers on any non-cancel
+                # exception (network / 429 / 5xx / timeout). In-memory only.
+                if self._try_next_provider_fallback(
+                    tried_keys=tried_provider_keys,
+                    fallback_chain=provider_fallback_chain,
+                    stage_label=stage_label,
+                    exc=exc,
+                ):
+                    last_provider_exc = exc
+                    continue
+                # Layer 2: openclaw_* network routing (unchanged).
+                if not self._is_network_error(exc):
+                    raise last_provider_exc or exc
                 # Try WorkBuddy fallback first (if model is openclaw_wb),
                 # then TRAE Work CN (if model is openclaw_twc),
                 # then QClaw fallback (if model is openclaw)
@@ -1392,7 +1715,68 @@ class TwoStageOrchestrator:
                         exc,
                     )
                 else:
-                    raise
+                    raise last_provider_exc or exc
+
+    def _try_next_provider_fallback(
+        self,
+        *,
+        tried_keys: set[tuple[str, str]],
+        fallback_chain: list[Any],
+        stage_label: str,
+        exc: Exception,
+    ) -> bool:
+        """Switch the in-memory client to the next unused provider in the chain.
+
+        Returns True when a fallback was applied (caller should retry), False
+        when the chain is exhausted. settings.json is never touched: the switch
+        is session-scoped so a transient outage cannot permanently rewrite the
+        user's primary provider configuration.
+
+        fallback_chain is passed explicitly because the active provider changes
+        on each successful switch; re-reading it would lose the remaining
+        candidates after the first switch.
+        """
+        if self._settings is None:
+            return False
+        fallbacks = list(fallback_chain or [])
+        if not fallbacks:
+            return False
+        cur = self._provider()
+        tried_keys.add((str(cur.base_url or "").strip(), str(cur.model or "").strip()))
+        for cand in fallbacks:
+            key = (str(cand.base_url or "").strip(), str(cand.model or "").strip())
+            if key in tried_keys:
+                continue
+            if not (str(cand.api_key or "").strip()):
+                logger.warning(
+                    "%s provider fallback skipped (empty api_key): model=%s base_url=%s",
+                    stage_label,
+                    cand.model,
+                    cand.base_url,
+                )
+                tried_keys.add(key)
+                continue
+            tried_keys.add(key)
+            logger.warning(
+                "%s provider error (%s); switching to fallback model=%s base_url=%s",
+                stage_label,
+                type(exc).__name__,
+                cand.model,
+                cand.base_url,
+            )
+            try:
+                self._client.update_provider(cand)
+            except Exception as swap_exc:  # noqa: BLE001
+                logger.warning(
+                    "%s provider fallback client update failed: %s",
+                    stage_label,
+                    swap_exc,
+                )
+                continue
+            self._active_provider = cand
+            self._on_fallback_provider = True
+            return True
+        return False
 
     def _try_qclaw_fallback(self, *, original_model: str = "") -> bool:
         """Apply local QClaw provider (like settings Save with model=openclaw)."""

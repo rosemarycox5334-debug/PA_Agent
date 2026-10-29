@@ -9,6 +9,7 @@ Categories:
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -100,11 +101,62 @@ def _extract_outer_json_object(text: str) -> str:
     return text[start:].strip()
 
 
+# Matches a markdown fence + opening brace injected in the middle of a value.
+# GLM occasionally emits such a fence inside a string literal, splitting a word.
+_INTRUSIVE_FENCE_RE = re.compile(
+    r'```(?:json)?\s*\n\s*{\s*\n',
+    re.IGNORECASE,
+)
+
+
+def _repair_fence_inside_string(text: str) -> str:
+    """Remove a markdown fence that was injected mid-string by the model.
+
+    Only fires when the text before the fence ends inside an unclosed JSON
+    string (an odd number of unescaped double quotes). In that case the fence
+    and its opening brace are dropped and the two halves are rejoined under a
+    single leading brace.
+    """
+    t = text.strip()
+    m = _INTRUSIVE_FENCE_RE.search(t)
+    if not m:
+        return t
+    before = t[: m.start()]
+    after = t[m.end() :]
+    if not before.strip():
+        return t  # ordinary leading fence, handled below
+    quote_count = 0
+    esc = False
+    for ch in before:
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+        elif ch == '"':
+            quote_count += 1
+    if quote_count % 2 == 0:
+        return t  # not inside a string; leave it for the normal path
+    # The fence was injected mid-word, so the string must be rejoined with
+    # NO whitespace between the halves ("tr" + "ading_range" -> "trading_range").
+    # Only the newline immediately before the fence and the one right after it
+    # (already consumed by the regex) are dropped.
+    rejoined = before.rstrip() + after.lstrip()
+    if not rejoined.lstrip().startswith("{"):
+        rejoined = "{" + rejoined
+    logger.warning("Repaired markdown fence injected inside a JSON string value")
+    return rejoined
+
+
 def _strip_fences(text: str) -> str:
     """Remove markdown fences and isolate the JSON object payload."""
+    if not isinstance(text, str):
+        # Defensive: mocks / providers sometimes hand back non-strings.
+        return ""
     t = text.strip()
     if not t:
         return t
+    t = _repair_fence_inside_string(t)
 
     # ── 清洗模型输出的非标准 Unicode 引号 / 控制字符 ──
     _SMART_QUOTE_MAP = {
@@ -491,6 +543,49 @@ class JsonValidator:
             structure_flip_cooldown_bars=structure_flip_cooldown_bars,
         )
 
+    def _try_salvage_stage2(
+        self,
+        raw_text: str,
+        *,
+        decision_stance: str | None,
+        kline_frame: Any,
+        stage1_json: dict[str, Any] | None,
+        previous_record: Any | None,
+        structure_flip_cooldown_bars: int,
+    ) -> Result | None:
+        """Rebuild a minimal Stage 2 object from mangled raw text.
+
+        Only used in relaxed mode (fallback provider). GLM sometimes emits
+        JSON that no structural repair can fix; rather than failing the whole
+        analysis we recover decision + next_bar_prediction from the raw text
+        and let the normalizer fill the rest. Returns None when even the
+        salvage could not produce anything usable.
+        """
+        from pa_agent.ai.json_salvage import salvage_stage2
+
+        try:
+            obj = salvage_stage2(raw_text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Stage 2 salvage failed: %s", exc)
+            return None
+        try:
+            obj = self.normalize_parsed(
+                "stage2",
+                obj,
+                decision_stance=decision_stance,
+                kline_frame=kline_frame,
+                stage1_json=stage1_json,
+                previous_record=previous_record,
+                structure_flip_cooldown_bars=structure_flip_cooldown_bars,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Stage 2 salvage normalize failed: %s", exc)
+        logger.warning(
+            "Stage 2 JSON unrecoverable; rebuilt minimal object from raw text"
+        )
+        return Ok(obj=obj)
+
+
     def validate(
         self,
         stage: Literal["stage1", "stage2"],
@@ -504,10 +599,20 @@ class JsonValidator:
         skip_next_bar: bool = False,
         previous_record: Any | None = None,
         structure_flip_cooldown_bars: int = 3,
+        relaxed: bool = False,
+        glm_flash_lite: bool = False,
     ) -> Result:
         """Validate *raw_text* against the schema for *stage*.
 
         Returns Ok(obj) on success, ValidationError on any failure.
+
+        relaxed=True (used while running on a fallback provider such as
+        GLM-4-flash) skips every schema / enum / coherence check and accepts
+        the response as soon as it parses into a JSON object and survives
+        post-parse normalization. The point is to let the GUI render whatever
+        the fallback model produced instead of retrying forever on strict
+        enums the fallback model does not understand. Syntax errors and
+        non-object payloads still fail, so the caller can retry those.
         """
         schema = self._schemas[stage]
 
@@ -527,6 +632,17 @@ class JsonValidator:
                     message=PROVIDER_QUOTA_USER_MESSAGE,
                     invalid_fields=["provider:quota_exhausted"],
                 )
+            if relaxed and stage == "stage2":
+                salvaged = self._try_salvage_stage2(
+                    raw_text,
+                    decision_stance=decision_stance,
+                    kline_frame=kline_frame,
+                    stage1_json=stage1_json,
+                    previous_record=previous_record,
+                    structure_flip_cooldown_bars=structure_flip_cooldown_bars,
+                )
+                if salvaged is not None:
+                    return salvaged
             return ValidationError(
                 category="d",
                 stage=stage,
@@ -571,6 +687,17 @@ class JsonValidator:
                     except json.JSONDecodeError:
                         repaired = None
                 if repaired is None:
+                    if relaxed and stage == "stage2":
+                        salvaged = self._try_salvage_stage2(
+                            raw_text,
+                            decision_stance=decision_stance,
+                            kline_frame=kline_frame,
+                            stage1_json=stage1_json,
+                            previous_record=previous_record,
+                            structure_flip_cooldown_bars=structure_flip_cooldown_bars,
+                        )
+                        if salvaged is not None:
+                            return salvaged
                     pos = f"{exc.lineno}:{exc.colno}"
                     return ValidationError(
                         category="a",
@@ -581,12 +708,45 @@ class JsonValidator:
                     )
 
         if not isinstance(obj, dict):
+            if relaxed and stage == "stage2":
+                salvaged = self._try_salvage_stage2(
+                    raw_text,
+                    decision_stance=decision_stance,
+                    kline_frame=kline_frame,
+                    stage1_json=stage1_json,
+                    previous_record=previous_record,
+                    structure_flip_cooldown_bars=structure_flip_cooldown_bars,
+                )
+                if salvaged is not None:
+                    return salvaged
             return ValidationError(
                 category="a",
                 stage=stage,
                 raw_text=raw_text,
                 message="Top-level JSON value is not an object",
             )
+
+        # Only the exact routed contract may enable the one-target adapter.
+        obj.pop("analysis_contract", None)
+        if glm_flash_lite:
+            from pa_agent.ai.glm_flash_lite import check_contract, model_fields
+
+            if stage == "stage1":
+                # This stage was produced by local code, never by the model.
+                # Do not turn its routing marker into an asserted safety pass.
+                return Ok(obj=obj)
+            from pa_agent.ai.lite_output_normalize import normalize_lite_payload
+            obj = normalize_lite_payload(obj, frame=kline_frame)
+            problem = check_contract(obj)
+            if problem:
+                return ValidationError(category="c", stage=stage, raw_text=raw_text,
+                                       message=problem, invalid_fields=["lite_contract"])
+            lite_original_decision = copy.deepcopy(obj["decision"])
+            obj = model_fields(obj)
+            lite_predictions = {
+                key: copy.deepcopy(obj[key])
+                for key in ("next_bar_prediction", "next_cycle_prediction")
+            }
 
         obj = self.normalize_parsed(
             stage,
@@ -601,6 +761,91 @@ class JsonValidator:
             structure_flip_cooldown_bars=structure_flip_cooldown_bars,
         )
         norm_mode = getattr(self._validation, "normalization_mode", "strict")
+
+        if glm_flash_lite:
+            from pa_agent.ai.glm_flash_lite import add_local_tree
+
+            # Normalizer's price, trade-metrics and continuity guards have run.
+            # The illustrative tree is rendering-only and added last.
+            invariant = self._check_no_order_invariant(obj)
+            if invariant:
+                return ValidationError(category="c", stage=stage, raw_text=raw_text,
+                                       message=str(invariant), invalid_fields=["decision"])
+            # Do not present normalizer-generated cycle/probability guesses as
+            # model forecasts on this intentionally small contract.
+            obj.update(lite_predictions)
+            from pa_agent.ai.decision_display import reconcile_lite_decision
+            reconcile_lite_decision(obj, lite_original_decision, frame=kline_frame, decision_stance=decision_stance)
+            from pa_agent.ai.local_cycle_forecast import fill_cycle_probabilities
+            obj["next_cycle_prediction"] = fill_cycle_probabilities(
+                obj["next_cycle_prediction"], frame=kline_frame, stage1_json=stage1_json,
+            )
+            # The diagnosis panel must never show an undetermined cycle: use the
+            # structure just classified from the closed bars.
+            from pa_agent.ai.local_cycle_forecast import classify_cycle
+            summary = obj.get("diagnosis_summary")
+            if not isinstance(summary, dict):
+                summary = {}
+                obj["diagnosis_summary"] = summary
+            if str(summary.get("cycle_position") or "unknown").lower() in ("", "unknown", "none"):
+                summary["cycle_position"] = obj["next_cycle_prediction"].get(
+                    "probability_current_cycle") or classify_cycle(kline_frame)
+            # One direction for the whole record: the diagnosis chip and the
+            # forecast cards must never disagree (they did when the chip used a
+            # different source than the prediction). Keep the model's wording,
+            # but make the displayed direction single-sourced.
+            unified = str(obj["next_cycle_prediction"].get("direction") or "").lower()
+            if unified not in ("bullish", "bearish", "neutral"):
+                unified = str(obj.get("next_bar_prediction", {}).get("direction") or "").lower()
+            if unified not in ("bullish", "bearish", "neutral"):
+                unified = "neutral"
+            if str(summary.get("direction") or "").lower() != unified:
+                summary["direction_before_unify"] = copy.deepcopy(summary.get("direction"))
+                summary["direction"] = unified
+            return Ok(obj=add_local_tree(obj))
+
+        # ── Relaxed mode (fallback providers) ────────────────────────────────
+        # Fallback models (e.g. GLM-4-flash) frequently fill free-text into
+        # enum fields such as decision_trace[].answer. Retrying cannot fix
+        # that reliably, and the user only needs the GUI to render. Accept
+        # whatever normalization produced as long as it is a dict.
+        if relaxed:
+            if isinstance(obj, dict):
+                # Normalizer may have dropped keys the GUI reads unconditionally
+                # (decision_trace / terminal / ...). Fill them with neutral
+                # defaults so the renderer never hits a KeyError.
+                if stage == "stage2":
+                    obj.setdefault("decision_trace", [])
+                    obj.setdefault(
+                        "terminal",
+                        {"node_id": "relaxed", "outcome": "wait",
+                         "label": "备用通道返回，未提供决策链"},
+                    )
+                    obj.setdefault(
+                        "diagnosis_summary",
+                        {"cycle_position": "unknown", "direction": "neutral",
+                         "key_signals": []},
+                    )
+                    if not isinstance(obj.get("next_bar_prediction"), dict):
+                        obj["next_bar_prediction"] = {
+                            "direction": "neutral",
+                            "probabilities": None,
+                            "reasoning": "备用通道未返回该字段",
+                            "unpredictable": True,
+                            "features_used": ["kline_features"],
+                        }
+                logger.warning(
+                    "%s accepted in relaxed mode (fallback provider); "
+                    "schema / enum checks skipped",
+                    stage,
+                )
+                return Ok(obj=obj)
+            return ValidationError(
+                category="a",
+                stage=stage,
+                raw_text=raw_text,
+                message="Top-level JSON value is not an object",
+            )
 
         # ── Schema validation (b and c) ───────────────────────────────────────
         try:

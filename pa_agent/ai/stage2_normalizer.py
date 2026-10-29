@@ -716,7 +716,7 @@ def _section14_violated(trace: Any) -> bool:
     return False
 
 
-def _clear_decision_to_no_order(decision: dict[str, Any]) -> None:
+def _clear_decision_to_no_order(decision: dict[str, Any], reason: str = "") -> None:
     decision["order_type"] = "不下单"
     for field in _NO_ORDER_PRICE_FIELDS:
         decision[field] = None
@@ -728,6 +728,15 @@ def _clear_decision_to_no_order(decision: dict[str, Any]) -> None:
         decision["trade_confidence"] = 0
     if not isinstance(decision.get("trade_confidence_reasoning"), str) or not decision["trade_confidence_reasoning"]:
         decision["trade_confidence_reasoning"] = "无入场计划，不存在交易信心"
+    if reason:
+        # Keep the model's own text for audit, but never let the visible
+        # reasoning keep describing an entry that was just cancelled.
+        decision.setdefault("model_reasoning_before_no_order",
+                            decision.get("reasoning"))
+        decision["reasoning"] = (
+            f"当前不下单：{reason}。此前入场建议未生效，等待重新确认入场条件。"
+        )
+        decision["trade_confidence_reasoning"] = "当前没有有效入场计划"
 
 
 def _set_trace_node_answer(
@@ -768,7 +777,8 @@ def _coerce_decision_no_order(out: dict[str, Any]) -> bool:
 
     if order_type not in _TRADE_ORDER_TYPES:
         if outcome in ("wait", "reject") and order_type != "不下单":
-            _clear_decision_to_no_order(decision)
+            _clear_decision_to_no_order(
+                decision, reason=f"最终确认节点为{outcome}，本次不入场")
             logger.debug("Coerced %r + terminal=%s to 不下单", order_type, outcome)
             return True
         return False
@@ -786,7 +796,8 @@ def _coerce_decision_no_order(out: dict[str, Any]) -> bool:
     if not triggers:
         return False
 
-    _clear_decision_to_no_order(decision)
+    _clear_decision_to_no_order(
+        decision, reason="最终确认节点未通过（" + "、".join(triggers) + "）")
     logger.debug("Coerced decision to 不下单 (%s)", ", ".join(triggers))
     return True
 
@@ -931,11 +942,17 @@ def _coerce_decision_when_trade_metrics_fail(
         return False
     if decision.get("entry_price") is None:
         return False
+    if out.get("analysis_contract") == "glm_flash_lite":
+        # Explicit user decision: the weak fallback contract renders the model's
+        # plan as-is. RR / trader-equation / win-rate gates do not apply here;
+        # price finiteness and long/short geometry are still checked upstream.
+        return False
 
     from pa_agent.util.trade_metrics import validate_order_trade_metrics
 
     metric_errors = validate_order_trade_metrics(
         decision,
+        allow_single_target=out.get("analysis_contract") == "glm_flash_lite",
         decision_stance=decision_stance,
         kline_frame=kline_frame,
         bar_analysis=out.get("bar_analysis")
@@ -946,7 +963,11 @@ def _coerce_decision_when_trade_metrics_fail(
         return False
 
     summary = metric_errors[0]
-    _clear_decision_to_no_order(decision)
+    out.setdefault("decision_adjustments", []).append({
+        "from": decision.get("order_type"), "to": "不下单",
+        "reason": summary, "check": "trade_metrics", "errors": list(metric_errors),
+    })
+    _clear_decision_to_no_order(decision, reason=summary)
     _set_trace_node_answer(
         out.get("decision_trace"),
         "10.3",
@@ -1598,7 +1619,7 @@ def normalize_stage2(
             "breakout entry_price adjusted to basis extreme ± 1 tick (basis=%s)",
             decision.get("entry_basis_bar"),
         )
-    if isinstance(decision, dict):
+    if isinstance(decision, dict) and out.get("analysis_contract") != "glm_flash_lite":
         from pa_agent.util.trade_metrics import adjust_decision_stop_for_tp1_rr_cap
 
         if adjust_decision_stop_for_tp1_rr_cap(decision, kline_frame=kline_frame):

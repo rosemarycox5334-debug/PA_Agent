@@ -22,6 +22,16 @@ class AIProviderSettings(BaseModel):
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "low"
     context_window: int = 2_000_000
+    #: 备用 provider 链。主通道任何普通异常（非用户取消）都按顺序尝试；
+    #: 每个元素是完整的 provider 配置。嵌套的 fallbacks 会被 extra="ignore" 丢弃，
+    #: 因此不存在递归。
+    fallbacks: list["AIProviderSettings"] = Field(default_factory=list)
+    #: 智谱 glm-4-flash 备用通道的 key。仅在 base_url 指向 SenseNova 网关时使用，
+    #: 由 glm_backup.ensure_glm_fallback() 自动挂到 fallbacks 链上。
+    backup_glm_api_key: str = ""
+
+
+AIProviderSettings.model_rebuild()
 
 
 class PromptSettings(BaseModel):
@@ -91,7 +101,8 @@ class GeneralSettings(BaseModel):
     #: 重试后取消持续跟踪分析：校验失败触发重试后自动关闭 keep_analysis
     cancel_keep_analysis_on_retry: bool = False
     #: 交易决策置信度门槛：仅当 trade_confidence >= 此值时，才视为有下单机会（弹窗警报并提供决策详情）
-    decision_confidence_threshold: int = Field(default=40, ge=0, le=100)
+    #: 0 = 关闭该门槛（默认），任何通过其它检查的方案都按原样展示
+    decision_confidence_threshold: int = Field(default=0, ge=0, le=100)
     #: 开启下根K线预期功能；关闭时不向模型请求该预测，节省 token
     enable_next_bar_prediction: bool = False
     #: 同一结构位 entry 相差≤3跳时，禁止反向新方案的冷却 K 线根数（已收盘）

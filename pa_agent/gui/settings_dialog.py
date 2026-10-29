@@ -95,6 +95,13 @@ class SettingsDialog(QDialog):
         api_key_row.addWidget(self._show_key_btn)
         provider_form.addRow("API Key:", api_key_row)
 
+        self._glm_key_label = QLabel("GLM 备用 Key:")
+        self._glm_key_edit = QLineEdit()
+        self._glm_key_edit.setPlaceholderText("输入 GLM Key")
+        self._glm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        provider_form.addRow(self._glm_key_label, self._glm_key_edit)
+        self._base_url_edit.textChanged.connect(self._refresh_glm_key_row)
+
         self._thinking_check = QCheckBox("启用 Thinking")
         provider_form.addRow("Thinking:", self._thinking_check)
 
@@ -276,6 +283,9 @@ class SettingsDialog(QDialog):
         self._base_url_edit.setText(p.base_url)
         self._api_key_edit.setText(p.api_key)
         self._thinking_check.setChecked(p.thinking)
+
+        self._glm_key_edit.setText(str(getattr(p, "backup_glm_api_key", "") or ""))
+        self._refresh_glm_key_row()
 
         idx = self._reasoning_effort_combo.findText(p.reasoning_effort)
         if idx >= 0:
@@ -470,6 +480,20 @@ class SettingsDialog(QDialog):
             p.base_url = base_url
             p.api_key = api_key
 
+        p.backup_glm_api_key = self._glm_key_edit.text().strip()
+        if p.backup_glm_api_key:
+            from pa_agent.ai.glm_backup import ensure_glm_fallback
+
+            ensure_glm_fallback(p)
+        elif str(getattr(p, "base_url", "")).startswith("https://token.sensenova.cn"):
+            from pa_agent.ai.glm_backup import GLM_BASE_URL, GLM_MODEL
+
+            p.fallbacks = [
+                fb for fb in (getattr(p, "fallbacks", None) or [])
+                if not (str(getattr(fb, "model", "")) == GLM_MODEL
+                        and str(getattr(fb, "base_url", "")) == GLM_BASE_URL)
+            ]
+
         p.thinking = self._thinking_check.isChecked()
         p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
 
@@ -494,6 +518,14 @@ class SettingsDialog(QDialog):
 
         save_settings(self._settings, SETTINGS_JSON_PATH)
         self.accept()
+
+    def _refresh_glm_key_row(self) -> None:
+        """Show the GLM backup key row only when the primary is SenseNova."""
+        from pa_agent.ai.glm_backup import is_sensenova_base
+
+        visible = is_sensenova_base(self._base_url_edit.text().strip())
+        self._glm_key_label.setVisible(visible)
+        self._glm_key_edit.setVisible(visible)
 
     def focus_api_key_field(self) -> None:
         """Focus the API Key field (e.g. when prompting on first launch)."""

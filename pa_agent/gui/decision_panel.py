@@ -279,6 +279,9 @@ class DecisionPanel(QWidget):
         reasoning_title = QLabel("分析理由")
         reasoning_title.setStyleSheet("font-weight: bold; color: #a371f7; margin-top: 6px;")
         layout.addWidget(reasoning_title)
+        from pa_agent.gui.analysis_details import AnalysisDetails
+        self._analysis_details = AnalysisDetails()
+        layout.addWidget(self._analysis_details)
 
         self._reasoning_edit = QTextEdit()
         self._reasoning_edit.setReadOnly(True)
@@ -434,21 +437,32 @@ class DecisionPanel(QWidget):
         order_type = decision.get("order_type", _NO_ORDER)
         reasoning = decision.get("reasoning", decision.get("brief_reasoning", ""))
         # Confidence gate: suppress order display when confidence < threshold
+        lite_route = decision.get("trace_source") == "local_rules"
         if confidence_threshold is not None and confidence_threshold > 0 and order_type != _NO_ORDER:
             raw_conf = decision.get("trade_confidence")
             try:
                 conf_val = int(float(str(raw_conf).strip())) if raw_conf is not None and raw_conf != "" else -1
             except (ValueError, TypeError):
                 conf_val = -1
-            if conf_val < confidence_threshold:
+            if conf_val < confidence_threshold and not lite_route:
+                # Explain the downgrade instead of showing a plan that suddenly
+                # says 不下单 while its reasoning still describes the entry.
                 order_type = _NO_ORDER
-                prefix = "有入场机会，但置信度未通过"
+                prefix = f"有入场机会，但置信度 {conf_val} 低于阈值 {confidence_threshold}，本次按观望显示。"
                 reasoning = f"{prefix}\n\n{reasoning}" if reasoning else prefix
         diag_conf = decision.get("diagnosis_confidence", None)
         diag_conf_reasoning = decision.get("diagnosis_confidence_reasoning", None)
         trade_conf = decision.get("trade_confidence", None)
         trade_conf_reasoning = decision.get("trade_confidence_reasoning", None)
 
+        if lite_route:
+            from pa_agent.ai.decision_display import details_text
+            self._analysis_details.set_details(details_text(decision))
+            # The lite model did not supply these legacy default scores.
+            diag_conf = None
+            trade_conf = None
+        else:
+            self._analysis_details.set_details("")
         self._apply_diagnosis_confidence(diag_conf, diag_conf_reasoning)
 
         if order_type == _NO_ORDER:
@@ -517,10 +531,14 @@ class DecisionPanel(QWidget):
                 eq_note = ""
                 if win_pct is not None:
                     eq_note = " · 方程通过" if eq_ok else " · 方程不通过"
+                lite_view = decision.get("trace_source") == "local_rules"
+                if lite_view:
+                    # RR / trader-equation gating is not applied on this route.
+                    eq_note = ""
                 self._rr_inline_label.setText(
                     f"盈亏比  {rr['ratio_text']}（风险 {risk:.4g} / 回报 {reward:.4g}）{eq_note}"
                 )
-                rr_color = "#3fb950" if metrics_ok else "#f85149"
+                rr_color = "#8b949e" if lite_view else ("#3fb950" if metrics_ok else "#f85149")
                 self._rr_inline_label.setStyleSheet(
                     f"color: {rr_color}; font-size: 15px; font-weight: bold;"
                 )
@@ -547,6 +565,7 @@ class DecisionPanel(QWidget):
         self._reasoning_edit.setPlainText(str(reasoning) if reasoning else "")
 
     def clear(self) -> None:
+        self._analysis_details.set_details("")
         self._trend_label.setText("趋势：—")
         self._apply_diag_chip_style(self._trend_label, color="#6e7681")
         self._cycle_label.setText("周期：—")

@@ -1,6 +1,7 @@
 """Risk/reward and estimated win-rate helpers for trading decisions."""
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -14,6 +15,17 @@ def is_long_direction(direction: object) -> bool | None:
     if "空" in text or text in ("short", "sell", "bear"):
         return False
     return None
+
+
+def _finite_positive(value: object) -> bool:
+    """True when *value* is a real, finite, positive number (bool excluded)."""
+    if isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number > 0
 
 
 def compute_risk_reward(
@@ -353,6 +365,7 @@ def validate_limit_order_k1_freshness(
 
 def validate_take_profit_2_geometry(
     decision: dict[str, Any],
+    *, allow_single_target: bool = False,
 ) -> list[str]:
     """Ensure TP2 is beyond TP1 in the profit direction (no RR cap on TP2)."""
     entry = decision.get("entry_price")
@@ -360,6 +373,15 @@ def validate_take_profit_2_geometry(
     tp2 = decision.get("take_profit_price_2")
     sl = decision.get("stop_loss_price")
     direction = decision.get("order_direction")
+
+    # TP2 is optional at the model layer. When it is missing or not a finite
+    # number but TP1 is valid, fill TP2 with TP1 so a valid single-target plan
+    # is not rejected for a missing extension target.
+    if not _finite_positive(tp2) and _finite_positive(tp1):
+        decision["take_profit_price_2"] = tp1
+        decision["target_2_source"] = "same_as_target_1_compatibility"
+        tp2 = tp1
+        allow_single_target = True
 
     try:
         e = float(entry)
@@ -370,6 +392,9 @@ def validate_take_profit_2_geometry(
         return ["decision.take_profit_price_2: required finite number when placing an order"]
 
     long = is_long_direction(direction)
+    if (allow_single_target and decision.get("target_2_source") == "same_as_target_1_compatibility"
+            and t1 == t2 and ((long is True and s < e < t1) or (long is False and t1 < e < s))):
+        return []
     if long is True:
         if not (s < e < t1 < t2):
             return [
@@ -402,6 +427,7 @@ def validate_order_trade_metrics(
     kline_frame: Any = None,
     bar_analysis: dict[str, Any] | None = None,
     apply_rr_cap_adjustment: bool = True,
+    allow_single_target: bool = False,
 ) -> list[str]:
     """Validate entry/TP/SL geometry, RR floor, and trader equation for live orders."""
     order_type = decision.get("order_type")
@@ -463,6 +489,6 @@ def validate_order_trade_metrics(
             )
         )
 
-    errors.extend(validate_take_profit_2_geometry(decision))
+    errors.extend(validate_take_profit_2_geometry(decision, allow_single_target=allow_single_target))
 
     return errors

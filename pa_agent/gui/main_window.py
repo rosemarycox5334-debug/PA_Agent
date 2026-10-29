@@ -3829,9 +3829,24 @@ class MainWindow(QMainWindow):
             )
             meta = getattr(record, "meta", None)
             stance = getattr(meta, "decision_stance", None) if meta is not None else None
+            diag_summary = s2_full.get("diagnosis_summary")
+            if s2_full.get("trace_source") == "local_rules" and isinstance(diag_summary, dict):
+                patch = {}
+                if str(diag_summary.get("cycle_position") or "unknown").lower() in ("", "unknown", "none"):
+                    # Never render an undetermined cycle on the lite route.
+                    ncp = s2_full.get("next_cycle_prediction") or {}
+                    program_cycle = ncp.get("probability_current_cycle") or ncp.get("cycle")
+                    if program_cycle:
+                        patch["cycle_position"] = program_cycle
+                unified = str((s2_full.get("next_cycle_prediction") or {}).get("direction") or "").lower()
+                if unified in ("bullish", "bearish", "neutral") and \
+                        str(diag_summary.get("direction") or "").lower() != unified:
+                    patch["direction"] = unified
+                if patch:
+                    diag_summary = dict(diag_summary, **patch)
             self._decision_panel.set_decision(
                 inner,
-                diagnosis_summary=s2_full.get("diagnosis_summary"),
+                diagnosis_summary=diag_summary,
                 stage1_diagnosis=s1_diag if isinstance(s1_diag, dict) else None,
                 decision_stance=stance,
                 confidence_threshold=self._confidence_threshold(),
@@ -3846,7 +3861,13 @@ class MainWindow(QMainWindow):
         if panel is not None:
             s1_diag = getattr(record, "stage1_diagnosis", None)
             s1_raw = getattr(record, "stage1_response", {}) or {}
-            if s1_diag:
+            from pa_agent.ai.lite_output_normalize import is_local_stage1, visible_local_diagnosis_text
+            if is_local_stage1(s1_diag, s1_raw):
+                # App-computed diagnosis: show a readable summary, never raw JSON.
+                s1_content = visible_local_diagnosis_text(s1_diag)
+                s1_reasoning = ""
+                panel.show_stage_result("阶段一：市场诊断", s1_content, s1_reasoning)
+            elif s1_diag:
                 s1_content = _json.dumps(s1_diag, ensure_ascii=False, indent=2)
                 s1_reasoning = reasoning_from_response(
                     s1_raw if isinstance(s1_raw, dict) else None
@@ -3862,7 +3883,11 @@ class MainWindow(QMainWindow):
             s2_decision = getattr(record, "stage2_decision", None)
             s2_raw = getattr(record, "stage2_response", {}) or {}
             if s2_decision:
-                s2_content = _json.dumps(s2_decision, ensure_ascii=False, indent=2)
+                if s2_decision.get("trace_source") == "local_rules":
+                    from pa_agent.ai.lite_output_normalize import visible_lite_result_text
+                    s2_content = visible_lite_result_text(s2_decision)
+                else:
+                    s2_content = _json.dumps(s2_decision, ensure_ascii=False, indent=2)
                 s2_reasoning = reasoning_from_response(
                     s2_raw if isinstance(s2_raw, dict) else None
                 )
@@ -3963,9 +3988,19 @@ class MainWindow(QMainWindow):
         panel = getattr(self, "_decision_tree_panel", None)
         if panel is None:
             return
+        if stage2_full.get("trace_source") == "local_rules":
+            import copy
+            from pa_agent.ai.decision_display import repair_legacy_display
+            from pa_agent.ai.glm_flash_lite import add_local_tree
+            stage2_full = copy.deepcopy(stage2_full)
+            repair_legacy_display(stage2_full)
+            if stage2_full.get("decision_adjustment"):
+                add_local_tree(stage2_full)
         s1 = stage1_diagnosis or {}
         trace_kw = dict(
-            gate_trace=s1.get("gate_trace"),
+            gate_trace=(stage2_full.get("local_gate_trace", [])
+                        if stage2_full.get("trace_source") == "local_rules"
+                        else s1.get("gate_trace")),
             decision_trace=stage2_full.get("decision_trace"),
             terminal=stage2_full.get("terminal"),
             gate_result=s1.get("gate_result"),

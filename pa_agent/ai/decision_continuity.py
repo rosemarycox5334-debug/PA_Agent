@@ -81,6 +81,30 @@ def extract_always_in_branch(stage1_json: dict | None) -> str | None:
     return None
 
 
+def section_2_4_answer(stage1_json: dict | None) -> str | None:
+    """Return the normalized answer of gate_trace §2.4, or None if absent.
+
+    Distinguishes "evaluated and said no" from "never evaluated". The
+    continuity guard must not treat a missing §2.4 as an explicit negative —
+    on the local-compatibility diagnosis path gate_trace is often empty, and
+    blocking a legal plan for missing information is wrong.
+    """
+    if not stage1_json:
+        return None
+    for node in stage1_json.get("gate_trace") or []:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("node_id", "")).replace("§", "")
+        if nid not in ("2.4", "2.4.0"):
+            continue
+        answer = str(node.get("answer", "")).strip().lower()
+        if answer in ("是", "yes", "true"):
+            return "是"
+        if answer in ("否", "no", "false"):
+            return "否"
+    return None
+
+
 def _timeframe_minutes(timeframe: str) -> int:
     tf = (timeframe or "").strip().lower()
     m = re.fullmatch(r"(\d+)\s*m", tf)
@@ -441,6 +465,7 @@ def build_continuity_context(
         "tick": tick,
         "direction": direction,
         "always_in_branch": always_in,
+        "section_2_4_answer": section_2_4_answer(stage1_json),
         "previous_cycle_position": str((prev_stage1 or {}).get("cycle_position") or ""),
         "previous_direction": str((prev_stage1 or {}).get("direction") or ""),
         "timeframe": timeframe,
@@ -570,6 +595,12 @@ def continuity_violation_reason(
         if always_in == "AIS" and curr_sign > 0:
             return "direction=neutral 且 §2.4=AIS：禁止做多方案"
         if always_in is None and curr_sign != 0:
+            # Block only when §2.4 was actually evaluated and said "否".
+            # A missing §2.4 (e.g. local-compatibility diagnosis with an empty
+            # gate_trace) is insufficient information, not a negative — let the
+            # model's plan through instead of silently discarding it.
+            if ctx.get("section_2_4_answer") != "否":
+                return None
             return "direction=neutral 且 §2.4 非 Always In：禁止无强信号的方向性方案"
 
     if not ctx.get("has_previous_plan"):
@@ -610,6 +641,7 @@ def apply_continuity_guard(
     if not reason:
         return stage2
 
+    original_order_type = decision.get("order_type")
     decision = dict(decision)
     decision["order_type"] = "不下单"
     for key in (
@@ -646,6 +678,18 @@ def apply_continuity_guard(
     stage2 = dict(stage2)
     stage2["decision"] = decision
     stage2["terminal"] = terminal
+    # Record the real reason so the display layer can show it instead of
+    # the generic "入场计划尚未满足当前检查条件" fallback. Without this, the
+    # specific continuity rule that fired is lost between here and the UI.
+    adjustments = list(stage2.get("decision_adjustments") or [])
+    adjustments.append({
+        "from": original_order_type,
+        "to": "不下单",
+        "reason": reason,
+        "check": "continuity",
+    })
+    stage2["decision_adjustments"] = adjustments
+    stage2["local_plan_guard"] = reason
     return stage2
 
 

@@ -916,7 +916,8 @@ class DeepSeekClient:
                 self._settings.model,
                 self._settings.base_url,
             )
-        if _thinking_on and len(reasoning_content) < 80:
+        from pa_agent.ai.glm_flash_lite import is_glm_flash
+        if _thinking_on and len(reasoning_content) < 80 and not is_glm_flash(self._settings):
             self._log.warning(
                 "Thinking enabled but reasoning_content is very short (%d chars). "
                 "For KKAI/Claude use reasoning_effort (not DeepSeek extra_body); "

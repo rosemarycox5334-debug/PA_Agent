@@ -198,6 +198,7 @@ def test_apply_continuity_guard_reasoning_within_max_len():
     ctx = {
         "direction": "neutral",
         "always_in_branch": None,
+        "section_2_4_answer": "否",
         "has_previous_plan": False,
         "cooldown_bars": 3,
     }
@@ -217,6 +218,81 @@ def test_apply_continuity_guard_reasoning_within_max_len():
     reasoning = out["decision"]["reasoning"]
     assert len(reasoning) <= 280
     assert reasoning.startswith("【程序连续性守卫】")
+
+
+def test_missing_section_2_4_does_not_block_directional_plan():
+    """Local-compatibility diagnosis has no gate_trace §2.4 — do not discard
+    a legal plan just because the section was never evaluated."""
+    ctx = {
+        "direction": "neutral",
+        "always_in_branch": None,
+        "section_2_4_answer": None,
+        "has_previous_plan": False,
+        "cooldown_bars": 3,
+    }
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做多",
+        "entry_price": 4028.155,
+        "stop_loss_price": 4025.17,
+        "take_profit_price": 4030.0,
+    }
+    assert continuity_violation_reason(ctx, decision) is None
+    stage2 = {"decision": decision, "terminal": {"outcome": "trade", "node_id": "11.2"}}
+    out = apply_continuity_guard(stage2, ctx)
+    assert out["decision"]["order_type"] == "限价单"
+    assert out["decision"]["entry_price"] == 4028.155
+
+
+def test_explicit_section_2_4_no_still_blocks_directional_plan():
+    """When §2.4 was evaluated and said 否, keep the original prohibition."""
+    ctx = {
+        "direction": "neutral",
+        "always_in_branch": None,
+        "section_2_4_answer": "否",
+        "has_previous_plan": False,
+        "cooldown_bars": 3,
+    }
+    decision = {
+        "order_type": "限价单",
+        "order_direction": "做多",
+        "entry_price": 4028.155,
+        "stop_loss_price": 4025.17,
+        "take_profit_price": 4030.0,
+    }
+    reason = continuity_violation_reason(ctx, decision)
+    assert reason is not None
+    assert "§2.4" in reason
+
+
+def test_apply_continuity_guard_records_reason_for_display():
+    """The guard's specific reason must reach the display layer, not be
+    swallowed by the generic fallback."""
+    ctx = {
+        "direction": "neutral",
+        "always_in_branch": None,
+        "section_2_4_answer": "否",
+        "has_previous_plan": False,
+        "cooldown_bars": 3,
+    }
+    stage2 = {
+        "decision": {
+            "order_type": "限价单",
+            "order_direction": "做多",
+            "entry_price": 4028.155,
+            "stop_loss_price": 4025.17,
+            "take_profit_price": 4030.0,
+            "reasoning": "test",
+        },
+        "terminal": {"outcome": "trade", "node_id": "11.2"},
+    }
+    out = apply_continuity_guard(stage2, ctx)
+    assert out["decision"]["order_type"] == "不下单"
+    assert out["local_plan_guard"] and "§2.4" in out["local_plan_guard"]
+    last = out["decision_adjustments"][-1]
+    assert last["check"] == "continuity"
+    assert last["from"] == "限价单"
+    assert "§2.4" in last["reason"]
 
 
 def test_render_prompt_mentions_neutral_ais():

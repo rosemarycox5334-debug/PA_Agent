@@ -19,11 +19,21 @@ venv/
 .env
 .env.*
 config/settings.json
+config/settings.json.*
 config/settings.local.json
+config/settings.local.json.*
 config/exception_state.json
 config/secret.key
+config/secret.key.*
 config/tv_symbol_aliases.json
 config/feishu.json
+config/feishu.json.*
+# 任何以常见备份后缀结尾的本地文件（含凭据副本）
+*.bak
+*.bak_*
+*.backup
+*.orig
+*.tmp
 *.pem
 *.key
 
@@ -49,6 +59,8 @@ auth.js
 index.js
 
 # ── 根目录杂项：个人笔记、封面图、一次性脚本 ─────────────────────────────────
+# 本地启动脚本（Windows 专用，含本机路径，不入库）
+start_pa_agent.bat
 /*.jpeg
 /*.jpg
 /*.png
@@ -93,6 +105,12 @@ docs/changelog/
 /config/*.bak
 /config/*.bak_*
 /config/*.backup
+
+# ── 文档目录下逐次运行产生的截图/结果（可再生成，只入库结论文档）──────────────
+/docs/**/cycle_preview_*/
+/docs/**/final_display_*/
+/docs/**/live_*/
+
 
 # ── Agent 会话资料与本地研究输出（保留可复现脚本、测试与正式文档）─────────────
 /.workbuddy/

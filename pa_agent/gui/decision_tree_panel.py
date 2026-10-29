@@ -83,6 +83,9 @@ class DecisionTreePanel(QWidget):
         title = QLabel("二元决策树")
         title.setObjectName("toolbarTitle")
         layout.addWidget(title)
+        from pa_agent.gui.analysis_details import AnalysisDetails
+        self._analysis_details = AnalysisDetails()
+        layout.addWidget(self._analysis_details)
 
         self._terminal_banner = QLabel("等待分析…")
         self._terminal_banner.setWordWrap(True)
@@ -318,6 +321,12 @@ class DecisionTreePanel(QWidget):
         gate_shortcircuited: bool = False,
     ) -> None:
         """Bind Stage1 gate_trace + Stage2 decision_trace to the panel."""
+        from pa_agent.ai.decision_display import SOURCE_DETAILS, compact_trace, compact_terminal
+        local = any(isinstance(x, dict) and x.get("source") == "local_rules" for x in (decision_trace or []))
+        self._analysis_details.set_details(SOURCE_DETAILS if local else "")
+        if local:
+            decision_trace = compact_trace(decision_trace)
+            terminal = compact_terminal(terminal)
         merged = merge_traces(gate_trace, decision_trace)
         self._visited_ids = set()
         self._node_basis = {}
@@ -366,7 +375,9 @@ class DecisionTreePanel(QWidget):
         else:
             self._terminal_banner.setText("无终点信息")
 
-        if gate_shortcircuited:
+        if any(x.get("source") == "local_rules" for x in merged):
+            self._gate_hint.setText("")
+        elif gate_shortcircuited:
             self._gate_hint.setText(
                 "阶段一闸门未通过（wait/unknown）：已跳过阶段二 API 调用；"
                 "决策页「不下单」与「不可预测」为程序根据闸门结论自动生成，非模型策略评估。"
@@ -379,6 +390,7 @@ class DecisionTreePanel(QWidget):
         self._build_static_tree()
 
     def clear(self) -> None:
+        self._analysis_details.set_details("")
         self._visited_ids = set()
         self._node_basis = {}
         self._node_answers = {}

@@ -65,6 +65,10 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# The app is PyQt6-only (see dependencies + all imports). Without this,
+# pytest-qt auto-detects and may pick PySide6 when both bindings are installed,
+# making isinstance(widget, QWidget) fail inside qtbot.addWidget.
+qt_api = "pyqt6"
 markers = [
     "unit: unit-level tests",
     "property: property-based tests (hypothesis)",

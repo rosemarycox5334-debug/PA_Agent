@@ -408,7 +408,10 @@ class AIStreamPanel(QWidget):
         self._reasoning_chars = 0
         self._content_chars = 0
         self._stage_attempts.pop(stage, None)  # fresh start, no retries yet
-        self._ensure_stage_header(stage)
+        # Do not pre-write the stage header here: the header is written together
+        # with that stage's own text (_ensure_stage_header on first chunk), so a
+        # stage that never streams anything cannot leave an empty section, and
+        # headers always stay in the order their content arrives.
         self._phase_label.setText(f"▶ {title} — {self._stream_phase_suffix()}")
         self._update_stats()
 

@@ -108,11 +108,19 @@ def test_non_rate_limit_rejection_still_downgrades_stream_options():
     assert "stream_options" not in sdk.return_value.chat.completions.create.call_args.kwargs
 
 
-def test_forced_thinking_candidate_keeps_provider_default():
+def test_thinking_route_is_pinned_to_lowest_effort():
+    """Every spare-channel request pins thinking to its smallest budget, and only
+    a route that rejects that shape is retried at the lowest effort tier."""
     from pa_agent.ai.sensenova_fallback import KILO_BASE, FreeCandidate, call_free_candidate
 
+    attempts: list[dict] = []
+
     def post(url, *, headers, body, timeout):  # noqa: ANN001
-        assert "reasoning" not in body
+        attempts.append(dict(body))
+        if body.get("reasoning") == {"max_tokens": 512}:
+            return 400, {
+                "error": {"message": "reasoning.max_tokens is not supported for this model"}
+            }
         return 200, {"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
 
     call_free_candidate(
@@ -120,6 +128,10 @@ def test_forced_thinking_candidate_keeps_provider_default():
         [{"role": "user", "content": "synthetic"}],
         http_post=post,
     )
+
+    assert attempts[0]["reasoning"] == {"max_tokens": 512}
+    assert attempts[-1]["reasoning"] == {"effort": "minimal"}
+    assert all(a.get("reasoning") for a in attempts)
 
 
 # ── Progress hints: the UI must show "still working, not frozen" ──────────────

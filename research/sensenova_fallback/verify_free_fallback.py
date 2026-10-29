@@ -157,10 +157,14 @@ def check_candidates_offline() -> dict[str, Any]:
         mark_cooldown(FreeCandidate("kilo", mid, "https://api.kilo.ai/api/gateway"))
     cands = build_candidates(http_get=_get, max_candidates=6)
     models = [c.model for c in cands]
+    # Of this synthetic pool only the preferred lightning route is usable: the
+    # safety-only row is filtered, kilo-auto/ is excluded for ignoring the
+    # thinking switch, and ling-3.1-flash no longer exists in the free pool.
     ok = (
-        models[:2]
-        == ["inclusionai/ling-3.1-flash", "nvidia/nemotron-3.5-lightning:free"]
+        models[:1] == ["nvidia/nemotron-3.5-lightning:free"]
         and "nvidia/nemotron-3.5-content-safety:free" not in models
+        and "kilo-auto/free" not in models
+        and "inclusionai/ling-3.1-flash" not in models
         and "paid/model" not in models
         and all(not m.startswith("cool-") for m in models)
     )
@@ -211,12 +215,11 @@ def live_kilo_smoke() -> dict[str, Any]:
         )
         return record
 
-    preferred = [
-        "inclusionai/ling-3.1-flash",
-        "nvidia/nemotron-3.5-lightning:free",
-        "kilo-auto/free",
-    ]
-    models = [m for m in preferred if m in free_ids]
+    # Follow the shipped whitelist order instead of a private copy of it, so a
+    # smoke always exercises the routes production would actually try.
+    from pa_agent.ai.sensenova_fallback import _PREFERRED_KILO
+
+    models = [m for m in _PREFERRED_KILO if m in free_ids]
     models.extend(m for m in free_ids if m not in models and "content-safety" not in m)
     record["free_count"] = len(free_ids)
     record["candidate_order"] = models[:8]

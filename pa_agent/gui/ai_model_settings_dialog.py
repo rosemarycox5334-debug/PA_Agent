@@ -1,6 +1,8 @@
 """AI 模型设置对话框 — 只包含 AI 提供商相关字段."""
 from __future__ import annotations
 
+from typing import Any
+
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
@@ -85,6 +87,14 @@ class AIModelSettingsDialog(QDialog):
         api_key_row.addWidget(self._show_key_btn)
         form.addRow("API Key:", api_key_row)
 
+        # GLM 备用通道 Key：仅当主通道是 SenseNova 网关时显示。
+        self._glm_key_label = QLabel("GLM 备用 Key:")
+        self._glm_key_edit = QLineEdit()
+        self._glm_key_edit.setPlaceholderText("输入 GLM Key")
+        self._glm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(self._glm_key_label, self._glm_key_edit)
+        self._base_url_edit.textChanged.connect(self._refresh_glm_key_row)
+
         self._thinking_check = QCheckBox("启用 Thinking")
         form.addRow("Thinking:", self._thinking_check)
 
@@ -128,6 +138,8 @@ class AIModelSettingsDialog(QDialog):
         self._model_edit.setText(p.model)
         self._base_url_edit.setText(p.base_url)
         self._api_key_edit.setText(p.api_key)
+        self._glm_key_edit.setText(str(getattr(p, "backup_glm_api_key", "") or ""))
+        self._refresh_glm_key_row()
         self._thinking_check.setChecked(p.thinking)
         idx = self._reasoning_effort_combo.findText(p.reasoning_effort)
         if idx >= 0:
@@ -176,8 +188,32 @@ class AIModelSettingsDialog(QDialog):
         p.thinking = self._thinking_check.isChecked()
         p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
 
+        self._apply_glm_backup_key(p)
+
         save_settings(self._settings, SETTINGS_JSON_PATH)
         self.accept()
+
+    def _refresh_glm_key_row(self) -> None:
+        """GLM 备用 Key 只在主通道为 SenseNova 网关时有意义。"""
+        from pa_agent.ai.glm_backup import is_sensenova_base
+
+        visible = is_sensenova_base(self._base_url_edit.text().strip())
+        self._glm_key_label.setVisible(visible)
+        self._glm_key_edit.setVisible(visible)
+
+    def _apply_glm_backup_key(self, p: Any) -> None:
+        """保存 GLM Key，并同步维护 fallbacks 里的 glm-4-flash 条目。"""
+        from pa_agent.ai.glm_backup import GLM_BASE_URL, GLM_MODEL, ensure_glm_fallback
+
+        p.backup_glm_api_key = self._glm_key_edit.text().strip()
+        if p.backup_glm_api_key:
+            ensure_glm_fallback(p)
+            return
+        p.fallbacks = [
+            fb for fb in (getattr(p, "fallbacks", None) or [])
+            if not (str(getattr(fb, "model", "")) == GLM_MODEL
+                    and str(getattr(fb, "base_url", "")) == GLM_BASE_URL)
+        ]
 
     # ── 辅助 ──────────────────────────────────────────────────────────────────
 

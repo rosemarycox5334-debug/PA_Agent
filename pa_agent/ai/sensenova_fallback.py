@@ -14,8 +14,10 @@ Rules:
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -34,17 +36,208 @@ _COOLDOWN_S = 5 * 60
 _MAX_CANDIDATES = 6
 _DEFAULT_TIMEOUT_S = 120.0
 _DEFAULT_MAX_TOKENS = 8192
+#: How often the spare channel reports that it is still waiting. The UI shows a
+#: live counter so a slow route does not look like a frozen window.
+_HEARTBEAT_S = 5.0
 
-# Main-agent verified free chat models (HTTP 200, JSON, cost 0).
+# 用真实的 PA lite 第二阶段提示词实测（2026-10-29，XAUUSD 5m、100 根K线），
+# 思考开启，每条路由都用它能接受的最小思考预算。
+#
+# 排序规则（用户 2026-10-29 指定，两次调整后的最终版）：
+# **思考过程是中文的优先**，同一档内推理字数越多的越优先。
+#
+# 为什么按语言排序：实测证明思考语言是模型自带的属性，改提示词没用——
+# 在系统提示里显式要求「思考必须用简体中文」后，super-vl 仍是 0% 中文、
+# lightning 15%、openrouter 29%，而 beam-free 97%、north-mini-code 93% 本来就写中文。
+# 所以只能按模型挑，不能靠提示词纠正。不思考的路由没有中文可言，一律垫底。
+#
+# 每条后面的注释是：中文占比、实测隐藏推理字数、该模式下的延迟。
+_REASONING_CJK_SHARE_KILO: dict[str, float] = {
+    "reflection/beam-free": 0.967,
+    "cohere/north-mini-code:free": 0.933,
+    "recursive/flint-v1.0:free": 0.460,
+    "openrouter/free": 0.287,
+    "nvidia/nemotron-3.5-lightning:free": 0.146,
+    "nvidia/nemotron-3.5-super-vl:free": 0.000,
+    # 不产生隐藏推理：没有中文可谈，排最后
+    "poolside/laguna-s-2.1:free": -1.0,
+    "stealth/glyph-cluster": -1.0,
+}
+
 _PREFERRED_KILO = (
-    "inclusionai/ling-3.1-flash",
-    "nvidia/nemotron-3.5-lightning:free",
-    "kilo-auto/free",
-    "openrouter/free",
-    "poolside/laguna-xs-2.1:free",
+    # -- 中文思考的 --
+    "reflection/beam-free",                              # 中文 97%   269 字   4.0 秒（effort=minimal）
+    "cohere/north-mini-code:free",                       # 中文 93%  1843 字  14.6 秒
+    # -- 中英混杂 --
+    "recursive/flint-v1.0:free",                         # 中文 46%  9131 字  20.9 秒
+    # -- 基本英文思考 --
+    "openrouter/free",                                   # 中文 29%  1803 字  18.8 秒
+    "nvidia/nemotron-3.5-lightning:free",                # 中文 15%  1732 字  11.3 秒
+    "nvidia/nemotron-3.5-super-vl:free",                 # 中文  0%  1528 字   6.5 秒
+    # -- 不思考的，只作垫底 --
+    "poolside/laguna-s-2.1:free",                        # 无推理     0 字   8.7 秒
+    "stealth/glyph-cluster",                             # 无推理     0 字  36.5 秒
 )
 
+#: 同一份 lite 第二阶段提示词下，各路由的实测隐藏推理字数（最近一次实测）。
+#: 排序的次键：同一语言档内字数多的优先。注意单次采样波动很大
+#: （north-mini-code 曾测到 12 378 字，复测只有 1 843 字），所以只作次键。
+_REASONING_CHARS_KILO: dict[str, int] = {
+    "recursive/flint-v1.0:free": 9131,
+    "cohere/north-mini-code:free": 1843,
+    "openrouter/free": 1803,
+    "nvidia/nemotron-3.5-lightning:free": 1732,
+    "nvidia/nemotron-3.5-super-vl:free": 1528,
+    "reflection/beam-free": 269,
+    "dots-studio/dots-3-note-preview:free": 8903,
+    "poolside/laguna-s-2.1:free": 0,
+    "stealth/glyph-cluster": 0,
+}
+#: 实测确实会产生隐藏推理的路由（由上面的字数表派生，不手工维护）。
+_THINKING_CAPABLE_KILO = frozenset(
+    model for model, chars in _REASONING_CHARS_KILO.items() if chars > 0
+)
+
+# Probed and rejected. Keeping them here (instead of relying on the live pool
+# to drop them) means a model that fails today is not retried tomorrow just
+# because the listing still advertises it as free.
+#
+#   kilo-auto/free                      ignores every thinking control: 15 265
+#                                       reasoning chars, 89.3 s
+#   nemotron-3-nano-omni-30b-a3b-...    leaves order_type and decision.reasoning
+#                                       empty under every control shape
+_EXCLUDED_KILO = frozenset({
+    "kilo-auto/free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "xingchen-agi/xing4.0-29b-a4b:free",
+    "inclusionai/ling-3.1-flash",
+})
+
+# Working but currently degrading upstream: pushed behind everything else rather
+# than dropped, since both failures were the provider, not the thinking control.
+#   poolside/laguna-xs-2.1:free          HTTP 429 (rate limited) on every shape
+#   nvidia/nemotron-3-ultra-...          HTTP 502 "Upstream error from Nvidia"
+#   dots-studio/dots-3-note-preview:free 本轮在 8192 输出预算下截断，语言未测
+_UNSTABLE_KILO = frozenset({
+    "poolside/laguna-xs-2.1:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "dots-studio/dots-3-note-preview:free",
+})
+
+# The spare channel prefers a route that can think, but pins every route to the
+# smallest thinking budget it will accept.
+#
+# Measured on 2026-10-29 (same lite Stage-2 prompt): asking for the lowest
+# *effort* is not enough — ``effort="minimal"`` was accepted yet ignored, so one
+# route spent 17 165 reasoning chars and 65 s, another 10 369 chars and 94 s.
+# A token budget is what actually binds: ``reasoning={"max_tokens": 512}``
+# brought the same routes to 8.3 s / 1 818 chars and 15.1 s / 860 chars with the
+# contract still clean, while keeping thinking enabled.
+#
+# ``reasoning.effort`` and ``reasoning.max_tokens`` are mutually exclusive on
+# this gateway, so exactly one shape is sent per attempt. A route that rejects
+# the budget drops to the lowest effort tier, then to no field at all; the
+# negotiated variant is cached per model so only the first call discovers it.
+_REASONING_BUDGET_TOKENS = 512
+_REASONING_VARIANTS: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("budget", {"reasoning": {"max_tokens": _REASONING_BUDGET_TOKENS}}),
+    ("minimal", {"reasoning": {"effort": "minimal"}}),
+    ("low", {"reasoning": {"effort": "low"}}),
+    ("unset", {}),
+)
+_REASONING_VARIANTS_BY_NAME: dict[str, dict[str, Any]] = {
+    name: extra for name, extra in _REASONING_VARIANTS
+}
+
+# Which shape actually binds thinking is a per-route fact, measured 2026-10-29:
+# some routes honour the token budget (lightning 65 s -> 9 s), while beam-free is
+# the opposite (budget 36 s and a broken contract, minimal effort 7.7 s and
+# clean). Seeding the cache with the measured answer means the first real call
+# already uses the right shape instead of discovering it by trial.
+_REASONING_VARIANT_PRESET: dict[str, str] = {
+    "reflection/beam-free": "minimal",
+}
+_reasoning_variant_by_model: dict[str, str] = dict(_REASONING_VARIANT_PRESET)
+
 ValidateFn = Callable[[Any], Any]
+
+
+def _post_with_minimal_thinking(
+    *,
+    url: str,
+    headers: dict[str, str],
+    candidate: FreeCandidate,
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    primary_api_key: str | None,
+    poster: Callable[..., Any],
+    timeout_s: float,
+    stream: bool = False,
+) -> tuple[int, Any]:
+    """POST one completion, preferring a route that thinks as little as possible."""
+    model = candidate.model
+    known = _reasoning_variant_by_model.get(model)
+    if known:
+        order = [known] + [
+            name for name, _ in _REASONING_VARIANTS if name != known
+        ]
+    else:
+        order = [name for name, _ in _REASONING_VARIANTS]
+
+    last_reasoning_error = ""
+    for name in order:
+        extra = _REASONING_VARIANTS_BY_NAME[name]
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": int(max_tokens),
+            "stream": bool(stream),
+        }
+        body.update(extra)
+
+        _assert_key_isolation(
+            primary_api_key=primary_api_key,
+            headers=headers,
+            body=body,
+        )
+
+        try:
+            status, payload = poster(
+                url, headers=headers, body=body, timeout=timeout_s
+            )
+        except Exception as exc:
+            if is_cancel_or_interrupt(exc):
+                raise
+            raise RuntimeError(f"{candidate.provider}/{model}: {exc}") from exc
+
+        # Only a rejected reasoning field is worth retrying: any other 4xx
+        # (or a 429/5xx) is the caller's problem or a cooldown, not a variant
+        # mismatch.
+        if status in (400, 422) and extra:
+            last_reasoning_error = _error_message(payload)
+            _reasoning_variant_by_model.pop(model, None)
+            continue
+
+        _reasoning_variant_by_model[model] = name
+        return status, payload
+
+    raise RuntimeError(
+        f"{candidate.provider}/{model}: upstream rejected all reasoning controls"
+        + (f" ({last_reasoning_error})" if last_reasoning_error else "")
+    )
+
+
+def _error_message(payload: Any) -> str:
+    """Best-effort upstream error text for a log line (never raises)."""
+    if not isinstance(payload, dict):
+        return ""
+    err = payload.get("error")
+    if isinstance(err, dict):
+        return str(err.get("message") or "")[:120]
+    if isinstance(err, str):
+        return err[:120]
+    return ""
 
 
 def normalize_base_url(url: str | None) -> str:
@@ -126,10 +319,12 @@ _COOLDOWNS: dict[tuple[str, str], float] = {}
 
 
 def reset_fallback_state_for_tests() -> None:
-    """Clear listing cache and cooldowns (unit tests only)."""
+    """Clear listing cache, cooldowns and negotiated reasoning variants."""
     _CACHE.kilo_rows = None
     _CACHE.kilo_expires = 0.0
     _COOLDOWNS.clear()
+    _reasoning_variant_by_model.clear()
+    _reasoning_variant_by_model.update(_REASONING_VARIANT_PRESET)
 
 
 def _cooldown_key(candidate: FreeCandidate) -> tuple[str, str]:
@@ -237,10 +432,19 @@ def build_candidates(
         logger.warning("Kilo free listing failed: %s", exc)
 
     kilo_set = {
-        m for m in kilo_ids if isinstance(m, str) and m.strip() and not _is_safety_only_model(m)
+        m
+        for m in kilo_ids
+        if isinstance(m, str)
+        and m.strip()
+        and not _is_safety_only_model(m)
+        and m not in _EXCLUDED_KILO
     }
     ordered_kilo = [m for m in _PREFERRED_KILO if m in kilo_set]
-    ordered_kilo.extend(sorted(m for m in kilo_set if m not in ordered_kilo))
+    ordered_kilo.extend(
+        sorted(m for m in kilo_set if m not in ordered_kilo and m not in _UNSTABLE_KILO)
+    )
+    # Unstable models only get a turn after every stable one has been tried.
+    ordered_kilo.extend(sorted(m for m in kilo_set if m in _UNSTABLE_KILO))
 
     out: list[FreeCandidate] = []
     for mid in ordered_kilo:
@@ -354,8 +558,16 @@ def call_free_candidate(
     timeout_s: float = _DEFAULT_TIMEOUT_S,
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     http_post: Callable[..., Any] | None = None,
+    http_stream: Callable[..., Any] | None = None,
+    stream: bool = False,
+    on_reasoning_token: Callable[[str], None] | None = None,
+    on_content_token: Callable[[str], None] | None = None,
 ) -> Any:
-    """POST one non-stream chat completion to a free upstream.
+    """Call one free upstream, streaming when *stream* is set.
+
+    Streaming keeps the same reply shape and the same truncation rule; the only
+    difference is that reasoning/content deltas reach the callbacks as they
+    arrive instead of after the call returns.
 
     Raises CancelledError / KeyboardInterrupt / SystemExit unchanged. Other
     failures raise ``RuntimeError`` with a concise message (no secrets).
@@ -368,40 +580,53 @@ def call_free_candidate(
     if candidate.provider != "kilo":
         raise RuntimeError(f"unsupported free provider: {candidate.provider}")
 
-    body: dict[str, Any] = {
-        "model": candidate.model,
-        "messages": messages,
-        "max_tokens": int(max_tokens),
-        "stream": False,
-    }
-    # These exact routes were live-verified with reasoning disabled; Nemotron
-    # also passed the complete PA Stage-1 prompt. Leave forced-thinking models alone.
-    if candidate.model in {
-        "inclusionai/ling-3.1-flash",
-        "nvidia/nemotron-3.5-lightning:free",
-    }:
-        body["reasoning"] = {"enabled": False}
     headers: dict[str, str] = {
         "content-type": "application/json",
-        "accept": "application/json",
+        "accept": "text/event-stream" if stream else "application/json",
         "user-agent": _KILO_UA,
     }
     url = f"{candidate.base_url.rstrip('/')}/chat/completions"
 
-    _assert_key_isolation(
-        primary_api_key=primary_api_key,
-        headers=headers,
-        body=body,
-    )
+    emitted: dict[str, bool] = {"reasoning": False, "content": False}
+    if stream:
+        transport = http_stream or http_post or _default_http_post
 
-    poster = http_post or _default_http_post
+        def _streaming_poster(
+            url_: str, *, headers: dict[str, str], body: dict[str, Any], timeout: float
+        ) -> tuple[int, Any]:
+            def _on_event(event: dict[str, Any]) -> None:
+                _emit_stream_delta(
+                    event, on_reasoning_token, on_content_token, emitted
+                )
+
+            if _accepts_on_event(transport):
+                return transport(
+                    url_,
+                    headers=headers,
+                    body=body,
+                    timeout=timeout,
+                    on_event=_on_event,
+                )
+            # A test double that returns a complete payload: no deltas, the
+            # caller falls back to emitting the finished text once.
+            return transport(url_, headers=headers, body=body, timeout=timeout)
+
+        poster: Callable[..., Any] = _streaming_poster
+    else:
+        poster = http_post or _default_http_post
+
     t0 = time.monotonic()
-    try:
-        status, payload = poster(url, headers=headers, body=body, timeout=timeout_s)
-    except Exception as exc:
-        if is_cancel_or_interrupt(exc):
-            raise
-        raise RuntimeError(f"{candidate.provider}/{candidate.model}: {exc}") from exc
+    status, payload = _post_with_minimal_thinking(
+        url=url,
+        headers=headers,
+        candidate=candidate,
+        messages=messages,
+        max_tokens=max_tokens,
+        primary_api_key=primary_api_key,
+        poster=poster,
+        timeout_s=timeout_s,
+        stream=stream,
+    )
 
     latency_ms = (time.monotonic() - t0) * 1000
     if cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
@@ -459,7 +684,18 @@ def _default_http_post(
     headers: dict[str, str],
     body: dict[str, Any],
     timeout: float,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[int, Any]:
+    """POST one chat completion, streaming when ``body["stream"]`` is set.
+
+    Keeping both modes behind one injectable function means a test double (or a
+    caller) only has to replace a single seam.
+    """
+    if body.get("stream"):
+        return _default_http_stream(
+            url, headers=headers, body=body, timeout=timeout, on_event=on_event
+        )
+
     import httpx
 
     with httpx.Client(timeout=timeout, follow_redirects=False) as client:
@@ -471,10 +707,181 @@ def _default_http_post(
         return resp.status_code, payload
 
 
+def _accepts_on_event(fn: Callable[..., Any]) -> bool:
+    """True when *fn* can be handed a per-chunk callback.
+
+    ``unittest.mock.patch`` replaces the function with a mock whose signature is
+    ``(*args, **kwargs)``, which would wrongly look compatible; inspect the
+    substituted ``side_effect`` instead.
+    """
+    target: Any = fn
+    side_effect = getattr(fn, "side_effect", None)
+    if callable(side_effect):
+        target = side_effect
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return False
+    return "on_event" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def _sse_line_to_event(line: str) -> dict[str, Any] | None:
+    """Decode one Server-Sent-Events line into a chat-completion chunk."""
+    if not line:
+        return None
+    text = line.strip()
+    if not text.startswith("data:"):
+        return None
+    data = text[len("data:"):].strip()
+    if not data or data == "[DONE]":
+        return None
+    try:
+        obj = json.loads(data)
+    except Exception:  # noqa: BLE001
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _default_http_stream(
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    timeout: float,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[int, Any]:
+    """Stream one SSE completion, forwarding each chunk to *on_event*.
+
+    Returns ``(status, payload)`` shaped exactly like the non-stream reply, so
+    callers can share the truncation / usage / reply-building code.
+    """
+    import httpx
+
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    finish_reason = ""
+    usage: dict[str, Any] = {}
+    response_id = ""
+    model = ""
+
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        with client.stream("POST", url, headers=headers, json=body) as resp:
+            status = resp.status_code
+            if status >= 400:
+                raw = resp.read().decode("utf-8", "replace")
+                try:
+                    payload: Any = json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    payload = {"error": {"message": raw[:300]}}
+                return status, payload
+
+            for line in resp.iter_lines():
+                event = _sse_line_to_event(line)
+                if event is None:
+                    continue
+                if event.get("id"):
+                    response_id = str(event["id"])
+                if event.get("model"):
+                    model = str(event["model"])
+                if isinstance(event.get("usage"), dict):
+                    usage = event["usage"]
+
+                choices = event.get("choices")
+                choice = choices[0] if isinstance(choices, list) and choices else None
+                if isinstance(choice, dict):
+                    reason = choice.get("finish_reason")
+                    if reason:
+                        finish_reason = str(reason)
+                    delta = choice.get("delta") or choice.get("message") or {}
+                    if isinstance(delta, dict):
+                        r = delta.get("reasoning_content") or delta.get("reasoning")
+                        if isinstance(r, str) and r:
+                            reasoning_parts.append(r)
+                        c = delta.get("content")
+                        if isinstance(c, str) and c:
+                            content_parts.append(c)
+
+                if on_event is not None:
+                    try:
+                        on_event(event)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("stream chunk callback failed", exc_info=True)
+
+    payload = {
+        "id": response_id,
+        "model": model or body.get("model"),
+        "choices": [
+            {
+                "message": {
+                    "content": "".join(content_parts),
+                    "reasoning_content": "".join(reasoning_parts),
+                },
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage,
+    }
+    return 200, payload
+
+
+def _emit_stream_delta(
+    event: dict[str, Any],
+    on_reasoning_token: Callable[[str], None] | None,
+    on_content_token: Callable[[str], None] | None,
+    counter: dict[str, bool],
+) -> None:
+    """Forward one streamed chunk to the UI callbacks, in arrival order."""
+    choices = event.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    if not isinstance(choice, dict):
+        return
+    delta = choice.get("delta") or {}
+    if not isinstance(delta, dict):
+        return
+    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+    if isinstance(reasoning, str) and reasoning and on_reasoning_token is not None:
+        counter["reasoning"] = True
+        try:
+            on_reasoning_token(reasoning)
+        except Exception:  # noqa: BLE001
+            logger.debug("reasoning token callback failed", exc_info=True)
+    content = delta.get("content")
+    if isinstance(content, str) and content and on_content_token is not None:
+        counter["content"] = True
+        try:
+            on_content_token(content)
+        except Exception:  # noqa: BLE001
+            logger.debug("content token callback failed", exc_info=True)
+
+
 def _short_error(exc: BaseException, limit: int = 120) -> str:
     """One-line, truncated error text suitable for a log line."""
     text = " ".join(str(exc or "").split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _start_heartbeat(
+    progress: Callable[[str], None],
+    interval: float,
+) -> tuple[threading.Event | None, threading.Thread | None]:
+    """Report elapsed wait time while a spare-channel call is in flight."""
+    if not interval or interval <= 0:
+        return None, None
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _loop() -> None:
+        while not stop.wait(interval):
+            elapsed = int(time.monotonic() - started)
+            progress(
+                f"[提示] 备用通道仍在分析中（已等待 {elapsed} 秒），没有卡顿，请稍等…\n"
+            )
+
+    thread = threading.Thread(target=_loop, daemon=True, name="pa-spare-channel-heartbeat")
+    thread.start()
+    return stop, thread
 
 
 def run_free_stage_fallback(
@@ -489,6 +896,9 @@ def run_free_stage_fallback(
     candidates: Iterable[FreeCandidate] | None = None,
     http_get: Callable[..., Any] | None = None,
     http_post: Callable[..., Any] | None = None,
+    http_stream: Callable[..., Any] | None = None,
+    stream: bool = False,
+    heartbeat_seconds: float = _HEARTBEAT_S,
     max_candidates: int = _MAX_CANDIDATES,
 ) -> FreeStageSuccess | FreeStageFailure:
     """Try free candidates until one call + validation both succeed.
@@ -496,6 +906,10 @@ def run_free_stage_fallback(
     ``on_progress`` receives short human-readable lines so the UI can show that
     the analysis is still alive during a multi-minute fallback rotation. It is
     best-effort: a failing callback never breaks the analysis.
+
+    ``stream`` is opt-in: the production callers enable it so reasoning reaches
+    the UI as it is produced instead of arriving in one block after a call that
+    may run for a minute. Unit tests keep the non-streaming default.
     """
     from pa_agent.ai.json_validator import Ok, ValidationError
 
@@ -506,6 +920,19 @@ def run_free_stage_fallback(
             on_progress(text)
         except Exception:  # noqa: BLE001
             logger.debug("free fallback progress callback failed", exc_info=True)
+
+    use_stream = bool(stream)
+    streamed_flags = {"reasoning": False, "content": False}
+
+    def _on_reasoning(chunk: str) -> None:
+        streamed_flags["reasoning"] = True
+        if on_reasoning_token is not None:
+            on_reasoning_token(chunk)
+
+    def _on_content(chunk: str) -> None:
+        streamed_flags["content"] = True
+        if on_content_token is not None:
+            on_content_token(chunk)
 
     if cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
         from pa_agent.ai.deepseek_client import CancelledError
@@ -538,6 +965,7 @@ def run_free_stage_fallback(
         )
         t0 = time.monotonic()
         reply: Any = None
+        heartbeat_stop, _heartbeat_thread = _start_heartbeat(_progress, heartbeat_seconds)
         try:
             reply = call_free_candidate(
                 candidate,
@@ -545,12 +973,20 @@ def run_free_stage_fallback(
                 primary_api_key=primary_api_key,
                 cancel_token=cancel_token,
                 http_post=http_post,
+                http_stream=http_stream,
+                stream=use_stream,
+                on_reasoning_token=_on_reasoning,
+                on_content_token=_on_content,
             )
             _progress("[提示] 已收到返回，正在校验结果…\n")
             result = validate(reply)
         except Exception as exc:
             if is_cancel_or_interrupt(exc):
                 raise
+            if use_stream and (streamed_flags["reasoning"] or streamed_flags["content"]):
+                # Part of this attempt already reached the pane; say so plainly
+                # instead of leaving unexplained text above the next attempt.
+                _progress("[提示] 该次返回未完整，已切换到下一个通道继续…\n")
             latency_ms = (time.monotonic() - t0) * 1000
             attempts.append(
                 FreeAttemptRecord(
@@ -569,6 +1005,9 @@ def run_free_stage_fallback(
                 exc,
             )
             continue
+        finally:
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
 
         latency_ms = (time.monotonic() - t0) * 1000
         if isinstance(result, Ok):
@@ -592,10 +1031,16 @@ def run_free_stage_fallback(
                 f"[提示] 校验通过（用时 {latency_ms / 1000:.1f} 秒），"
                 "以下是本次分析结果：\n"
             )
-            if on_reasoning_token and getattr(reply, "reasoning_content", None):
-                on_reasoning_token(reply.reasoning_content)
-            if on_content_token and getattr(reply, "content", None):
-                on_content_token(reply.content)
+            # In streaming mode the deltas already reached the pane as they were
+            # produced; re-sending the whole blob would duplicate every line. A
+            # route that ignored stream=True delivers no deltas at all, so each
+            # channel falls back to its finished text independently.
+            if not streamed_flags["reasoning"] and getattr(
+                reply, "reasoning_content", None
+            ):
+                _on_reasoning(reply.reasoning_content)
+            if not streamed_flags["content"] and getattr(reply, "content", None):
+                _on_content(reply.content)
             return FreeStageSuccess(
                 reply=reply,
                 candidate=candidate,

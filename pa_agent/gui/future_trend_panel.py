@@ -160,6 +160,11 @@ class FutureTrendPanel(QWidget):
         )
         cycle_layout.addWidget(self._cycle_probs_label)
 
+        from pa_agent.gui.analysis_details import AnalysisDetails
+        self._cycle_details = AnalysisDetails()
+        self._cycle_probability_notice = self._cycle_details.body
+        cycle_layout.addWidget(self._cycle_details)
+
         self._cycle_reasoning_edit = QTextEdit()
         self._cycle_reasoning_edit.setReadOnly(True)
         self._cycle_reasoning_edit.setObjectName("answerPane")
@@ -194,6 +199,10 @@ class FutureTrendPanel(QWidget):
                 line = _format_prediction_probs_line(probs)
                 dominant = _dominant_prediction_direction(probs)
                 color = _PREDICTION_DOMINANT_COLOR.get(dominant, _PREDICTION_UNPREDICTABLE_COLOR)
+            elif decision.get("trace_source") == "local_rules":
+                direction = str(pred.get("direction") or "")
+                line = f"方向：{_DIRECTION_ZH.get(direction, '—')}"
+                color = _PREDICTION_DOMINANT_COLOR.get(direction, _PREDICTION_UNPREDICTABLE_COLOR)
             else:
                 line = "—"
                 color = _PREDICTION_UNPREDICTABLE_COLOR
@@ -222,6 +231,17 @@ class FutureTrendPanel(QWidget):
     def _apply_next_cycle_prediction(self, decision: dict) -> None:
         """Render 下一个市场周期预期 module. Hides on missing/invalid data."""
         pred = decision.get("next_cycle_prediction")
+        if (isinstance(pred, dict) and decision.get("trace_source") == "local_rules"
+                and not isinstance(pred.get("probabilities"), dict)):
+            # Old saved lite records have no probability block. Display a
+            # clearly marked prior without mutating their persisted contents.
+            from pa_agent.ai.local_cycle_forecast import fill_cycle_probabilities
+            pred = fill_cycle_probabilities(pred, stage1_json=decision.get("diagnosis_summary"))
+        program_probs = isinstance(pred, dict) and pred.get("probability_source") == "program_rules"
+        self._cycle_details.set_details(
+            ("概率来源：程序规则估算（未经统计校准，非交易胜率）。" + str(pred.get("probability_basis", "")))
+            if program_probs else ""
+        )
         if not isinstance(pred, dict):
             self._cycle_group.setVisible(False)
             self._reset_chips()
@@ -231,7 +251,7 @@ class FutureTrendPanel(QWidget):
             return
 
         unpredictable = bool(pred.get("unpredictable", False))
-        if unpredictable:
+        if unpredictable and not program_probs:
             self._reset_chips()
             self._chip_labels[0].setText(_PREDICTION_UNPREDICTABLE_LABEL)
             self._chip_labels[0].setStyleSheet(_chip_style(_PREDICTION_UNPREDICTABLE_COLOR))
@@ -283,6 +303,11 @@ class FutureTrendPanel(QWidget):
                 lbl.setText("—")
                 lbl.setStyleSheet(_chip_style("#8b949e"))
 
+        if decision.get("trace_source") == "local_rules" and not sorted_probs:
+            self._chip_labels[0].setText("简化走势预期（未提供周期概率）")
+            self._chip_labels[1].setVisible(False)
+            self._chip_labels[2].setVisible(False)
+
         self._cycle_direction_label.setText(f"方向：{direction_zh}")
         self._cycle_direction_label.setStyleSheet(
             f"font-size: 14px; font-weight: bold; color: {cycle_color};"
@@ -324,6 +349,7 @@ class FutureTrendPanel(QWidget):
         self._bar_reasoning_edit.clear()
 
         self._cycle_group.setVisible(False)
+        self._cycle_details.set_details("")
         self._reset_chips()
         for lbl in self._chip_labels:
             lbl.setVisible(True)
