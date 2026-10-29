@@ -4,8 +4,10 @@
     "base_url": "https://api.deepseek.com",
     "api_key_encrypted": "",
     "thinking": true,
-    "reasoning_effort": "high",
-    "context_window": 128000
+    "reasoning_effort": "low",
+    "context_window": 128000,
+    "fallbacks": [],
+    "backup_glm_api_key": ""
   },
   "general": {
     "analysis_bar_count": 100,
@@ -19,6 +21,7 @@
     "decision_flow_play_seconds": 50,
     "incremental_max_new_bars": 10,
     "decision_stance": "balanced",
+    "decision_confidence_threshold": 0,
     "structure_flip_cooldown_bars": 3,
     "decision_flow_default_zoom_pct": 600,
     "stream_pane_font_pt": 11,
