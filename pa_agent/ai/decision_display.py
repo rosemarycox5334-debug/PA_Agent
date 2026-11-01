@@ -112,6 +112,19 @@ def reconcile_lite_decision(out: dict[str, Any], original: dict[str, Any], *, fr
 _PLAN_WORDS = ("止损", "TP1", "TP2", "入场价", "目标位", "目标价", "作为入场")
 _DIRECTION_WORDS = ("做多", "做空", "买入", "卖出", "限价", "突破单", "市价单", "多单", "空单")
 
+#: Phrases proving the text already explains *why* no order is taken. A text
+#: that mentions an entry plan **and** one of these is a refusal explanation,
+#: not stale instructions, so the legacy placeholder must leave it alone.
+_REFUSAL_PHRASES = (
+    "不下单", "放弃", "不做多", "不做空", "不做", "不满足", "超过", "过大",
+    "逻辑矛盾", "无合理", "失效位", "等待价格", "等待结构",
+)
+
+
+def _explains_why_no_order(text: str) -> bool:
+    """True when *text* itself justifies the no-order decision."""
+    return any(phrase in text for phrase in _REFUSAL_PHRASES)
+
 
 def looks_like_trade_instructions(text: str) -> bool:
     """True when the text still describes a concrete entry plan."""
@@ -129,12 +142,20 @@ def repair_legacy_display(out: dict[str, Any]) -> None:
         return
     d = out.get("decision") or {}
     text = str(d.get("reasoning") or "")
-    if d.get("order_type") == "不下单" and looks_like_trade_instructions(text):
-        out.setdefault("model_decision", copy.deepcopy(d))
-        d["reasoning"] = "当前不下单：此前入场建议未生效。该历史记录未保留具体调整原因，请重新分析确认入场条件。"
-        d["trade_confidence"] = 0
-        d["trade_confidence_reasoning"] = "当前没有有效入场计划"
-        out["decision_adjustment"] = {"from": "历史入场建议", "to": "不下单", "reason": "旧记录未保存具体调整原因"}
+    if d.get("order_type") != "不下单":
+        return
+    if not looks_like_trade_instructions(text):
+        return
+    if _explains_why_no_order(text):
+        # The text already says why it refuses (risk too wide, geometry broken,
+        # waiting for a level...). Replacing it with the generic placeholder
+        # would hide a readable reason, so keep it verbatim.
+        return
+    out.setdefault("model_decision", copy.deepcopy(d))
+    d["reasoning"] = "当前不下单：此前入场建议未生效。该历史记录未保留具体调整原因，请重新分析确认入场条件。"
+    d["trade_confidence"] = 0
+    d["trade_confidence_reasoning"] = "当前没有有效入场计划"
+    out["decision_adjustment"] = {"from": "历史入场建议", "to": "不下单", "reason": "旧记录未保存具体调整原因"}
 
 
 def details_text(payload: dict[str, Any]) -> str:
