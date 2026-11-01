@@ -562,6 +562,7 @@ class TwoStageOrchestrator:
                     frame=frame,
                 ),
                 free_lane_state=s1_free_lane_state,
+                on_progress=on_stage1_content,
             )
         except Exception as exc:
             from pa_agent.ai.sensenova_fallback import is_cancel_or_interrupt
@@ -998,6 +999,7 @@ class TwoStageOrchestrator:
                     stage1_json=stage1_json,
                 ),
                 free_lane_state=s2_free_lane_state,
+                on_progress=on_stage2_content,
             )
         except Exception as exc:
             from pa_agent.ai.sensenova_fallback import is_cancel_or_interrupt
@@ -1585,6 +1587,7 @@ class TwoStageOrchestrator:
         frame: KlineFrame | None = None,
         free_lane: Callable[[BaseException], Any] | None = None,
         free_lane_state: dict[str, bool] | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> Any:
         """Call stream_chat with layered fallbacks.
 
@@ -1669,6 +1672,7 @@ class TwoStageOrchestrator:
                             cancel_token=cancel_token,
                             on_reasoning_token=on_reasoning_token,
                             on_content_token=on_content_token,
+                            on_progress=on_progress,
                         )
                         if reply_spare is not None:
                             return reply_spare

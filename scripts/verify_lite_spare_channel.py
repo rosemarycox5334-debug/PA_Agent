@@ -58,13 +58,22 @@ def main() -> int:
         settings=settings,
     )
 
-    chunks = {"reasoning": 0, "content": 0}
+    chunks = {"reasoning": 0, "content": 0, "reasoning_pieces": 0, "content_pieces": 0}
+    first = {"at": 0.0}
+
+    def _mark() -> None:
+        if not first["at"]:
+            first["at"] = time.monotonic()
 
     def on_reasoning(chunk: str) -> None:
+        _mark()
         chunks["reasoning"] += len(chunk)
+        chunks["reasoning_pieces"] += 1
 
     def on_content(chunk: str) -> None:
+        _mark()
         chunks["content"] += len(chunk)
+        chunks["content_pieces"] += 1
 
     t0 = time.monotonic()
     try:
@@ -76,6 +85,7 @@ def main() -> int:
             thinking=True,
             reasoning_effort="low",
             stage_label="Stage 2",
+            on_progress=on_content,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[x] 失败（{time.monotonic() - t0:.1f}s）：{type(exc).__name__}: {exc}")
@@ -86,7 +96,11 @@ def main() -> int:
     content = reply.content or ""
     print(f"[ok] 用时 {elapsed:.1f}s")
     print(f"[ok] prompt={usage.prompt_tokens} completion={usage.completion_tokens}")
-    print(f"[ok] 回放思考 {chunks['reasoning']} 字、正文 {chunks['content']} 字")
+    print(f"[ok] 首片延迟：{(first['at'] - t0):.1f}s" if first["at"] else "[!] 没有收到任何流式分片")
+    print(
+        f"[ok] 思考 {chunks['reasoning']} 字/{chunks['reasoning_pieces']} 片，"
+        f"正文 {chunks['content']} 字/{chunks['content_pieces']} 片"
+    )
     print(f"[ok] 正文开头：{content[:160].replace(chr(10), ' ')}")
     try:
         parsed = json.loads(content)

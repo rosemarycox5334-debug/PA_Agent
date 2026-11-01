@@ -1,11 +1,13 @@
 """Tests for the spare-model layer (sensenova-6.8-flash-lite).
 
 Covers the two measured requirements (user-tailed messages, 16384 shared
-budget), the eligibility gate, the fall-through contract, and the wiring into
-both the two-stage pipeline and the follow-up chat.
+budget), the streaming transport, the heartbeat, the eligibility gate, the
+fall-through contract, and the wiring into both the two-stage pipeline and the
+follow-up chat.
 """
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,7 +24,7 @@ SENSENOVA = "https://token.sensenova.cn/v1"
 OTHER = "https://api.deepseek.com/v1"
 
 
-def _ok_body(*, content: str = '{"decision": {}}', reasoning: str = "思考") -> dict:
+def _body(*, content: str = '{"decision": {}}', reasoning: str = "思考") -> dict:
     return {
         "id": "req-lite-1",
         "choices": [
@@ -95,39 +97,46 @@ class TestTryLiteStage:
     def test_ineligible_gateway_never_calls_http(self):
         calls: list[tuple] = []
 
-        def post(*args):
+        def stream(*args):
             calls.append(args)
-            return _ok_body()
+            return _body()
 
         out = lite_fallback.try_lite_stage(
             [{"role": "user", "content": "hi"}],
             api_key="sk-sn",
             base_url=OTHER,
-            http_post=post,
+            http_stream=stream,
         )
         assert out is None
         assert calls == []
 
     def test_missing_key_returns_none(self):
+        calls: list[int] = []
+
+        def stream(*args):
+            calls.append(1)
+            return _body()
+
         out = lite_fallback.try_lite_stage(
             [{"role": "user", "content": "hi"}],
             api_key="",
             base_url=SENSENOVA,
-            http_post=lambda *a: _ok_body(),
+            http_stream=stream,
         )
         assert out is None
+        assert calls == []
 
-    def test_success_returns_reply_and_replays_both_channels(self):
+    def test_streams_reasoning_and_answer_to_the_callbacks(self):
         captured: dict = {}
-
-        def post(url, payload, api_key, timeout_s):
-            captured["url"] = url
-            captured["payload"] = payload
-            captured["api_key"] = api_key
-            return _ok_body()
-
         reasoning_chunks: list[str] = []
         content_chunks: list[str] = []
+
+        def stream(url, payload, api_key, timeout_s, on_reasoning, on_content):
+            captured.update(url=url, payload=payload, api_key=api_key, timeout=timeout_s)
+            on_reasoning("思考")
+            on_content('{"decision": {}}')
+            return _body()
+
         out = lite_fallback.try_lite_stage(
             [
                 {"role": "user", "content": "q2"},
@@ -137,12 +146,13 @@ class TestTryLiteStage:
             base_url=SENSENOVA,
             on_reasoning_token=reasoning_chunks.append,
             on_content_token=content_chunks.append,
-            http_post=post,
+            http_stream=stream,
         )
 
         assert out is not None
         assert out.content == '{"decision": {}}'
         assert out.usage.prompt_tokens == 107640
+        # Deltas reach the pane while the call runs, not as one blob afterwards.
         assert reasoning_chunks == ["思考"]
         assert content_chunks == ['{"decision": {}}']
 
@@ -150,16 +160,46 @@ class TestTryLiteStage:
         assert payload["model"] == "sensenova-6.8-flash-lite"
         assert payload["max_tokens"] == 16384, "shared thinking/answer budget must be large"
         assert payload["reasoning_effort"] == "low"
+        assert payload["stream"] is True
+        assert payload["stream_options"] == {"include_usage": True}
         assert "thinking" not in payload, "the gateway rejects the string thinking field"
         assert payload["messages"][-1]["role"] == "user"
         assert captured["url"].endswith("/chat/completions")
 
-    def test_empty_content_falls_through(self):
+    def test_heartbeat_reports_the_wait(self):
+        progress: list[str] = []
+
+        def slow_stream(url, payload, api_key, timeout_s, on_reasoning, on_content):
+            time.sleep(0.12)
+            if on_content is not None:
+                on_content("ok")
+            return _body(content="ok")
+
         out = lite_fallback.try_lite_stage(
             [{"role": "user", "content": "hi"}],
             api_key="sk-sn",
             base_url=SENSENOVA,
-            http_post=lambda *a: _ok_body(content=""),
+            on_progress=progress.append,
+            heartbeat_seconds=0.02,
+            http_stream=slow_stream,
+        )
+
+        assert out is not None
+        assert any("已等待" in line for line in progress), progress
+        # Wording stays neutral: no model name, no upstream error.
+        joined = "".join(progress)
+        assert "sensenova" not in joined.lower()
+        assert "6.8" not in joined
+
+    def test_empty_content_falls_through(self):
+        def stream(url, payload, api_key, timeout_s, on_reasoning, on_content):
+            return _body(content="")
+
+        out = lite_fallback.try_lite_stage(
+            [{"role": "user", "content": "hi"}],
+            api_key="sk-sn",
+            base_url=SENSENOVA,
+            http_stream=stream,
         )
         assert out is None
 
@@ -171,7 +211,7 @@ class TestTryLiteStage:
             [{"role": "user", "content": "hi"}],
             api_key="sk-sn",
             base_url=SENSENOVA,
-            http_post=boom,
+            http_stream=boom,
         )
         assert out is None
 
@@ -184,8 +224,13 @@ class TestTryLiteStage:
                 api_key="sk-sn",
                 base_url=SENSENOVA,
                 cancel_token=token,
-                http_post=lambda *a: _ok_body(),
+                http_stream=lambda *a: _body(),
             )
+
+    def test_data_lines_are_parsed(self):
+        assert lite_fallback._parse_data_line("data: [DONE]") is None
+        assert lite_fallback._parse_data_line(": keep-alive") is None
+        assert lite_fallback._parse_data_line('data: {"id":"x"}') == {"id": "x"}
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +266,7 @@ class TestOrchestratorWiring:
 
         monkeypatch.setattr("pa_agent.ai.lite_fallback.try_lite_stage", fake_try)
 
+        progress: list[str] = []
         out = orch._stream_chat_resilient(
             [{"role": "user", "content": "hi"}],
             on_reasoning_token=None,
@@ -229,12 +275,15 @@ class TestOrchestratorWiring:
             thinking=True,
             reasoning_effort="low",
             stage_label="Stage 1",
+            on_progress=progress.append,
         )
 
         assert out is spare_reply
         assert len(calls) == 1
         assert calls[0]["base_url"] == SENSENOVA
         assert calls[0]["api_key"] == "sk-sn"
+        # The stage's content callback is forwarded so progress can be shown.
+        assert "on_progress" in calls[0]
 
     def test_non_rate_limit_error_skips_the_spare_model(self, monkeypatch):
         orch = _orchestrator(exc=RuntimeError("connection refused"))
