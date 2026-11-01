@@ -29,7 +29,6 @@ import json
 import logging
 import threading
 import time
-import urllib.request
 from typing import Any, Callable
 
 from pa_agent.ai.deepseek_client import AIUsage, AIReply, CancelledError
