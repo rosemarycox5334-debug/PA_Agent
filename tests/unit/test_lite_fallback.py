@@ -185,11 +185,13 @@ class TestTryLiteStage:
         )
 
         assert out is not None
-        assert any("已等待" in line for line in progress), progress
-        # Wording stays neutral: no model name, no upstream error.
+        assert any("正在正常分析，请稍等。" in line for line in progress), progress
+        # Wording stays neutral: no model name, no upstream error, no counters.
         joined = "".join(progress)
         assert "sensenova" not in joined.lower()
         assert "6.8" not in joined
+        assert "已等待" not in joined
+        assert "[提示]" not in joined
 
     def test_empty_content_falls_through(self):
         def stream(url, payload, api_key, timeout_s, on_reasoning, on_content):

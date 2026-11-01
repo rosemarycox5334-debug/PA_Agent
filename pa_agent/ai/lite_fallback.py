@@ -32,6 +32,7 @@ import time
 from typing import Any, Callable
 
 from pa_agent.ai.deepseek_client import AIUsage, AIReply, CancelledError
+from pa_agent.ai.sensenova_fallback import NEUTRAL_PROGRESS_TEXT
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +100,12 @@ def _emit(fn: TokenFn, chunk: str) -> None:
 
 
 def _start_heartbeat(on_progress: ProgressFn, seconds: float) -> tuple[threading.Event, threading.Thread]:
-    """Emit a neutral "still generating" line while a long answer streams."""
+    """Emit the single neutral progress line while a long answer streams."""
     stop = threading.Event()
-    started = time.monotonic()
 
     def _loop() -> None:
         while not stop.wait(seconds):
-            waited = int(time.monotonic() - started)
-            _progress(on_progress, f"[提示] 备用通道正在生成（已等待 {waited} 秒）…\n")
+            _progress(on_progress, NEUTRAL_PROGRESS_TEXT + "\n")
 
     thread = threading.Thread(target=_loop, name="lite-heartbeat", daemon=True)
     thread.start()
@@ -274,7 +273,7 @@ def try_lite_stage(
     if cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
         raise CancelledError("Request cancelled before the spare-channel call")
 
-    _progress(on_progress, "[提示] 主通道限流，已自动切换备用通道继续分析。\n")
+    _progress(on_progress, NEUTRAL_PROGRESS_TEXT + "\n")
 
     try:
         reply = call_lite_stream(

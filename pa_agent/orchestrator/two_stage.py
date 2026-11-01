@@ -1444,6 +1444,7 @@ class TwoStageOrchestrator:
         from pa_agent.ai.sensenova_fallback import (
             FreeStageFailure,
             FreeStageSuccess,
+            NEUTRAL_PROGRESS_TEXT,
             is_cancel_or_interrupt,
             run_free_stage_fallback,
         )
@@ -1462,12 +1463,7 @@ class TwoStageOrchestrator:
         )
         # User-facing wording stays neutral: never advertise the free lane or the
         # upstream model, and never surface a raw upstream error payload.
-        _emit_progress(
-            on_progress,
-            f"[提示] {_STAGE_LABELS_ZH.get(stage, stage)}的主通道暂时不可用，"
-            "已自动切换备用通道继续分析。\n"
-            "[提示] 界面会显示当前处理进度，请稍候。\n",
-        )
+        _emit_progress(on_progress, NEUTRAL_PROGRESS_TEXT + "\n")
         self._last_sensenova_fallback_failure = None  # type: ignore[attr-defined]
         self._fallback_frame = frame
         self._fallback_stage1 = stage1_json

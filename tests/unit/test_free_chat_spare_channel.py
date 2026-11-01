@@ -138,9 +138,9 @@ class TestFreePoolLayer:
         # The follow-up prompt is what the spare channel receives.
         assert calls[0]["messages"]
         assert calls[0]["stream"] is True
-        # Neutral wording only — no model name, no raw upstream error.
+        # Neutral wording only — a single sentence, no model name, no raw error.
         joined = "".join(progress)
-        assert "备用通道" in joined
+        assert "正在正常分析，请稍等。" in joined
         assert "429" not in joined
         assert "lightning" not in joined
 

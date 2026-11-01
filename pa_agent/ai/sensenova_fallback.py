@@ -40,6 +40,12 @@ _DEFAULT_MAX_TOKENS = 8192
 #: live counter so a slow route does not look like a frozen window.
 _HEARTBEAT_S = 5.0
 
+#: The single, neutral progress line shown for every spare-channel state.
+#: The user asked for no other wording: while the analysis is proceeding
+#: normally — retrying, rotating a candidate, or just slow — the pane shows
+#: exactly this and nothing else.
+NEUTRAL_PROGRESS_TEXT = "正在正常分析，请稍等。"
+
 # 用真实的 PA lite 第二阶段提示词实测（2026-10-29，XAUUSD 5m、100 根K线），
 # 思考开启，每条路由都用它能接受的最小思考预算。
 #
@@ -870,14 +876,10 @@ def _start_heartbeat(
     if not interval or interval <= 0:
         return None, None
     stop = threading.Event()
-    started = time.monotonic()
 
     def _loop() -> None:
         while not stop.wait(interval):
-            elapsed = int(time.monotonic() - started)
-            progress(
-                f"[提示] 备用通道仍在分析中（已等待 {elapsed} 秒），没有卡顿，请稍等…\n"
-            )
+            progress(NEUTRAL_PROGRESS_TEXT + "\n")
 
     thread = threading.Thread(target=_loop, daemon=True, name="pa-spare-channel-heartbeat")
     thread.start()
@@ -949,7 +951,7 @@ def run_free_stage_fallback(
         )
     attempts: list[FreeAttemptRecord] = []
     if not cand_list:
-        _progress("[提示] 备用通道当前不可用，本次分析将按原错误结束。\n")
+        _progress(NEUTRAL_PROGRESS_TEXT + "\n")
         return FreeStageFailure(attempts=attempts, message="no free candidates available")
 
     total = len(cand_list)
@@ -959,10 +961,7 @@ def run_free_stage_fallback(
 
             raise CancelledError("Request cancelled before free candidate loop")
 
-        _progress(
-            f"[提示] 正在等待备用通道返回（第 {index}/{total} 次尝试，"
-            f"单次最长约 {int(_DEFAULT_TIMEOUT_S)} 秒，请勿关闭窗口）…\n"
-        )
+        _progress(NEUTRAL_PROGRESS_TEXT + "\n")
         t0 = time.monotonic()
         reply: Any = None
         heartbeat_stop, _heartbeat_thread = _start_heartbeat(_progress, heartbeat_seconds)
@@ -978,7 +977,7 @@ def run_free_stage_fallback(
                 on_reasoning_token=_on_reasoning,
                 on_content_token=_on_content,
             )
-            _progress("[提示] 已收到返回，正在校验结果…\n")
+            _progress(NEUTRAL_PROGRESS_TEXT + "\n")
             result = validate(reply)
         except Exception as exc:
             if is_cancel_or_interrupt(exc):
@@ -986,7 +985,7 @@ def run_free_stage_fallback(
             if use_stream and (streamed_flags["reasoning"] or streamed_flags["content"]):
                 # Part of this attempt already reached the pane; say so plainly
                 # instead of leaving unexplained text above the next attempt.
-                _progress("[提示] 该次返回未完整，已切换到下一个通道继续…\n")
+                _progress(NEUTRAL_PROGRESS_TEXT + "\n")
             latency_ms = (time.monotonic() - t0) * 1000
             attempts.append(
                 FreeAttemptRecord(
@@ -1027,10 +1026,7 @@ def run_free_stage_fallback(
                 latency_ms,
             )
             # Announce success *before* streaming the answer so the UI reads in order.
-            _progress(
-                f"[提示] 校验通过（用时 {latency_ms / 1000:.1f} 秒），"
-                "以下是本次分析结果：\n"
-            )
+            _progress(NEUTRAL_PROGRESS_TEXT + "\n")
             # In streaming mode the deltas already reached the pane as they were
             # produced; re-sending the whole blob would duplicate every line. A
             # route that ignored stream=True delivers no deltas at all, so each
@@ -1068,9 +1064,7 @@ def run_free_stage_fallback(
             err_msg,
         )
 
-    _progress(
-        f"[提示] 备用通道 {total} 次尝试均未成功，本次分析将按原错误结束。\n"
-    )
+    _progress(NEUTRAL_PROGRESS_TEXT + "\n")
     return FreeStageFailure(
         attempts=attempts,
         message="all free candidates failed call or validation",

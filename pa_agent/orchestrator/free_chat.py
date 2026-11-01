@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from pa_agent.records.pending_writer import PendingWriter
 
 from pa_agent.ai.deepseek_client import AIReply
+from pa_agent.ai.sensenova_fallback import NEUTRAL_PROGRESS_TEXT
 from pa_agent.records.schema import AnalysisRecord, FollowupTurn
 from pa_agent.util.threading import CancelToken
 from pa_agent.util.timefmt import now_local_ms
@@ -330,10 +331,7 @@ class FreeChatSession:
             "free-chat primary provider failed (%s); trying spare channels",
             type(primary_exc).__name__,
         )
-        _progress(
-            on_progress,
-            "[提示] 主通道暂时不可用，已自动切换备用通道继续回答。\n",
-        )
+        _progress(on_progress, NEUTRAL_PROGRESS_TEXT + "\n")
 
         # Rate limits get the spare model first: same gateway and key, so no
         # credential switch, and it does not consume the tpm/rpm budget the
@@ -525,7 +523,7 @@ class FreeChatSession:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("free-chat provider fallback update failed: %s", exc)
                 continue
-            _progress(on_progress, "[提示] 备用通道仍在处理，请稍候。\n")
+            _progress(on_progress, NEUTRAL_PROGRESS_TEXT + "\n")
             try:
                 reply = self._client.stream_chat(
                     messages,

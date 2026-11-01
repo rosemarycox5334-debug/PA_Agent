@@ -75,6 +75,11 @@ def main() -> int:
         chunks["content"] += len(chunk)
         chunks["content_pieces"] += 1
 
+    progress: list[str] = []
+
+    def on_progress(text: str) -> None:
+        progress.append(text)
+
     t0 = time.monotonic()
     try:
         reply = orch._stream_chat_resilient(
@@ -85,7 +90,7 @@ def main() -> int:
             thinking=True,
             reasoning_effort="low",
             stage_label="Stage 2",
-            on_progress=on_content,
+            on_progress=on_progress,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[x] 失败（{time.monotonic() - t0:.1f}s）：{type(exc).__name__}: {exc}")
@@ -102,6 +107,8 @@ def main() -> int:
         f"正文 {chunks['content']} 字/{chunks['content_pieces']} 片"
     )
     print(f"[ok] 正文开头：{content[:160].replace(chr(10), ' ')}")
+    uniq = sorted(set(line.strip() for line in progress))
+    print(f"[ok] 进度行 {len(progress)} 条，去重后：{uniq}")
     try:
         parsed = json.loads(content)
         print(f"[ok] 是合法 JSON，顶层键={sorted(parsed.keys())}")

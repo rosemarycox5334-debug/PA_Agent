@@ -11,6 +11,7 @@ import pytest
 
 from pa_agent.ai import deepseek_client
 from pa_agent.ai.deepseek_client import DeepSeekClient
+from pa_agent.ai.sensenova_fallback import NEUTRAL_PROGRESS_TEXT as NEUTRAL
 from pa_agent.config.settings import AIProviderSettings
 from tests.unit.test_deepseek_client import _make_mock_response
 
@@ -184,17 +185,17 @@ def test_run_free_stage_fallback_reports_each_candidate():
     )
 
     joined = "".join(lines)
-    assert "第 1/2 次尝试" in joined
-    assert "第 2/2 次尝试" in joined
-    assert "当前尝试未成功" not in joined
-    assert "当前结果未通过检查" not in joined
-    assert "正在继续处理" not in joined
-    assert "校验通过" in joined
+    # Every progress line is the same neutral sentence, whatever the channel is
+    # doing behind the scenes.
+    assert NEUTRAL in joined
+    for hidden in ("第 1/2", "第 2/2", "当前尝试未成功", "当前结果未通过检查",
+                   "正在继续处理", "校验通过", "备用通道", "429", "限流"):
+        assert hidden not in joined, hidden
     assert "sk-SECRET" not in joined
     assert outcome.candidate.model == "second/free"
 
-    # The success hint must precede the answer it introduces.
-    hint_idx = next(i for i, c in enumerate(lines) if "校验通过" in c)
+    # The neutral line must precede the answer it introduces.
+    hint_idx = next(i for i, c in enumerate(lines) if NEUTRAL in c)
     answer_idx = next(i for i, c in enumerate(lines) if '"cycle_position"' in c)
     assert hint_idx < answer_idx
 
@@ -273,10 +274,10 @@ def test_validation_failure_stays_internal_and_rotation_continues():
         on_progress=lines.append,
     )
     joined = "".join(lines)
-    for unwanted in ("当前尝试未成功", "当前结果未通过检查", "正在继续处理", "invalid result"):
+    for unwanted in ("当前尝试未成功", "当前结果未通过检查", "正在继续处理", "invalid result",
+                     "第 2/2", "校验通过"):
         assert unwanted not in joined
-    assert "第 2/2 次尝试" in joined
-    assert "校验通过" in joined
+    assert NEUTRAL in joined
     assert outcome.candidate.model == "second/free"
     assert not outcome.attempts[0].ok
     assert "invalid result" in outcome.attempts[0].error
@@ -299,7 +300,7 @@ def test_run_free_stage_fallback_reports_total_exhaustion():
         on_progress=lines.append,
     )
     joined = "".join(lines)
-    assert "均未成功" in joined
+    assert NEUTRAL in joined
     assert outcome.attempts and not outcome.attempts[0].ok
 
 
@@ -346,10 +347,9 @@ def test_orchestrator_shows_progress_in_ui_during_fallback():
 
     joined = "".join(chunks)
     assert record.exception is None
-    assert "[提示]" in joined
-    assert "正在等待备用通道" in joined
-    assert "界面会显示当前处理进度，请稍候" in joined
-    for unwanted in ("备用通道可能较慢", "最长需要几分钟", "120秒", "上游限流", "限流"):
+    assert NEUTRAL in joined
+    for unwanted in ("备用通道可能较慢", "最长需要几分钟", "120秒", "上游限流", "限流",
+                     "[提示]", "备用通道", "已等待"):
         assert unwanted not in joined
     # The real answer must still be delivered after the hints.
     assert "cycle_position" in joined

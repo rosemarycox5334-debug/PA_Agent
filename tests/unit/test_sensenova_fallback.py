@@ -1025,7 +1025,7 @@ def test_slow_candidate_announces_its_elapsed_wait() -> None:
     )
 
     assert isinstance(outcome, FreeStageSuccess)
-    assert any("已等待" in line for line in lines), lines
+    assert any("正在正常分析，请稍等。" in line for line in lines), lines
 
     # The heartbeat must stop once the call returns.
     settled = len(lines)
