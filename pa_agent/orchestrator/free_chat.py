@@ -335,6 +335,22 @@ class FreeChatSession:
             "[提示] 主通道暂时不可用，已自动切换备用通道继续回答。\n",
         )
 
+        # Rate limits get the spare model first: same gateway and key, so no
+        # credential switch, and it does not consume the tpm/rpm budget the
+        # primary just tripped.
+        from pa_agent.ai.rate_limit import is_rate_limit_error
+
+        if is_rate_limit_error(primary_exc):
+            reply = self._try_spare_model(
+                messages,
+                cancel_token=cancel_token,
+                on_reasoning_token=on_reasoning_token,
+                on_content_token=on_content_token,
+                on_progress=on_progress,
+            )
+            if reply is not None:
+                return reply
+
         reply = self._try_free_pool(
             messages,
             cancel_token=cancel_token,
@@ -357,6 +373,49 @@ class FreeChatSession:
 
         assert primary_exc is not None
         raise primary_exc
+
+    def _try_spare_model(
+        self,
+        messages: list[dict],
+        *,
+        cancel_token: CancelToken,
+        on_reasoning_token: "Callable[[str], None] | None",
+        on_content_token: "Callable[[str], None] | None",
+        on_progress: "Callable[[str], None] | None",
+    ) -> AIReply | None:
+        """Layer 0a: the spare model, for rate-limited primaries only.
+
+        Shares the primary gateway and key, so nothing has to be swapped; the
+        empty-body pitfalls are handled inside ``pa_agent.ai.lite_fallback``.
+        """
+        if self._settings is None:
+            return None
+        provider = getattr(self._settings, "provider", None)
+        if provider is None:
+            return None
+
+        from pa_agent.ai.lite_fallback import try_lite_stage
+
+        try:
+            reply = try_lite_stage(
+                messages,
+                api_key=str(getattr(provider, "api_key", "") or ""),
+                base_url=str(getattr(provider, "base_url", "") or ""),
+                cancel_token=cancel_token,
+                on_reasoning_token=on_reasoning_token,
+                on_content_token=on_content_token,
+                on_progress=on_progress,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            from pa_agent.ai.sensenova_fallback import is_cancel_or_interrupt as _is_cancel
+
+            if _is_cancel(exc):
+                raise
+            logger.warning("free-chat spare-model attempt failed: %s", exc)
+            return None
+        if reply is not None:
+            self.spare_channel_used = "spare_model"
+        return reply
 
     def _try_free_pool(
         self,

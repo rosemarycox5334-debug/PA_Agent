@@ -1601,6 +1601,9 @@ class TwoStageOrchestrator:
         tried_trae_cn = False
         tried_provider_keys: set[tuple[str, str]] = set()
         last_provider_exc: Exception | None = None
+        #: The spare model (sensenova-6.8-flash-lite) is attempted at most once
+        #: per call; it only answers rate limits, never other failures.
+        tried_spare_model = False
         # Capture the fallback chain once. After a successful switch,
         # settings.provider points at the fallback candidate (whose own
         # fallbacks list is empty), so re-reading it inside the loop would
@@ -1647,7 +1650,29 @@ class TwoStageOrchestrator:
 
                 if is_cancel_or_interrupt(exc):
                     raise
-                # Layer 0: spare channel. Preferred over the configured provider
+                # Layer 0a: the spare model. Rate limits are the one failure the
+                # primary keeps hitting (tpm/rpm), and this model shares the same
+                # gateway and key while not counting against that budget. Its
+                # own quirks (user-tailed messages, 16384 shared budget) are
+                # handled inside pa_agent.ai.lite_fallback.
+                if not tried_spare_model:
+                    from pa_agent.ai.rate_limit import is_rate_limit_error
+
+                    if is_rate_limit_error(exc):
+                        tried_spare_model = True
+                        from pa_agent.ai.lite_fallback import try_lite_stage
+
+                        reply_spare = try_lite_stage(
+                            messages,
+                            api_key=self._primary_api_key(),
+                            base_url=getattr(self._provider(), "base_url", ""),
+                            cancel_token=cancel_token,
+                            on_reasoning_token=on_reasoning_token,
+                            on_content_token=on_content_token,
+                        )
+                        if reply_spare is not None:
+                            return reply_spare
+                # Layer 0b: spare channel. Preferred over the configured provider
                 # chain because it costs nothing and usually answers faster than
                 # moving the whole session onto another paid provider. The lane
                 # validates internally and returns (reply, Ok, meta) only when a
