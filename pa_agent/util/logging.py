@@ -94,6 +94,12 @@ class ConsoleFormatter(MaskingFormatter):
             or "insufficient_quota" in _lowered
             or "rate_limit_error" in _lowered
             or "inference exceeds tpm/rpm" in _lowered
+            # Other gateways phrase the same condition differently:
+            #   "tpm exhausted" / "quota_exceeded_error" / bare "429".
+            or "quota_exceeded" in _lowered
+            or "tpm exhausted" in _lowered
+            or "rate limit" in _lowered
+            or "429" in _lowered
         )
         if not is_backup and not is_rate_limited:
             return super().format(record)
@@ -101,6 +107,12 @@ class ConsoleFormatter(MaskingFormatter):
         # Never mutate a shared LogRecord: the file handler must retain details.
         public_record = copy.copy(record)
         public_record.name = "pa_agent.analysis"
+        # A transient provider hiccup that the fallback chain goes on to answer
+        # is not an error for the user: show it as ordinary progress instead of
+        # an ERROR line in the console window.
+        if public_record.levelno >= logging.ERROR:
+            public_record.levelno = logging.INFO
+            public_record.levelname = "INFO"
         if is_rate_limited and not is_backup:
             # Give-up lines are dropped upstream by DropRateLimitExhaustedFilter;
             # anything reaching here is a transient retry notice.

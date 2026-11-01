@@ -111,3 +111,35 @@ def test_every_give_up_variant_is_dropped(msg):
     stream = io.StringIO()
     _console_handler(stream).handle(_record(msg))
     assert stream.getvalue() == ""
+
+
+# ── The SenseNova "tpm exhausted / code 8" flavour ───────────────────────────
+
+_STREAM_ERROR = (
+    "DeepSeekClient stream error after 805 ms: Error code: 429 - "
+    "{'error': {'message': 'tpm exhausted', 'type': 'quota_exceeded_error', 'code': '8'}}"
+)
+
+
+def test_stream_error_console_wording_is_neutral():
+    """The transient stream error must reach the console without any detail."""
+    stream = io.StringIO()
+    _console_handler(stream).handle(_record(_STREAM_ERROR))
+    out = stream.getvalue()
+    assert out, "a neutral progress line is expected"
+    for bad in ("429", "tpm", "quota", "code", "stream error", "DeepSeekClient"):
+        assert bad.lower() not in out.lower(), f"console leaked {bad!r}: {out}"
+
+
+def test_stream_error_console_level_is_info_not_error():
+    """The user asked for no ERROR lines while the fallback still answers."""
+    stream = io.StringIO()
+    _console_handler(stream).handle(_record(_STREAM_ERROR))
+    out = stream.getvalue()
+    assert "ERROR" not in out, f"console showed an ERROR level: {out}"
+    assert "INFO" in out
+
+
+def test_stream_error_still_kept_verbatim_in_the_file():
+    out = MaskingFormatter(_LOG_FORMAT).format(_record(_STREAM_ERROR))
+    assert _STREAM_ERROR in out
