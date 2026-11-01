@@ -954,8 +954,7 @@ def run_free_stage_fallback(
         _progress(NEUTRAL_PROGRESS_TEXT + "\n")
         return FreeStageFailure(attempts=attempts, message="no free candidates available")
 
-    total = len(cand_list)
-    for index, candidate in enumerate(cand_list, start=1):
+    for candidate in cand_list:
         if cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
             from pa_agent.ai.deepseek_client import CancelledError
 
