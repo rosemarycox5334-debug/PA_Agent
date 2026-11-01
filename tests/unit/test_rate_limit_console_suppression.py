@@ -18,6 +18,7 @@ import pytest
 from pa_agent.util.logging import (
     ConsoleFormatter,
     DropRateLimitExhaustedFilter,
+    DropSpareChannelDiagnosticsFilter,
     MaskingFormatter,
     _LOG_FORMAT,
 )
@@ -43,6 +44,7 @@ def _console_handler(stream):
     h.setLevel(logging.INFO)
     h.setFormatter(ConsoleFormatter(_LOG_FORMAT))
     h.addFilter(DropRateLimitExhaustedFilter())
+    h.addFilter(DropSpareChannelDiagnosticsFilter())
     return h
 
 
@@ -143,3 +145,44 @@ def test_stream_error_console_level_is_info_not_error():
 def test_stream_error_still_kept_verbatim_in_the_file():
     out = MaskingFormatter(_LOG_FORMAT).format(_record(_STREAM_ERROR))
     assert _STREAM_ERROR in out
+
+
+# ── Spare-channel internals never reach the console ──────────────────────────
+
+_LITE_ANSWERED = (
+    "lite spare channel answered: model=sensenova-6.8-flash-lite "
+    "prompt=78636 completion=4837 84668ms"
+)
+
+
+def test_spare_channel_diagnostics_are_dropped_from_console():
+    stream = io.StringIO()
+    handler = _console_handler(stream)
+    handler.handle(
+        logging.LogRecord(
+            "pa_agent.ai.lite_fallback", logging.WARNING, __file__, 1, "%s", (_LITE_ANSWERED,), None
+        )
+    )
+    assert stream.getvalue() == "", f"console got: {stream.getvalue()!r}"
+
+
+def test_spare_channel_diagnostics_are_matched_by_message_too():
+    stream = io.StringIO()
+    handler = _console_handler(stream)
+    handler.handle(_record("lite spare channel failed: timeout", level=logging.WARNING, name="pa_agent.other"))
+    assert stream.getvalue() == ""
+
+
+def test_spare_channel_diagnostics_stay_in_the_file():
+    out = MaskingFormatter(_LOG_FORMAT).format(
+        logging.LogRecord(
+            "pa_agent.ai.lite_fallback", logging.WARNING, __file__, 1, "%s", (_LITE_ANSWERED,), None
+        )
+    )
+    assert _LITE_ANSWERED in out
+
+
+def test_ordinary_warning_still_reaches_the_console():
+    stream = io.StringIO()
+    _console_handler(stream).handle(_record("disk almost full", level=logging.WARNING, name="pa_agent.io"))
+    assert "disk almost full" in stream.getvalue()

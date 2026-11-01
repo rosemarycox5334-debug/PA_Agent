@@ -71,6 +71,43 @@ class DropRateLimitExhaustedFilter(logging.Filter):
         return "放弃本轮" not in message
 
 
+#: Modules whose output is internal spare-channel diagnostics (which model
+#: answered, prompt/completion counts, latency). The console window must show
+#: only the single neutral progress line, so these records are dropped there
+#: entirely; the log file keeps every detail for diagnosis.
+_SPARE_DIAGNOSTIC_LOGGERS = (
+    "pa_agent.ai.lite_fallback",
+    "pa_agent.ai.glm_backup",
+    "pa_agent.ai.glm_flash_lite",
+    "pa_agent.orchestrator.free_chat",
+)
+
+#: Message fragments that identify spare-channel diagnostics regardless of the
+#: logger name (e.g. after a module rename).
+_SPARE_DIAGNOSTIC_MARKERS = (
+    "lite spare channel",
+    "lite fallback",
+    "spare-channel",
+    "free-chat primary provider failed",
+    "free-chat spare-model",
+    "free-chat spare channel",
+    "free-chat follow-up answered",
+)
+
+
+class DropSpareChannelDiagnosticsFilter(logging.Filter):
+    """Keep spare-channel internals out of the user-facing console."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        if record.name in _SPARE_DIAGNOSTIC_LOGGERS:
+            return False
+        try:
+            message = record.getMessage().lower()
+        except Exception:  # noqa: BLE001
+            return True
+        return not any(marker in message for marker in _SPARE_DIAGNOSTIC_MARKERS)
+
+
 class ConsoleFormatter(MaskingFormatter):
     """Neutral console progress; keep the original record for file diagnostics."""
 
@@ -217,6 +254,8 @@ def configure_logging(api_key: str = "") -> None:
     console_handler.setFormatter(console_formatter)
     # Never print the rate-limit give-up line to the user-facing console.
     console_handler.addFilter(DropRateLimitExhaustedFilter())
+    # Nor any spare-channel internals (model name, token counts, latency).
+    console_handler.addFilter(DropSpareChannelDiagnosticsFilter())
 
     handlers: list[logging.Handler] = [file_handler, console_handler]
 
