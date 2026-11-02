@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -38,10 +39,63 @@ _UA = {
     "Referer": "https://gu.qq.com/",
 }
 
+# 腾讯 K 线三个入口是同一后端、限流各自独立：单入口约 600 次后返回空 JSON，
+# 且 web.ifzq 的分钟线路由会 302 到 web3 而失败。某入口失败即冷却 120s 换下一个。
+TENCENT_KLINE_HOSTS: tuple[str, ...] = (
+    "https://web.ifzq.gtimg.cn",
+    "https://proxy.finance.qq.com/ifzqgtimg",
+    "https://ifzq.gtimg.cn",
+)
+_TENCENT_DAILY_PATH = "/appstock/app/fqkline/get"
+_TENCENT_MINUTE_PATH = "/appstock/app/kline/mkline"
+_TENCENT_HOST_COOLDOWN_S = 120.0
+_tencent_host_down_until: dict[str, float] = {}
+
+#: 日/周/月单次可取的根数上限（腾讯侧限制）
+TENCENT_DAILY_MAX_BARS = 640
+#: 分钟线单次可取的根数上限
+TENCENT_MINUTE_MAX_BARS = 320
+
 _TENCENT_RT = "https://qt.gtimg.cn/q="
-_TENCENT_DAILY = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-_TENCENT_MINUTE = "https://ifzq.gtimg.cn/appstock/app/kline/mkline"
 _SINA_RT = "https://hq.sinajs.cn/list="
+
+
+def _tencent_kline_hosts_available() -> list[str]:
+    """当前未处于冷却期的入口（按优先级）。"""
+    now = time.monotonic()
+    return [h for h in TENCENT_KLINE_HOSTS if _tencent_host_down_until.get(h, 0.0) <= now]
+
+
+def _tencent_kline_payload(path: str, param: str) -> dict[str, Any] | None:
+    """按顺序尝试腾讯 K 线三个入口，返回 ``data`` 节点。
+
+    空响应、非 200、异常都视为该入口被限流/失效：冷却 ``_TENCENT_HOST_COOLDOWN_S``
+    秒后换下一个入口；三个都不可用返回 ``None``（调用方自己降级）。
+    """
+    requests = _http()
+    errors: list[str] = []
+    for host in TENCENT_KLINE_HOSTS:
+        if _tencent_host_down_until.get(host, 0.0) > time.monotonic():
+            continue
+        try:
+            resp = requests.get(
+                host + path, params={"param": param}, headers=_UA, timeout=(8, 20)
+            )
+            if resp.status_code != 200 or not resp.text.strip():
+                raise RuntimeError(f"HTTP {resp.status_code}")
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{host}: {type(exc).__name__}")
+            _tencent_host_down_until[host] = time.monotonic() + _TENCENT_HOST_COOLDOWN_S
+            continue
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if isinstance(data, dict) and data:
+            return data
+        errors.append(f"{host}: 空数据")
+        _tencent_host_down_until[host] = time.monotonic() + _TENCENT_HOST_COOLDOWN_S
+    logger.debug("腾讯 K 线三入口均不可用：%s", "; ".join(errors) or "全部冷却中")
+    return None
+
 
 
 def _tencent_code(symbol: str) -> str | None:
@@ -198,28 +252,44 @@ def _tencent_kline_rows(raw: list[Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def tencent_daily(
-    symbol: str, *, start_date: str, end_date: str, adjust: str = "qfq"
+_TENCENT_PERIODS: dict[str, str] = {"1d": "day", "1w": "week", "1M": "month"}
+
+
+def tencent_period(
+    symbol: str,
+    *,
+    timeframe: str = "1d",
+    count: int = TENCENT_DAILY_MAX_BARS,
+    adjust: str = "qfq",
 ) -> list[dict[str, Any]]:
+    """腾讯 日/周/月 K 线（前/后复权 / 不复权），升序 rows；失败返回 []。
+
+    比东财快且不封 IP：实测单次 0.2~0.9s。本接口**没有成交额**，需要成交额时
+    用东财；PA 的提示词只用成交量，故日线主路径可以直接用它。
+    """
     code = _tencent_code(symbol)
     if not code:
         return []
+    period = _TENCENT_PERIODS.get(str(timeframe), "day")
     fq = {"qfq": "qfq", "hfq": "hfq"}.get(adjust, "")
-    try:
-        requests = _http()
-        resp = requests.get(
-            _TENCENT_DAILY,
-            params={"param": f"{code},day,,,640,{fq}"},
-            headers=_UA,
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return []
-        node = (resp.json().get("data") or {}).get(code) or {}
-        raw = node.get("qfqday") or node.get("hfqday") or node.get("day") or []
-        rows = _tencent_kline_rows(raw)
-    except Exception as exc:
-        logger.debug("Tencent daily failed for %s: %s", symbol, exc)
+    n = max(1, min(int(count), TENCENT_DAILY_MAX_BARS))
+    data = _tencent_kline_payload(_TENCENT_DAILY_PATH, f"{code},{period},,,{n},{fq}")
+    if not data:
+        return []
+    node = data.get(code)
+    if not isinstance(node, dict):
+        return []
+    raw = node.get(f"{fq}{period}") or node.get(period) or []
+    if not isinstance(raw, list) or not raw:
+        return []
+    return _tencent_kline_rows(raw)
+
+
+def tencent_daily(
+    symbol: str, *, start_date: str, end_date: str, adjust: str = "qfq"
+) -> list[dict[str, Any]]:
+    rows = tencent_period(symbol, timeframe="1d", adjust=adjust)
+    if not rows:
         return []
     start = datetime.strptime(start_date[:10], "%Y-%m-%d") if len(start_date) >= 10 else None
     end = datetime.strptime(end_date[:10], "%Y-%m-%d") if len(end_date) >= 10 else None
@@ -238,22 +308,18 @@ def tencent_minute(
     if not code:
         return []
     p = f"m{period}"
-    try:
-        requests = _http()
-        resp = requests.get(
-            _TENCENT_MINUTE,
-            params={"param": f"{code},{p},,320"},
-            headers=_UA,
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            return []
-        node = (resp.json().get("data") or {}).get(code) or {}
-        raw = node.get(p) or node.get(f"qfq{p}") or []
-        rows = _tencent_kline_rows(raw)
-    except Exception as exc:
-        logger.debug("Tencent minute failed for %s: %s", symbol, exc)
+    data = _tencent_kline_payload(
+        _TENCENT_MINUTE_PATH, f"{code},{p},,{TENCENT_MINUTE_MAX_BARS}"
+    )
+    if not data:
         return []
+    node = data.get(code)
+    if not isinstance(node, dict):
+        return []
+    raw = node.get(p) or node.get(f"qfq{p}") or []
+    if not isinstance(raw, list) or not raw:
+        return []
+    rows = _tencent_kline_rows(raw)
     start = datetime.strptime(start_date[:19], "%Y-%m-%d %H:%M:%S") if len(start_date) >= 10 else None
     end = datetime.strptime(end_date[:19], "%Y-%m-%d %H:%M:%S") if len(end_date) >= 10 else None
     return [

@@ -115,15 +115,25 @@ _DIRECTION_WORDS = ("做多", "做空", "买入", "卖出", "限价", "突破单
 #: Phrases proving the text already explains *why* no order is taken. A text
 #: that mentions an entry plan **and** one of these is a refusal explanation,
 #: not stale instructions, so the legacy placeholder must leave it alone.
+#: 2026-11-02 补「不通过 / 无合格 / 选择等待 / 等回调」等说法：真实记录里
+#: 「交易者方程不通过…无合格入场方案，选择等待」此前不在表内，被误判成
+#: 纯入场指令而整段覆盖，可读原因被抹掉。
 _REFUSAL_PHRASES = (
-    "不下单", "放弃", "不做多", "不做空", "不做", "不满足", "超过", "过大",
-    "逻辑矛盾", "无合理", "失效位", "等待价格", "等待结构",
+    "不下单", "放弃", "不做多", "不做空", "不做", "不满足", "不通过", "不成立",
+    "无合格", "无有效", "无合理", "无效", "不宜", "不适合", "超过", "过大",
+    "过小", "过高", "过低", "逻辑矛盾", "矛盾", "失效位", "失效", "禁止",
+    "选择等待", "等待价格", "等待结构", "等待确认", "继续等待", "等回调", "观望",
 )
+
+#: 解释性措辞：出现即说明这段文字在讲原因/结论，而不是裸入场指令，须保留原文。
+_REASON_MARKERS = ("综上", "因此", "所以", "因为", "由于", "理由", "原因")
 
 
 def _explains_why_no_order(text: str) -> bool:
     """True when *text* itself justifies the no-order decision."""
-    return any(phrase in text for phrase in _REFUSAL_PHRASES)
+    return any(phrase in text for phrase in _REFUSAL_PHRASES) or any(
+        marker in text for marker in _REASON_MARKERS
+    )
 
 
 def looks_like_trade_instructions(text: str) -> bool:

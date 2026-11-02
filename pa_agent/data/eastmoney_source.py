@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import timedelta
 from typing import Any
@@ -30,13 +31,11 @@ from pa_agent.data.eastmoney_baostock import (
     eastmoney_rolling_cap,
     fetch_daily_history_baostock,
     fetch_minute_history_baostock,
-    needs_baostock_history,
 )
 from pa_agent.data.eastmoney_client import (
     EastMoneyTransientError,
     fetch_hot_stock_codes,
     fetch_index_daily,
-    fetch_spot_price,
     fetch_stock_daily,
     fetch_stock_minute,
     fetch_stock_period_recent,
@@ -75,6 +74,65 @@ _TF_MINUTE_PERIOD: dict[str, str] = {
     "30m": "30",
     "1h": "60",
 }
+
+
+# ── 盘口/现价的预算与熔断 ────────────────────────────────────────────────────
+# 东方财富 quote 域（push2*.eastmoney.com）在部分网络下全部超时：实测单次
+# ten-depth 约 18s、quote 约 17s、整次盘口约 90s；而一根日线快照会先后调用
+# 盘口 2~3 次（补当日K线 / 作用到 forming 根 / 收盘补根），一次刷新就卡 100s。
+# 因此给单次调用加预算：超预算立刻熔断，改用免费备用源（腾讯）盘口，
+# 其字段形状与东方财富 StockOrderBook 一致，当日 OHLCV 仍然拿得到。
+_QUOTE_BUDGET_S = 4.0
+_QUOTE_COOLDOWN_S = 600.0
+_quote_down_until = 0.0
+
+#: K 线拉取的单段预算（腾讯 / 东方财富）。超过即换下一个源，避免被限流时空等。
+_KLINE_BUDGET_S = 8.0
+#: Baostock 只作最后兜底，且同样限时（实测 94s，不能让它无限拖）。
+_BAOSTOCK_BUDGET_S = 25.0
+
+
+def _quote_cooling_down() -> bool:
+    return time.monotonic() < _quote_down_until
+
+
+def _mark_quote_down(reason: str) -> None:
+    global _quote_down_until
+    if not _quote_cooling_down():
+        logger.info(
+            "东方财富盘口接口暂不可用（%s）：%d 秒内改用免费备用源",
+            reason,
+            int(_QUOTE_COOLDOWN_S),
+        )
+    _quote_down_until = time.monotonic() + _QUOTE_COOLDOWN_S
+
+
+def _call_within_budget(fn: Any, budget_s: float) -> tuple[bool, Any]:
+    """在守护线程里调用 *fn*；超预算返回 ``(False, None)``，不阻塞调用方。"""
+    box: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["value"] = fn()
+        except Exception as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    worker = threading.Thread(target=_run, daemon=True, name="pa-em-quote")
+    worker.start()
+    worker.join(budget_s)
+    if worker.is_alive():
+        return False, None
+    if "error" in box:
+        logger.debug("quote call failed: %s", box["error"])
+        return True, None
+    return True, box.get("value")
+
+
+def _free_order_book(symbol: str) -> Any:
+    """免费备用源盘口（腾讯 → zzshare），约 0.2s。"""
+    from pa_agent.data.eastmoney_client import _fallback_order_book
+
+    return _fallback_order_book(symbol)
 
 
 def _em_rows_to_bars_asc(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -155,6 +213,36 @@ class EastMoneySource(DataSource):
         self._snap_cache_n = 0
         logger.info("EastMoneySource unsubscribed")
 
+    def _order_book(self) -> Any:
+        """盘口（五档）：东方财富优先；超预算/熔断时改用免费备用源。"""
+        if _quote_cooling_down():
+            return _free_order_book(self._symbol)
+        from pa_agent.data.eastmoney_client import fetch_stock_order_book
+
+        ok, book = _call_within_budget(
+            lambda: fetch_stock_order_book(self._symbol), _QUOTE_BUDGET_S
+        )
+        if not ok:
+            _mark_quote_down("盘口超时")
+            return _free_order_book(self._symbol)
+        return book
+
+    def _spot_price(self) -> float | None:
+        """最新价：东方财富优先；超预算/熔断时用免费备用源盘口价。"""
+        if not _quote_cooling_down():
+            from pa_agent.data.eastmoney_client import fetch_spot_price
+
+            ok, price = _call_within_budget(
+                lambda: fetch_spot_price(self._symbol), _QUOTE_BUDGET_S
+            )
+            if ok:
+                return price
+            _mark_quote_down("现价超时")
+        book = _free_order_book(self._symbol)
+        if book is not None and getattr(book, "price", 0) and book.price > 0:
+            return float(book.price)
+        return None
+
     def latest_snapshot(self, n: int) -> list[KlineBar]:
         if not self._connected:
             raise DataSourceTransientError("东方财富数据源未连接")
@@ -191,15 +279,13 @@ class EastMoneySource(DataSource):
             )
 
         if self._timeframe == "1d" and _ashare_trading_day():
-            from pa_agent.data.eastmoney_client import fetch_stock_order_book
-
             book = None
             if not is_index_symbol(self._symbol):
-                book = fetch_stock_order_book(self._symbol)
+                book = self._order_book()
             spot = (
                 float(book.price)
                 if book is not None and book.price > 0
-                else fetch_spot_price(self._symbol)
+                else self._spot_price()
             )
             ensure_today_forming_daily_bar(
                 rows_asc,
@@ -239,40 +325,88 @@ class EastMoneySource(DataSource):
                 fetch_n = min(n, cap) if cap else n
             else:
                 fetch_n = n
-            rows = self._fetch_minute(symbol, "1", fetch_n + 8)
-            return rows[-fetch_n:]
+            rows = self._minute_rows(symbol, timeframe, "1", fetch_n + 8)
+            return rows[-fetch_n:] if rows else []
         if timeframe == "4h":
-            want = n * 4 + 8
-            if is_index_symbol(symbol):
-                cap = eastmoney_rolling_cap("60") // 4
-                want_n = min(n, cap)
-                rows = self._fetch_minute(symbol, "60", want_n * 4 + 8)
-                return _resample_rows_to_4h(rows)[-want_n:]
-            if needs_baostock_history(timeframe, "60", want):
-                logger.info(
-                    "EastMoney rolling window exceeded (4h n=%d); using Baostock history",
-                    n,
-                )
-                return fetch_minute_history_baostock(symbol, "4h", n)
-            rows = self._fetch_minute(symbol, "60", want)
-            return _resample_rows_to_4h(rows)[-n:]
+            rows_60 = self._minute_rows(symbol, timeframe, "60", n * 4 + 8)
+            if rows_60:
+                return _resample_rows_to_4h(rows_60)[-n:]
+            return []
         period = _TF_MINUTE_PERIOD.get(timeframe)
         if period:
-            if is_index_symbol(symbol):
-                cap = eastmoney_rolling_cap(period)
-                fetch_n = min(n, cap)
-                rows = self._fetch_minute(symbol, period, fetch_n)
-                return rows[-fetch_n:]
-            if needs_baostock_history(timeframe, period, n):
-                logger.info(
-                    "EastMoney rolling window exceeded (%s n=%d); using Baostock history",
-                    timeframe,
-                    n,
-                )
-                return fetch_minute_history_baostock(symbol, timeframe, n)
-            rows = self._fetch_minute(symbol, period, n)
-            return rows[-n:]
+            rows = self._minute_rows(symbol, timeframe, period, n)
+            return rows[-n:] if rows else []
         return []
+
+    def _minute_rows(
+        self, symbol: str, timeframe: str, period: str, want: int
+    ) -> list[dict[str, Any]]:
+        """分钟线：腾讯（≤320 根）→ 东方财富 → Baostock，每段都有时间预算。
+
+        原先东财滚动窗口不够就直接转 Baostock，而 Baostock 现在单次要 90s 上下
+        （实测 4h n=60 走了 88s），所以把 Baostock 挪到最后并限时。
+        """
+        from pa_agent.data.ashare_fallback import TENCENT_MINUTE_MAX_BARS
+
+        if want <= TENCENT_MINUTE_MAX_BARS:
+            rows = self._try_tencent_minute(symbol, period, want)
+            if rows:
+                return rows
+        rows = self._try_eastmoney_minute(symbol, period, want)
+        if rows:
+            return rows
+        if is_index_symbol(symbol):
+            return []
+        ok, rows_bs = _call_within_budget(
+            lambda: fetch_minute_history_baostock(symbol, timeframe, max(want, 1)),
+            _BAOSTOCK_BUDGET_S,
+        )
+        if not ok:
+            logger.info("Baostock %s 分钟线超预算（%.0fs），放弃", timeframe, _BAOSTOCK_BUDGET_S)
+            return []
+        return list(rows_bs or [])
+
+    def _try_tencent_minute(
+        self, symbol: str, period: str, want: int
+    ) -> list[dict[str, Any]]:
+        from pa_agent.data.ashare_fallback import tencent_minute
+
+        ok, raw = _call_within_budget(
+            lambda: tencent_minute(symbol, period=period, start_date="", end_date=""),
+            _KLINE_BUDGET_S,
+        )
+        if not ok or not raw:
+            return []
+        rows = _em_rows_to_bars_asc(raw)
+        # 腾讯只给最近 320 根；不够就用东财（区间更全）
+        return rows if len(rows) >= min(want, 20) else []
+
+    def _try_eastmoney_minute(
+        self, symbol: str, period: str, want: int
+    ) -> list[dict[str, Any]]:
+        end_dt = _cn_now()
+        days = max(30, (want // 4) + 15)
+        start_dt = end_dt - timedelta(days=days)
+        code = normalize_ashare_symbol(symbol)
+        idx = is_index_symbol(symbol)
+        adjust = get_kline_adjust()
+        ok, raw = _call_within_budget(
+            lambda: fetch_stock_minute(
+                _index_symbol_for_api(symbol) if idx else code,
+                period=period,
+                start_date=start_dt.strftime("%Y-%m-%d 09:30:00"),
+                end_date=end_dt.strftime("%Y-%m-%d 15:00:00"),
+                adjust=adjust,
+                is_index=idx,
+            ),
+            _KLINE_BUDGET_S,
+        )
+        if not ok:
+            logger.info("东方财富 %s 分钟线超预算（%.0fs）", period, _KLINE_BUDGET_S)
+            return []
+        if not raw:
+            return []
+        return _em_rows_to_bars_asc(raw)
 
     def _fetch_daily(
         self,
@@ -281,84 +415,106 @@ class EastMoneySource(DataSource):
         *,
         timeframe: str = "1d",
     ) -> list[dict[str, Any]]:
+        """日/周/月 K 线：腾讯 → 东方财富 → Baostock，每段都有时间预算。
+
+        实测（2026-11-02，300369 日线）：腾讯三入口 0.2~0.9s、东方财富 0.4s、
+        Baostock 94.7s。Baostock 曾经最快，现在慢 200 倍，只能当最后兜底。
+        """
         adjust = get_kline_adjust()
-        if is_index_symbol(symbol):
-            end = _cn_now().strftime("%Y%m%d")
-            cal_days = min(max(int(n * 1.45) + 25, 75), 420)
-            start = (_cn_now() - timedelta(days=cal_days)).strftime("%Y%m%d")
-            try:
-                idx = _index_symbol_for_api(symbol)
-                raw = fetch_index_daily(idx, start_date=start, end_date=end)
-                return _em_rows_to_bars_asc(raw)[-(n + 5) :]
-            except EastMoneyTransientError as exc:
-                raise DataSourceTransientError(str(exc)) from exc
+        want = n + 5
 
-        if timeframe in ("1w", "1M"):
-            code = normalize_ashare_symbol(symbol)
-            raw = fetch_stock_period_recent(
-                code, timeframe=timeframe, n=n + 5, adjust=adjust
-            )
-            return _em_rows_to_bars_asc(raw)[-(n + 5) :]
+        rows = self._try_tencent_daily(symbol, timeframe, want, adjust)
+        if rows:
+            return rows
 
-        # A-share stocks: Baostock daily is faster and avoids East Money curl(56) drops.
+        rows = self._try_eastmoney_daily(symbol, timeframe, want, adjust)
+        if rows:
+            return rows
+
         if adjust == "qfq":
-            try:
-                return fetch_daily_history_baostock(symbol, n + 5)
-            except Exception as bs_exc:
-                logger.info(
-                    "Baostock daily failed for %s (%s), trying East Money",
-                    symbol,
-                    bs_exc,
-                )
-        end = _cn_now().strftime("%Y%m%d")
-        cal_days = min(max(int(n * 1.45) + 25, 75), 420)
-        start = (_cn_now() - timedelta(days=cal_days)).strftime("%Y%m%d")
-        try:
-            code = normalize_ashare_symbol(symbol)
-            raw = fetch_stock_daily(
-                code, start_date=start, end_date=end, adjust=adjust
-            )
-            return _em_rows_to_bars_asc(raw)[-(n + 5) :]
-        except EastMoneyTransientError as exc:
-            raise DataSourceTransientError(
-                "K线拉取失败（Baostock 与东方财富均不可用），请检查网络后重试"
-            ) from exc
+            rows = self._try_baostock_daily(symbol, want)
+            if rows:
+                return rows
 
-    def _fetch_minute(self, symbol: str, period: str, n: int) -> list[dict[str, Any]]:
-        end_dt = _cn_now()
-        days = max(30, (n // 4) + 15)
-        start_dt = end_dt - timedelta(days=days)
-        start_s = start_dt.strftime("%Y-%m-%d 09:30:00")
-        end_s = end_dt.strftime("%Y-%m-%d 15:00:00")
-        code = normalize_ashare_symbol(symbol)
-        idx = is_index_symbol(symbol)
-        adjust = get_kline_adjust()
-        raw = self._call_with_retries(
-            lambda: fetch_stock_minute(
-                _index_symbol_for_api(symbol) if idx else code,
-                period=period,
-                start_date=start_s,
-                end_date=end_s,
-                adjust=adjust,
-                is_index=idx,
-            )
+        raise DataSourceTransientError(
+            "K线拉取失败（腾讯、东方财富、Baostock 均不可用），请检查网络后重试"
         )
-        return _em_rows_to_bars_asc(raw)[-(n + 8) :]
 
-    @staticmethod
-    def _call_with_retries(fn: Any, *, attempts: int = 2) -> Any:
-        last_exc: Exception | None = None
-        for i in range(attempts):
-            try:
-                return fn()
-            except EastMoneyTransientError as exc:
-                last_exc = exc
-                if i + 1 >= attempts:
-                    break
-                time.sleep(min(1.5, 0.4 + i * 0.4))
-                logger.debug("EastMoney retry %d/%d: %s", i + 2, attempts, exc)
-        assert last_exc is not None
-        raise last_exc
+    def _try_tencent_daily(
+        self, symbol: str, timeframe: str, want: int, adjust: str
+    ) -> list[dict[str, Any]]:
+        """腾讯日/周/月线（三入口轮换，不封 IP）。超过 640 根时交给东财。"""
+        from pa_agent.data.ashare_fallback import tencent_period
+
+        if want > 640:
+            return []
+        ok, raw = _call_within_budget(
+            lambda: tencent_period(
+                symbol, timeframe=timeframe, count=want, adjust=adjust
+            ),
+            _KLINE_BUDGET_S,
+        )
+        if not ok:
+            logger.info("腾讯 K 线超预算（%.0fs），改用东方财富", _KLINE_BUDGET_S)
+            return []
+        if not raw:
+            return []
+        rows = _em_rows_to_bars_asc(raw)
+        if len(rows) < min(want, 10):
+            return []
+        logger.debug("腾讯 K 线命中 %s %s（%d 根）", symbol, timeframe, len(rows))
+        return rows[-want:]
+
+    def _try_eastmoney_daily(
+        self, symbol: str, timeframe: str, want: int, adjust: str
+    ) -> list[dict[str, Any]]:
+        end = _cn_now().strftime("%Y%m%d")
+        cal_days = min(max(int(want * 1.45) + 25, 75), 3000)
+        start = (_cn_now() - timedelta(days=cal_days)).strftime("%Y%m%d")
+
+        if is_index_symbol(symbol):
+            idx = _index_symbol_for_api(symbol)
+            ok, raw = _call_within_budget(
+                lambda: fetch_index_daily(idx, start_date=start, end_date=end),
+                _KLINE_BUDGET_S,
+            )
+            if not ok or not raw:
+                return []
+            return _em_rows_to_bars_asc(raw)[-(want):]
+
+        code = normalize_ashare_symbol(symbol)
+        if timeframe in ("1w", "1M"):
+            ok, raw = _call_within_budget(
+                lambda: fetch_stock_period_recent(
+                    code, timeframe=timeframe, n=want, adjust=adjust
+                ),
+                _KLINE_BUDGET_S,
+            )
+            if not ok or not raw:
+                return []
+            return _em_rows_to_bars_asc(raw)[-(want):]
+
+        ok, raw = _call_within_budget(
+            lambda: fetch_stock_daily(code, start_date=start, end_date=end, adjust=adjust),
+            _KLINE_BUDGET_S,
+        )
+        if not ok:
+            logger.info("东方财富 K 线超预算（%.0fs）", _KLINE_BUDGET_S)
+            return []
+        if not raw:
+            return []
+        return _em_rows_to_bars_asc(raw)[-(want):]
+
+    def _try_baostock_daily(self, symbol: str, want: int) -> list[dict[str, Any]]:
+        """Baostock 兜底（TCP，历史长但很慢：实测 94s+）。"""
+        ok, rows = _call_within_budget(
+            lambda: fetch_daily_history_baostock(symbol, want),
+            _BAOSTOCK_BUDGET_S,
+        )
+        if not ok:
+            logger.info("Baostock 日线超预算（%.0fs），放弃", _BAOSTOCK_BUDGET_S)
+            return []
+        return list(rows or [])
 
     def _apply_spot_to_forming(self, rows_asc: list[dict[str, Any]]) -> None:
         if not rows_asc:
@@ -373,9 +529,8 @@ class EastMoneySource(DataSource):
 
         if daily:
             from pa_agent.data.ashare_common import apply_session_quote_to_forming_row
-            from pa_agent.data.eastmoney_client import fetch_stock_order_book, fetch_spot_price
 
-            book = fetch_stock_order_book(self._symbol)
+            book = self._order_book()
             if book is not None and book.price > 0:
                 apply_session_quote_to_forming_row(
                     last,
@@ -391,15 +546,13 @@ class EastMoneySource(DataSource):
                     symbol=self._symbol,
                 )
                 return
-            price = fetch_spot_price(self._symbol)
+            price = self._spot_price()
             if price is None:
                 return
             apply_session_quote_to_forming_row(last, price=price, daily=True)
             return
 
-        from pa_agent.data.eastmoney_client import fetch_spot_price
-
-        price = fetch_spot_price(self._symbol)
+        price = self._spot_price()
         if price is None:
             return
         from pa_agent.data.ashare_common import apply_session_quote_to_forming_row
@@ -423,11 +576,9 @@ class EastMoneySource(DataSource):
             return
 
         # 尝试从东方财富盘口获取当日 OHLCV
-        from pa_agent.data.eastmoney_client import fetch_stock_order_book
-
         book = None
         if not is_index_symbol(self._symbol):
-            book = fetch_stock_order_book(self._symbol)
+            book = self._order_book()
 
         if book is not None and book.price > 0:
             ensure_today_closed_daily_bar(
@@ -443,7 +594,7 @@ class EastMoneySource(DataSource):
             return
 
         # 指数无盘口五档，尝试现价
-        spot = fetch_spot_price(self._symbol)
+        spot = self._spot_price()
         if spot and spot > 0:
             ensure_today_closed_daily_bar(
                 rows_asc,

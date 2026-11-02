@@ -413,7 +413,12 @@ class MainWindow(QMainWindow):
             _last_tf = getattr(_settings.general, "last_timeframe", "15m") or "15m"
 
         # Data source
-        from pa_agent.data.factory import DATA_SOURCE_CHOICES, normalize_data_source_kind
+        from pa_agent.data.factory import (
+            ASHARE_SOURCE_LABEL,
+            DATA_SOURCE_CHOICES,
+            SHOW_ASHARE_DATA_SOURCE,
+            normalize_data_source_kind,
+        )
 
         _last_ds = "mt5"
         if _settings is not None:
@@ -433,11 +438,15 @@ class MainWindow(QMainWindow):
         ds_index = self._data_source_combo.findData(_last_ds)
         if ds_index >= 0:
             self._data_source_combo.setCurrentIndex(ds_index)
-        self._data_source_combo.setMinimumWidth(108)
-        self._data_source_combo.setToolTip(
-            "K 线数据来源：MT5（默认，需终端登录）、"
-            "TradingView（tvDatafeed）、东方财富(A股)（HTTP 直连）"
+        self._data_source_combo.setMinimumWidth(140)
+        _ds_tip = (
+            "K 线数据来源：\n"
+            "· MT5（默认，需终端登录）\n"
+            "· TradingView（tvDatafeed，A股/港股可走 SSE/SZSE）"
         )
+        if SHOW_ASHARE_DATA_SOURCE:
+            _ds_tip += f"\n· {ASHARE_SOURCE_LABEL}（HTTP 直连，含腾讯/免费替补）"
+        self._data_source_combo.setToolTip(_ds_tip)
         self._data_source_combo.currentIndexChanged.connect(
             self._on_data_source_combo_changed
         )
@@ -1043,7 +1052,7 @@ class MainWindow(QMainWindow):
         self._symbol_combo.blockSignals(True)
         self._symbol_combo.setCurrentText(sym)
         self._symbol_combo.blockSignals(False)
-        if kind == "akshare":
+        if kind in ("ashare", "akshare"):
             if self._tf_combo.currentText() not in ("1h", "4h", "1d"):
                 self._tf_combo.setCurrentText(A_SHARE_DEFAULT_TIMEFRAME)
 
@@ -1300,6 +1309,7 @@ class MainWindow(QMainWindow):
         if kind == self._current_data_source_kind():
             return
         prev_index = self._data_source_combo.findData(self._current_data_source_kind())
+        prev_kind = self._current_data_source_kind()
         if kind == "tradingview" and not self._ensure_tradingview_reachable():
             return
         try:
@@ -1313,6 +1323,11 @@ class MainWindow(QMainWindow):
                 "切换数据来源失败",
                 f"无法切换到 {self._data_source_combo.currentText()}：\n{exc}",
             )
+            # _switch_data_source 在 connect/subscribe 之前就改写了内部 kind，
+            # 失败时必须回滚，否则下拉框显示 A 而内部按 B 运行。
+            self._active_data_source_kind = prev_kind
+            self._sync_tv_exchange_visibility()
+            self._apply_data_source_symbol_placeholder()
             if prev_index >= 0:
                 self._data_source_combo.blockSignals(True)
                 self._data_source_combo.setCurrentIndex(prev_index)
@@ -1356,7 +1371,17 @@ class MainWindow(QMainWindow):
                     self._tv_exchange_combo.blockSignals(False)
 
             symbol = self._symbol_combo.currentText().strip()
-            timeframe = self._tf_combo.currentText()
+            timeframe = self._tf_combo.currentText().strip()
+            if not timeframe:
+                # 周期下拉框为空时（切换前没有可用数据源）不至于直接抛
+                # Unsupported timeframe: ''，按目标数据源给一个合法默认周期。
+                from pa_agent.data.market_defaults import A_SHARE_DEFAULT_TIMEFRAME
+
+                timeframe = (
+                    A_SHARE_DEFAULT_TIMEFRAME
+                    if kind in ("ashare", "akshare", "tushare")
+                    else "15m"
+                )
 
             new_source = create_data_source(kind)
             # Wire auto-probe status callback for TV
@@ -1371,6 +1396,13 @@ class MainWindow(QMainWindow):
 
             self._populate_symbol_combo_for_source()
             self._populate_timeframe_combo_for_source()
+            # 下拉框显示必须与实际订阅的周期一致（空框回退路径下 populate 会选首个周期）
+            if self._tf_combo.currentText() != timeframe:
+                _idx_tf = self._tf_combo.findText(timeframe)
+                if _idx_tf >= 0:
+                    self._tf_combo.blockSignals(True)
+                    self._tf_combo.setCurrentIndex(_idx_tf)
+                    self._tf_combo.blockSignals(False)
             if kind == "tradingview":
                 self._persist_tradingview_exchange()
 

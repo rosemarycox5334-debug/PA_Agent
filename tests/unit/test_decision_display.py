@@ -79,6 +79,36 @@ def test_refusal_with_contradiction_wording_is_kept():
     assert shown["reasoning"] == text
 
 
+def test_equation_failed_refusal_is_kept_verbatim():
+    """真实记录（2026-11-02 300006 日线）：方程不通过+无合格方案+选择等待，必须保留原文。
+
+    这段文字含「限价做多 / 止损 / 入场」等入场计划用语，旧的白名单没收录
+    「不通过 / 无合格 / 选择等待」，结果整段被兜底句覆盖，用户看不到真原因。
+    """
+    text = (
+        "当前处于宽通道上沿附近（收盘位置分位0.86），且已出现买进高潮后的衰竭组合。"
+        "阶段一明确提示禁止在当前位置追多；做空又被direction=bullish禁止。"
+        "若等回调到支撑9.42再限价做多，止损需放在8.18（K4低点下方），风险1.24，"
+        "而最近阻力10.66仅给出1.24回报，RR=1.0，胜率估计约45%，交易者方程不通过。"
+        "综上无合格入场方案，选择等待。"
+    )
+    original = {"decision": {"order_type": "不下单", "reasoning": text}}
+    shown = prepare_stage2_for_ui(copy.deepcopy(original))
+    assert shown["reasoning"] == text
+    assert "未保留具体调整原因" not in shown["reasoning"]
+
+
+def test_pure_entry_instruction_still_gets_placeholder():
+    """真正的旧记录（纯入场计划、无任何拒绝理由）仍应被兜底句替换。"""
+    text = (
+        "下跌常规通道，回撤约48%至K2高点4088.78，计划型限价做空，顺AIS主方向。"
+        "止损设于上方阻力4092.16上方，TP1取近端支撑4084.28，TP2取前低4080.84。交易者方程通过。"
+    )
+    original = {"decision": {"order_type": "不下单", "reasoning": text}}
+    shown = prepare_stage2_for_ui(copy.deepcopy(original))
+    assert "该历史记录未保留具体调整原因" in shown["reasoning"]
+
+
 def test_compact_decision_details_and_no_fabricated_default_score():
     from PyQt6.QtWidgets import QApplication
     from pa_agent.gui.decision_panel import DecisionPanel

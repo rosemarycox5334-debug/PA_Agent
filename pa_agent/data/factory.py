@@ -20,13 +20,39 @@ DataSourceKind = Literal[
     "yfinance",
 ]
 
-# UI-visible sources — 可在界面下拉框直接选择。
-# MT5 为默认数据源，排在首位；ashare（东方财富 + 免费替补）等仍可通过隐藏 kind 创建。
-DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
+#: 是否在界面「数据来源」下拉框里显示 A股（专属数据源）。
+#:
+#: ⚠️ 只能改代码，UI 设置里不暴露（用户明确要求）：默认 False = 不显示，
+#: 界面只有 MT5 / TradingView。需要时把这里改成 True 并重启程序即可。
+#: 关闭显示不影响该 kind 本身——它始终是合法 kind，脚本/后端仍可用
+#: ``create_data_source("ashare")`` 创建；已经保存过 ashare 的配置会被界面
+#: 回退到 MT5（沿用「保存的源不在下拉列表就回退默认」的既有行为）。
+SHOW_ASHARE_DATA_SOURCE: bool = False
+
+#: A股专属数据源在界面/状态栏的统一文案。
+ASHARE_SOURCE_LABEL = "A股（专属数据源）"
+
+#: 出厂下拉框内容：MT5 为默认数据源，排在首位。
+_BASE_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
 )
 
+
+def data_source_choices(
+    show_ashare: bool | None = None,
+) -> tuple[tuple[DataSourceKind, str], ...]:
+    """界面可选数据源列表；*show_ashare* 缺省时取 :data:`SHOW_ASHARE_DATA_SOURCE`。"""
+    show = SHOW_ASHARE_DATA_SOURCE if show_ashare is None else bool(show_ashare)
+    if not show:
+        return _BASE_SOURCE_CHOICES
+    return (*_BASE_SOURCE_CHOICES, ("ashare", ASHARE_SOURCE_LABEL))
+
+
+#: 供界面/测试直接使用的可选列表（导入时求值 → 改开关需重启程序生效）。
+DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = data_source_choices()
+
+#: 不在下拉框里显示、但仍可通过 kind 创建的源（含未开启显示的 ashare）。
 _HIDDEN_KINDS: frozenset[DataSourceKind] = frozenset(
     {"ashare", "akshare", "tushare", "yfinance", "eastmoney_futures"}
 )
@@ -62,7 +88,7 @@ def data_source_label(kind: str | None) -> str:
         if key == normalized:
             return label
     if normalized == "ashare":
-        return "A股(专属)"
+        return ASHARE_SOURCE_LABEL
     if normalized == "eastmoney_futures":
         return "东方财富期货"
     if normalized == "tushare":
