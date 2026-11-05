@@ -265,6 +265,24 @@ def is_sensenova_fallback_eligible(base_url: str | None) -> bool:
     return normalize_base_url(base_url) == SENSENOVA_CANONICAL_BASE
 
 
+def _retryable_call_error(exc: BaseException) -> bool:
+    """True when re-calling the same candidate may reasonably succeed.
+
+    Rate limits (429) are deliberately excluded: the candidate is already in
+    cooldown, so retrying it immediately would only burn the timeout budget.
+    """
+    msg = str(exc).lower()
+    if "429" in msg or "rate limit" in msg:
+        return False
+    if "truncated" in msg:
+        return True
+    if "empty content" in msg or "empty response" in msg or "reasoning-only" in msg:
+        return True
+    if "http 5" in msg or "server error" in msg:
+        return True
+    return any(k in msg for k in ("timeout", "timed out", "connection", "network"))
+
+
 def is_cancel_or_interrupt(exc: BaseException) -> bool:
     """True for user cancel / KeyboardInterrupt (must not be swallowed)."""
     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -312,6 +330,9 @@ class FreeStageSuccess:
 class FreeStageFailure:
     attempts: list[FreeAttemptRecord] = field(default_factory=list)
     message: str = "all free candidates failed"
+    #: Last reply that carried non-empty text, even when it failed the quality
+    #: gate. Callers may salvage it once after the whole pool is exhausted.
+    last_reply: Any = None
 
 
 class _ListingCache:
@@ -902,6 +923,7 @@ def run_free_stage_fallback(
     stream: bool = False,
     heartbeat_seconds: float = _HEARTBEAT_S,
     max_candidates: int = _MAX_CANDIDATES,
+    attempts_per_candidate: int = 1,
 ) -> FreeStageSuccess | FreeStageFailure:
     """Try free candidates until one call + validation both succeed.
 
@@ -912,6 +934,11 @@ def run_free_stage_fallback(
     ``stream`` is opt-in: the production callers enable it so reasoning reaches
     the UI as it is produced instead of arriving in one block after a call that
     may run for a minute. Unit tests keep the non-streaming default.
+
+    ``attempts_per_candidate`` > 1 re-calls the *same* candidate once after a
+    retryable call failure (empty body, truncation, 5xx, transport) or a
+    validation miss, before rotating. 429s are never retried in place — the
+    candidate is already cooling down.
     """
     from pa_agent.ai.json_validator import Ok, ValidationError
 
@@ -954,119 +981,147 @@ def run_free_stage_fallback(
         _progress(NEUTRAL_PROGRESS_TEXT + "\n")
         return FreeStageFailure(attempts=attempts, message="no free candidates available")
 
+    per_candidate = max(1, int(attempts_per_candidate))
+    last_reply: Any = None
+
     for candidate in cand_list:
-        if cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
-            from pa_agent.ai.deepseek_client import CancelledError
+        for attempt_no in range(per_candidate):
+            if cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
+                from pa_agent.ai.deepseek_client import CancelledError
 
-            raise CancelledError("Request cancelled before free candidate loop")
+                raise CancelledError("Request cancelled before free candidate loop")
 
-        _progress(NEUTRAL_PROGRESS_TEXT + "\n")
-        t0 = time.monotonic()
-        reply: Any = None
-        heartbeat_stop, _heartbeat_thread = _start_heartbeat(_progress, heartbeat_seconds)
-        try:
-            reply = call_free_candidate(
-                candidate,
-                messages,
-                primary_api_key=primary_api_key,
-                cancel_token=cancel_token,
-                http_post=http_post,
-                http_stream=http_stream,
-                stream=use_stream,
-                on_reasoning_token=_on_reasoning,
-                on_content_token=_on_content,
-            )
             _progress(NEUTRAL_PROGRESS_TEXT + "\n")
-            result = validate(reply)
-        except Exception as exc:
-            if is_cancel_or_interrupt(exc):
-                raise
-            if use_stream and (streamed_flags["reasoning"] or streamed_flags["content"]):
-                # Part of this attempt already reached the pane; say so plainly
-                # instead of leaving unexplained text above the next attempt.
+            t0 = time.monotonic()
+            reply: Any = None
+            result: Any = None
+            heartbeat_stop, _heartbeat_thread = _start_heartbeat(_progress, heartbeat_seconds)
+            try:
+                reply = call_free_candidate(
+                    candidate,
+                    messages,
+                    primary_api_key=primary_api_key,
+                    cancel_token=cancel_token,
+                    http_post=http_post,
+                    http_stream=http_stream,
+                    stream=use_stream,
+                    on_reasoning_token=_on_reasoning,
+                    on_content_token=_on_content,
+                )
+                last_reply = reply
                 _progress(NEUTRAL_PROGRESS_TEXT + "\n")
+                result = validate(reply)
+            except Exception as exc:
+                if is_cancel_or_interrupt(exc):
+                    raise
+                if use_stream and (streamed_flags["reasoning"] or streamed_flags["content"]):
+                    # Part of this attempt already reached the pane; say so plainly
+                    # instead of leaving unexplained text above the next attempt.
+                    _progress(NEUTRAL_PROGRESS_TEXT + "\n")
+                latency_ms = (time.monotonic() - t0) * 1000
+                attempts.append(
+                    FreeAttemptRecord(
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        ok=False,
+                        error=str(exc),
+                        latency_ms=latency_ms,
+                        traceback=traceback.format_exc(),
+                    )
+                )
+                logger.info(
+                    "SenseNova free fallback miss: %s/%s (%s)",
+                    candidate.provider,
+                    candidate.model,
+                    exc,
+                )
+                if attempt_no + 1 < per_candidate and _retryable_call_error(exc):
+                    logger.info(
+                        "SenseNova free fallback retries same candidate after call "
+                        "failure: %s/%s (attempt %d/%d)",
+                        candidate.provider,
+                        candidate.model,
+                        attempt_no + 2,
+                        per_candidate,
+                    )
+                    continue
+                break
+            finally:
+                if heartbeat_stop is not None:
+                    heartbeat_stop.set()
+
             latency_ms = (time.monotonic() - t0) * 1000
+            if isinstance(result, Ok):
+                # Legal wait/reject Ok results are success — never treat as errors.
+                attempts.append(
+                    FreeAttemptRecord(
+                        provider=candidate.provider,
+                        model=candidate.model,
+                        ok=True,
+                        latency_ms=latency_ms,
+                    )
+                )
+                logger.warning(
+                    "SenseNova 主接口失败，已由免费模型接管: provider=%s model=%s (%.0f ms)",
+                    candidate.provider,
+                    candidate.model,
+                    latency_ms,
+                )
+                # Announce success *before* streaming the answer so the UI reads in order.
+                _progress(NEUTRAL_PROGRESS_TEXT + "\n")
+                # In streaming mode the deltas already reached the pane as they were
+                # produced; re-sending the whole blob would duplicate every line. A
+                # route that ignored stream=True delivers no deltas at all, so each
+                # channel falls back to its finished text independently.
+                if not streamed_flags["reasoning"] and getattr(
+                    reply, "reasoning_content", None
+                ):
+                    _on_reasoning(reply.reasoning_content)
+                if not streamed_flags["content"] and getattr(reply, "content", None):
+                    _on_content(reply.content)
+                return FreeStageSuccess(
+                    reply=reply,
+                    candidate=candidate,
+                    result=result,
+                    attempts=attempts,
+                )
+
+            if not isinstance(result, ValidationError):
+                err_msg = f"unexpected validate result: {type(result).__name__}"
+            else:
+                err_msg = result.message or "validation failed"
             attempts.append(
                 FreeAttemptRecord(
                     provider=candidate.provider,
                     model=candidate.model,
                     ok=False,
-                    error=str(exc),
+                    error=f"validation: {err_msg}",
                     latency_ms=latency_ms,
-                    traceback=traceback.format_exc(),
                 )
             )
             logger.info(
-                "SenseNova free fallback miss: %s/%s (%s)",
+                "SenseNova free fallback validation failed: %s/%s (%s)",
                 candidate.provider,
                 candidate.model,
-                exc,
+                err_msg,
             )
-            continue
-        finally:
-            if heartbeat_stop is not None:
-                heartbeat_stop.set()
-
-        latency_ms = (time.monotonic() - t0) * 1000
-        if isinstance(result, Ok):
-            # Legal wait/reject Ok results are success — never treat as errors.
-            attempts.append(
-                FreeAttemptRecord(
-                    provider=candidate.provider,
-                    model=candidate.model,
-                    ok=True,
-                    latency_ms=latency_ms,
+            if attempt_no + 1 < per_candidate:
+                logger.info(
+                    "SenseNova free fallback retries same candidate after validation "
+                    "miss: %s/%s (attempt %d/%d)",
+                    candidate.provider,
+                    candidate.model,
+                    attempt_no + 2,
+                    per_candidate,
                 )
-            )
-            logger.warning(
-                "SenseNova 主接口失败，已由免费模型接管: provider=%s model=%s (%.0f ms)",
-                candidate.provider,
-                candidate.model,
-                latency_ms,
-            )
-            # Announce success *before* streaming the answer so the UI reads in order.
-            _progress(NEUTRAL_PROGRESS_TEXT + "\n")
-            # In streaming mode the deltas already reached the pane as they were
-            # produced; re-sending the whole blob would duplicate every line. A
-            # route that ignored stream=True delivers no deltas at all, so each
-            # channel falls back to its finished text independently.
-            if not streamed_flags["reasoning"] and getattr(
-                reply, "reasoning_content", None
-            ):
-                _on_reasoning(reply.reasoning_content)
-            if not streamed_flags["content"] and getattr(reply, "content", None):
-                _on_content(reply.content)
-            return FreeStageSuccess(
-                reply=reply,
-                candidate=candidate,
-                result=result,
-                attempts=attempts,
-            )
-
-        if not isinstance(result, ValidationError):
-            err_msg = f"unexpected validate result: {type(result).__name__}"
-        else:
-            err_msg = result.message or "validation failed"
-        attempts.append(
-            FreeAttemptRecord(
-                provider=candidate.provider,
-                model=candidate.model,
-                ok=False,
-                error=f"validation: {err_msg}",
-                latency_ms=latency_ms,
-            )
-        )
-        logger.info(
-            "SenseNova free fallback validation failed: %s/%s (%s)",
-            candidate.provider,
-            candidate.model,
-            err_msg,
-        )
+                continue
+            break
 
     _progress(NEUTRAL_PROGRESS_TEXT + "\n")
     return FreeStageFailure(
         attempts=attempts,
         message="all free candidates failed call or validation",
+        last_reply=last_reply,
     )
 
 

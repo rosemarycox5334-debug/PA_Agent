@@ -589,6 +589,9 @@ class TwoStageOrchestrator:
         if self._pending_free_meta is not None:
             s1_fallback_meta = self._pending_free_meta
             self._pending_free_meta = None
+            raw = getattr(reply_s1, "raw", None)
+            if isinstance(raw, dict):
+                raw.update(s1_fallback_meta)
 
         if s1_primary_error is None and reply_s1 is not None:
             from pa_agent.ai.lite_output_normalize import is_local_stage1
@@ -1124,6 +1127,9 @@ class TwoStageOrchestrator:
         if self._pending_free_meta is not None:
             s2_fallback_meta = self._pending_free_meta
             self._pending_free_meta = None
+            raw = getattr(reply_s2, "raw", None)
+            if isinstance(raw, dict):
+                raw.update(s2_fallback_meta)
 
         # Skipped when the resilient call already ran the spare channel (it is
         # attempted once, ahead of the configured provider chain).
@@ -1379,6 +1385,39 @@ class TwoStageOrchestrator:
         )
         return Ok(obj=salvaged)
 
+    def _accept_fallback_stage2_quality(self, result: Any, content: str) -> Any:
+        """Quality gate used *while* rotating free candidates.
+
+        Only a strict pass or the structural lite contract may win a candidate
+        slot. Prose or schema-broken JSON is returned as a validation miss so
+        the free lane retries the same candidate (once) and then rotates; the
+        "accept anything" salvage stays for the very end of the pool.
+        """
+        from pa_agent.ai.json_validator import Ok, ValidationError
+
+        if isinstance(result, Ok):
+            return result
+        lite = self._validator.validate(
+            "stage2", content, relaxed=False, glm_flash_lite=True,
+            **self._relaxed_kwargs("stage2"),
+        )
+        if isinstance(lite, Ok):
+            logger.warning(
+                "Free fallback stage2 accepted via lite contract (strict: %s)",
+                getattr(result, "message", "")[:200],
+            )
+            return lite
+        return ValidationError(
+            category="c",
+            stage="stage2",
+            raw_text=content,
+            message=(
+                "free fallback quality gate: strict="
+                f"{getattr(result, 'message', '')[:160]} | "
+                f"lite={getattr(lite, 'message', '')[:160]}"
+            ),
+        )
+
     def _accept_fallback_stage1(self, result: Any, content: str) -> Any:
         """Never reject a free-fallback stage-1 reply: fill from local diagnosis."""
         from pa_agent.ai.json_validator import Ok
@@ -1468,12 +1507,10 @@ class TwoStageOrchestrator:
         self._fallback_frame = frame
         self._fallback_stage1 = stage1_json
 
-        # The free lane is explicitly best-effort: never reject an upstream
-        # reply on contract grounds and never rotate to the next candidate just
-        # because a third-party model ignored the lite schema. Accept whatever
-        # parses, re-validating in relaxed mode, then salvage, then fall back to
-        # local rules. Only the strict/relaxed path is affected; the primary
-        # provider keeps full validation.
+        # The free lane retries a candidate once on a retryable call failure and
+        # gates quality: strict or lite-contract output wins a slot; prose or
+        # broken JSON goes back to the same candidate, then rotates. The
+        # "accept anything" salvage is kept for the exhausted pool below.
         def _accept_any(reply: Any) -> Any:
             result = validate_reply(reply)
             from pa_agent.ai.json_validator import coalesce_model_json_text
@@ -1484,7 +1521,7 @@ class TwoStageOrchestrator:
             )
             if stage == "stage1":
                 return self._accept_fallback_stage1(result, content)
-            return self._accept_fallback_stage2(result, content)
+            return self._accept_fallback_stage2_quality(result, content)
 
         try:
             outcome = run_free_stage_fallback(
@@ -1496,6 +1533,7 @@ class TwoStageOrchestrator:
                 on_content_token=on_content_token,
                 on_progress=on_progress,
                 stream=True,
+                attempts_per_candidate=2,
             )
         except Exception as exc:
             if is_cancel_or_interrupt(exc):
@@ -1533,6 +1571,42 @@ class TwoStageOrchestrator:
                 trace,
             )
             self._last_sensenova_fallback_failure = outcome  # type: ignore[attr-defined]
+            # Last resort: the pool returned text but nothing passed the quality
+            # gate. Salvage that text once (lite contract -> relaxed -> minimal
+            # no-order object) so the user still gets a renderable analysis
+            # instead of an error dialog.
+            if stage == "stage2" and outcome.last_reply is not None:
+                from pa_agent.ai.json_validator import coalesce_model_json_text
+
+                reply_last = outcome.last_reply
+                content_last = coalesce_model_json_text(
+                    getattr(reply_last, "content", None) or "",
+                    getattr(reply_last, "reasoning_content", None) or "",
+                )
+                try:
+                    salvaged = self._accept_fallback_stage2(
+                        validate_reply(reply_last), content_last
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Free fallback stage2 salvage failed: %s", exc)
+                else:
+                    if isinstance(salvaged, Ok):
+                        logger.warning(
+                            "Free fallback stage2 accepted only after pool exhaustion"
+                        )
+                        return reply_last, salvaged, {
+                            "fallback_salvaged": True,
+                            "fallback_attempts": [
+                                {
+                                    "provider": a.provider,
+                                    "model": a.model,
+                                    "ok": a.ok,
+                                    "error": a.error,
+                                    "latency_ms": round(a.latency_ms, 1),
+                                }
+                                for a in outcome.attempts
+                            ],
+                        }
         return None
 
     def _sensenova_fallback_exception_fields(

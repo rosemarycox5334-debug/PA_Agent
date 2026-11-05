@@ -415,7 +415,9 @@ def test_submit_all_free_candidates_fail_closed_with_trace() -> None:
     fb = record.exception.get("sensenova_free_fallback") or {}
     assert fb.get("triggered") is True
     assert fb.get("success") is False
-    assert len(fb.get("attempts") or []) == 2
+    # A 5xx is retryable, so each candidate is tried twice before rotating:
+    # same candidate first, then the next one (2 candidates x 2 attempts).
+    assert [a["model"] for a in (fb.get("attempts") or [])] == ["a", "a", "b", "b"]
     pending.save_partial.assert_called()
 
 
@@ -1031,3 +1033,81 @@ def test_slow_candidate_announces_its_elapsed_wait() -> None:
     settled = len(lines)
     _time.sleep(0.2)
     assert len(lines) == settled
+
+
+def test_free_fallback_quality_gate_rejects_prose_and_accepts_lite_contract() -> None:
+    """Quality gate: prose rotates, lite-contract JSON may win a candidate slot."""
+    from pa_agent.ai.json_validator import Ok, ValidationError
+
+    orch = _orchestrator(_sensenova_settings())
+    orch._fallback_frame = make_frame()  # type: ignore[attr-defined]
+
+    prose = orch._accept_fallback_stage2_quality(
+        ValidationError(category="d", stage="stage2", raw_text="x", message="plain text"),
+        "The decision JSON has been output successfully.",
+    )
+    assert isinstance(prose, ValidationError)
+    assert prose.message.startswith("free fallback quality gate")
+
+    lite_payload = {
+        "decision": {
+            "order_type": "不下单",
+            "order_direction": None,
+            "entry_price": None,
+            "stop_loss_price": None,
+            "take_profit_price": None,
+            "take_profit_price_2": None,
+            "reasoning": "无可靠入场",
+        },
+        "next_bar_prediction": {
+            "direction": "neutral", "reasoning": "震荡", "unpredictable": True,
+        },
+        "next_cycle_prediction": {
+            "direction": "neutral", "reasoning": "震荡", "unpredictable": True,
+        },
+    }
+    accepted = orch._accept_fallback_stage2_quality(
+        ValidationError(category="c", stage="stage2", raw_text="x", message="strict miss"),
+        json.dumps(lite_payload, ensure_ascii=False),
+    )
+    assert isinstance(accepted, Ok)
+
+
+def test_free_stage2_salvages_last_reply_after_pool_exhaustion() -> None:
+    """When every candidate misses the quality gate, the last reply is salvaged once."""
+    from pa_agent.ai.json_validator import Ok
+    from pa_agent.ai.sensenova_fallback import FreeStageFailure
+
+    settings = _sensenova_settings()
+    orch = _orchestrator(settings)
+    frame = make_frame()
+    orch._fallback_frame = frame  # type: ignore[attr-defined]
+
+    prose_reply = make_reply({"placeholder": True})
+    prose_reply.content = "The decision JSON has been output successfully."
+    prose_reply.reasoning_content = ""
+
+    failure = FreeStageFailure(
+        attempts=[], message="all failed", last_reply=prose_reply
+    )
+    with patch(
+        "pa_agent.ai.sensenova_fallback.run_free_stage_fallback",
+        return_value=failure,
+    ):
+        recovered = orch._try_sensenova_free_stage(  # type: ignore[attr-defined]
+            stage="stage2",
+            messages=[{"role": "user", "content": "stage2"}],
+            validate_reply=lambda reply: orch._validator.validate(
+                "stage2", reply.content, kline_frame=frame
+            ),
+            on_reasoning_token=None,
+            on_content_token=None,
+            cancel_token=CancelToken(),
+            frame=frame,
+        )
+
+    assert recovered is not None
+    reply, result, meta = recovered
+    assert reply is prose_reply
+    assert isinstance(result, Ok)
+    assert meta.get("fallback_salvaged") is True
