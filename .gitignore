@@ -131,3 +131,6 @@ docs/changelog/
 Thumbs.db
 Desktop.ini
 .DS_Store
+config/ark_rotation_state.json
+config/README.md
+research/pa_validation/README.md

@@ -163,6 +163,11 @@ def _extract_cached_prompt_tokens(usage: Any) -> int:
 
 def _effective_api_model(settings: AIProviderSettings) -> str:
     """Model id sent to the upstream API (resolve provider aliases)."""
+    if _is_ark(settings.base_url):
+        # 方舟：deepseek-flash 等习惯名自动翻译成真实模型 ID。
+        from pa_agent.ai.ark_gateway import resolve_ark_model
+
+        return resolve_ark_model(settings.model)
     if _is_workbuddy_agent(settings):
         from pa_agent.ai.workbuddy_connector import resolve_workbuddy_api_model
 
@@ -204,6 +209,22 @@ def _is_sensenova(base_url: str) -> bool:
     return "sensenova.cn" in (base_url or "").lower()
 
 
+def _is_ark(base_url: str) -> bool:
+    """火山方舟 Ark (ark.cn-beijing.volces.com) OpenAI-compatible gateway.
+
+    与 DSH 侧实测一致（2026-11）：
+      - ``thinking.type`` 只认 ``enabled`` / ``disabled``，不接受 DeepSeek 原生的
+        ``adaptive``；即使模型名含 deepseek，也必须按网关格式发送。
+      - 思考强度用 ``reasoning_effort``（low / medium / high，无 max）。
+      - ``max_tokens`` 上限按模型不同（豆包等为 262144），项目默认 384000 会 400。
+      - 部分模型（如 Kimi-K3.1-Pro）只接受 ``temperature=1``，关闭思考时
+        项目注入的 ``temperature=0`` 会被拒，因此 Ark 一律不发送 temperature。
+    注意：检测 base_url 优先于 _is_deepseek_model —— 格式随网关而非模型。
+    """
+    url = (base_url or "").lower()
+    return "volces.com" in url or "volcengine" in url
+
+
 def _is_bai(base_url: str) -> bool:
     """B.AI (api.b.ai) OpenAI-compatible gateway.
 
@@ -233,6 +254,9 @@ _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 # B.AI (api.b.ai) 网关：deepseek-v4-flash 的 completion 上限（官方路由配 8192）。
 # 超过此值 B.AI 会返回 400，因此单独限流。
 _BAI_MAX_OUTPUT_TOKENS = 8_192
+# 火山方舟 Ark：模型级上限不同（豆包 Seed-2.1 为 262144），统一取较安全的 32768。
+# 实测两阶段最长输出约 14k tokens，32768 足够且不会触发 400。
+_ARK_MAX_OUTPUT_TOKENS = 32_768
 
 
 def _model_uses_claude_adaptive(model: str) -> bool:
@@ -345,6 +369,9 @@ def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
         # B.AI deepseek-v4-flash 等模型的 completion 上限很低（官方配 8192）。
         # 检测 base_url 优先于 _is_deepseek_model，因为走 B.AI 网关时格式随网关。
         cap = _BAI_MAX_OUTPUT_TOKENS
+    elif _is_ark(settings.base_url):
+        # 火山方舟：默认 384000 超过模型上限（如豆包 262144），会直接 400。
+        cap = _ARK_MAX_OUTPUT_TOKENS
     elif _is_mimo(settings):
         cap = mimo_max_output_tokens(settings.model)
     else:
@@ -408,6 +435,17 @@ def _resolve_thinking_params(
                 "thinking": {"type": "disabled"},
             }
             return extra_body, None
+
+    if _is_ark(settings.base_url):
+        # 火山方舟：thinking.type 只认 enabled/disabled（不接受 adaptive），
+        # 强度用 reasoning_effort；上游只支持 low/medium/high。
+        # 不论设置里选的是什么，方舟一律用 low（实测 low 比 high/max 快数倍，
+        # 且关闭思考时正文冗长、反而更慢）。
+        if _thinking:
+            from pa_agent.ai.ark_gateway import ARK_THINKING_EFFORT
+
+            return {"thinking": {"type": "enabled"}}, ARK_THINKING_EFFORT
+        return {"thinking": {"type": "disabled"}}, None
 
     if _is_deepseek_native(settings.base_url) or _is_deepseek_model(model):
         # DeepSeek v4+ requires thinking.type=adaptive + output_config.effort;
@@ -576,7 +614,8 @@ class DeepSeekClient:
         # When thinking mode is OFF, set temperature=0 for maximum instruction-following
         # fidelity and JSON format compliance.  Thinking mode is incompatible with
         # temperature (DeepSeek/Anthropic spec), so we only inject it when safe.
-        if not _thinking_on:
+        # 火山方舟部分模型（如 Kimi-K3.1-Pro）只接受 temperature=1，因此不发送该参数。
+        if not _thinking_on and not _is_ark(self._settings.base_url):
             create_kwargs["temperature"] = 0
         _rl_kwargs: dict[str, Any] = {
             "log": self._log,

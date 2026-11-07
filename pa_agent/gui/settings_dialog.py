@@ -520,10 +520,10 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def _refresh_glm_key_row(self) -> None:
-        """Show the GLM backup key row only when the primary is SenseNova."""
-        from pa_agent.ai.glm_backup import is_sensenova_base
+        """Show the GLM backup key row for SenseNova or Ark primary gateways."""
+        from pa_agent.ai.glm_backup import is_glm_backup_eligible
 
-        visible = is_sensenova_base(self._base_url_edit.text().strip())
+        visible = is_glm_backup_eligible(self._base_url_edit.text().strip())
         self._glm_key_label.setVisible(visible)
         self._glm_key_edit.setVisible(visible)
 

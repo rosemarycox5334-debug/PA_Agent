@@ -18,13 +18,25 @@ def _is_sensenova(base_url: str | None) -> bool:
     return is_sensenova_fallback_eligible(base_url)
 
 
+def is_ark_base(base_url: str | None) -> bool:
+    """方舟网关：同样允许挂 GLM 备用通道。"""
+    from pa_agent.ai.ark_gateway import is_ark_base as _ark
+
+    return _ark(base_url)
+
+
+def is_glm_backup_eligible(base_url: str | None) -> bool:
+    """GLM 备用 Key 输入框何时显示：主通道为 SenseNova 或火山方舟。"""
+    return _is_sensenova(base_url) or is_ark_base(base_url)
+
+
 def ensure_glm_fallback(provider: Any) -> bool:
-    """Attach the glm-4-flash fallback when SenseNova + a GLM key are present.
+    """Attach the glm-4-flash fallback when SenseNova/Ark + a GLM key are present.
 
     Returns True when a fallback entry was appended. Idempotent: an existing
     glm entry (same model and base_url) is left untouched.
     """
-    if provider is None or not _is_sensenova(getattr(provider, "base_url", "")):
+    if provider is None or not is_glm_backup_eligible(getattr(provider, "base_url", "")):
         return False
     key = str(getattr(provider, "backup_glm_api_key", "") or "").strip()
     if not key:
@@ -47,11 +59,11 @@ def ensure_glm_fallback(provider: Any) -> bool:
 
 
 def is_sensenova_base(base_url: str | None) -> bool:
-    """Public helper for the settings UI."""
+    """Public helper for the settings UI (kept for backward compatibility)."""
     return _is_sensenova(base_url)
 
 
 def glm_fallback_available(provider: Any) -> bool:
-    """True when the GLM key is set and the primary is the SenseNova gateway."""
-    return (_is_sensenova(getattr(provider, "base_url", ""))
+    """True when the GLM key is set and the primary gateway supports a backup."""
+    return (is_glm_backup_eligible(getattr(provider, "base_url", ""))
             and bool(str(getattr(provider, "backup_glm_api_key", "") or "").strip()))

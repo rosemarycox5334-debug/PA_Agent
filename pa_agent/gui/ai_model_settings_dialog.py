@@ -194,10 +194,10 @@ class AIModelSettingsDialog(QDialog):
         self.accept()
 
     def _refresh_glm_key_row(self) -> None:
-        """GLM 备用 Key 只在主通道为 SenseNova 网关时有意义。"""
-        from pa_agent.ai.glm_backup import is_sensenova_base
+        """GLM 备用 Key 在主通道为 SenseNova 或火山方舟时显示。"""
+        from pa_agent.ai.glm_backup import is_glm_backup_eligible
 
-        visible = is_sensenova_base(self._base_url_edit.text().strip())
+        visible = is_glm_backup_eligible(self._base_url_edit.text().strip())
         self._glm_key_label.setVisible(visible)
         self._glm_key_edit.setVisible(visible)
 
