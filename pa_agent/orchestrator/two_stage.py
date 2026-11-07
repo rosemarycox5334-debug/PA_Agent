@@ -385,7 +385,7 @@ class TwoStageOrchestrator:
             logger.warning("方舟模型轮换失败，沿用当前模型：%s", exc)
             return
         if model != provider.model:
-            logger.info("方舟模型轮换：%s → %s", provider.model, model)
+            logger.debug("方舟模型轮换：%s → %s", provider.model, model)
             provider.model = model
         # 重建方舟链：先摘掉旧的方舟候选，再按新主模型补齐；GLM 备用保留。
         provider.fallbacks = [
@@ -1796,20 +1796,12 @@ class TwoStageOrchestrator:
                 from pa_agent.ai.ark_gateway import is_account_level_error, is_ark_base
 
                 if is_account_level_error(exc) and self._settings is not None:
-                    skipped = 0
                     for cand in provider_fallback_chain:
                         if is_ark_base(getattr(cand, "base_url", "")):
                             tried_provider_keys.add(
                                 (str(cand.base_url).strip(), str(cand.model).strip())
                             )
-                            skipped += 1
-                    if skipped:
-                        logger.warning(
-                            "%s 方舟账号级错误（%s），跳过 %d 个同网关模型，改用免费/备用通道",
-                            stage_label,
-                            type(exc).__name__,
-                            skipped,
-                        )
+                    # 用户要求：这类内部降级细节不产生 WARNING，静默切到免费/备用通道。
                 # Layer 0a: the spare model. Rate limits are the one failure the
                 # primary keeps hitting (tpm/rpm), and this model shares the same
                 # gateway and key while not counting against that budget. Its
@@ -1947,7 +1939,8 @@ class TwoStageOrchestrator:
                 tried_keys.add(key)
                 continue
             tried_keys.add(key)
-            logger.warning(
+            # 内部降级细节：不刷 WARNING，控制台保持干净（文件里留 DEBUG 可排查）。
+            logger.debug(
                 "%s provider error (%s); switching to fallback model=%s base_url=%s",
                 stage_label,
                 type(exc).__name__,
