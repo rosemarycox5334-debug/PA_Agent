@@ -371,16 +371,19 @@ class TwoStageOrchestrator:
         try:
             model = next_rotation_model()
         except Exception as exc:  # noqa: BLE001 - 轮换失败不能阻塞分析
-            logger.warning("方舟模型轮换失败，沿用当前模型：%s", exc)
+            logger.debug("轮换失败，沿用当前配置：%s", exc)
             return
-        if model != provider.model:
-            provider.model = model
-        # 内部实现细节：不输出渠道信息。
-        provider.fallbacks = [
+        # 只生成一份“本次使用”的副本：用户在设置里填的模型名保持不变。
+        active = provider.model_copy(deep=True, update={"model": model})
+        active.fallbacks = [
             fb for fb in (getattr(provider, "fallbacks", None) or [])
             if not is_ark_base(getattr(fb, "base_url", ""))
         ]
-        ensure_ark_fallbacks(provider)
+        ensure_ark_fallbacks(active)
+        from pa_agent.ai.glm_backup import ensure_glm_fallback
+
+        ensure_glm_fallback(active)
+        self._active_provider = active
 
     def _provider(self) -> Any:
         """Provider for the current request: in-run fallback wins, else config."""
@@ -433,13 +436,13 @@ class TwoStageOrchestrator:
         AnalysisRecord
             Fully or partially populated record.
         """
-        # ── Step 0: 方舟模型轮换（每次分析换一个，仅内存，不改 settings.json）──
+        # ── Step 0: 本次分析使用的候选（不修改用户在设置里填的模型）──
+        self._active_provider = None
         self._apply_ark_rotation()
 
         # ── Step 1: Build partial record ──────────────────────────────────────
         record = _build_empty_record(frame, self._settings)
         # Every analysis starts from the user's configured provider again.
-        self._active_provider = None
         self._on_fallback_provider = False
         # Clear stale free-fallback traces from a previous submit on this instance.
         self._last_sensenova_fallback_failure = None  # type: ignore[attr-defined]
@@ -1744,15 +1747,14 @@ class TwoStageOrchestrator:
         if self._settings is not None:
             from pa_agent.ai.glm_backup import ensure_glm_fallback
 
-            # 火山方舟主通道：先把同网关的其它模型排进降级链（额度用完逐个换），
-            # 内部实现细节：不输出渠道信息。
             from pa_agent.ai.ark_gateway import ensure_ark_fallbacks
 
-            ensure_ark_fallbacks(self._settings.provider)
-            # 内部实现细节：不输出渠道信息。
-            ensure_glm_fallback(self._settings.provider)
+            # 以“本次使用”的 provider 为基准，避免改动用户配置里的模型名。
+            base_provider = self._provider()
+            ensure_ark_fallbacks(base_provider)
+            ensure_glm_fallback(base_provider)
         provider_fallback_chain = (
-            list(getattr(self._settings.provider, "fallbacks", []) or [])
+            list(getattr(self._provider(), "fallbacks", []) or [])
             if self._settings is not None else []
         )
         while True:

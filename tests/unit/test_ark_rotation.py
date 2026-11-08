@@ -54,19 +54,19 @@ def test_cursor_survives_new_process(state_file):
 
 
 def test_orchestrator_rotates_each_analysis(state_file):
-    """每次分析都把 provider.model 换成轮换池里的下一个（不改 settings.json 文件）。"""
-    provider = AIProviderSettings(model="deepseek-flash", base_url=ARK_BASE_URL,
+    """每次分析都换一个候选，但用户在设置里填的模型名保持不变。"""
+    provider = AIProviderSettings(model="doubao-seed-2-1-turbo-260628", base_url=ARK_BASE_URL,
                                    api_key="ark-key", thinking=True, reasoning_effort="low")
     orch = _orch(provider)
     seen = []
     for _ in range(3):
         orch._apply_ark_rotation()
         seen.append(orch._provider().model)
+        # 配置里的模型名始终是用户填的那个
+        assert orch._settings.provider.model == "doubao-seed-2-1-turbo-260628"
     assert seen == ["kimi-k3-1-pro-261024",
                     "deepseek-v4-1-flash-economy-261017",
                     "doubao-seed-2-1-lite-260915"]
-    # 配置里的原始模型名只在内存中变了，settings 对象仍是同一个 provider
-    assert orch._settings is not None
 
 
 def test_rotation_rebuilds_fallback_chain(state_file):
