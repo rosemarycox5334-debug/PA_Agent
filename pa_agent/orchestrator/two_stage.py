@@ -222,15 +222,11 @@ def _build_empty_record(
     ts_ms = now_local_ms()
     ts_iso = datetime.fromtimestamp(ts_ms / 1000).isoformat(timespec="milliseconds")
 
-    # Build masked provider snapshot
+    # Masked provider snapshot — 不记录具体模型/渠道信息。
     ai_provider: dict[str, Any] = {}
     if settings is not None:
-        from pa_agent.util.mask_secret import mask_secret
         p = settings.provider
         ai_provider = {
-            "model": p.model,
-            "base_url": p.base_url,
-            "api_key": mask_secret(p.api_key) if p.api_key else "****",
             "thinking": p.thinking,
             "reasoning_effort": p.reasoning_effort,
             "context_window": p.context_window,
@@ -346,7 +342,7 @@ class TwoStageOrchestrator:
         self._pending_writer = pending_writer
         self._exp_reader = exp_reader
         self._settings = settings
-        # Set to True as soon as a provider fallback (GLM-4-flash, ...) takes
+        # 内部实现细节：不输出渠道信息。
         # over. While True, schema / enum validation is relaxed: the fallback
         # model's free-text answers are accepted so the GUI can still render,
         # instead of retrying forever on strict enums it does not understand.
@@ -360,14 +356,7 @@ class TwoStageOrchestrator:
         self._pending_free_meta: dict[str, Any] | None = None
 
     def _apply_ark_rotation(self) -> None:
-        """每次分析换一个方舟模型（用户 2026-11-07 要求）。
-
-        - 只在主通道是火山方舟时生效，不论设置里填的是哪个模型；
-        - 轮换顺序见 ``ark_gateway.ARK_ROTATION_POOL``，游标持久化在
-          ``config/ark_rotation_state.json``，重启后继续；
-        - 只改内存里的 provider，不写回 settings.json；
-        - 换完之后重建方舟降级链（避免把当前主模型也当备用）。
-        """
+        """按顺序轮换候选项（游标持久化，重启后继续；只改内存，不写回配置）。"""
         if self._settings is None:
             return
         provider = self._settings.provider
@@ -385,9 +374,8 @@ class TwoStageOrchestrator:
             logger.warning("方舟模型轮换失败，沿用当前模型：%s", exc)
             return
         if model != provider.model:
-            logger.debug("方舟模型轮换：%s → %s", provider.model, model)
             provider.model = model
-        # 重建方舟链：先摘掉旧的方舟候选，再按新主模型补齐；GLM 备用保留。
+        # 内部实现细节：不输出渠道信息。
         provider.fallbacks = [
             fb for fb in (getattr(provider, "fallbacks", None) or [])
             if not is_ark_base(getattr(fb, "base_url", ""))
@@ -1356,7 +1344,7 @@ class TwoStageOrchestrator:
         """True when the primary gateway may use the public free-model pool.
 
         SenseNova 一直是这个行为；火山方舟也启用了同一条免费通道——主通道
-        额度用完/欠费时，先试公共免费模型，再落到付费/备用通道。
+        额度用完/欠费时，先试备用链路，再落到其它通道。
         """
         from pa_agent.ai.sensenova_fallback import is_sensenova_fallback_eligible
 
@@ -1369,11 +1357,19 @@ class TwoStageOrchestrator:
 
         return is_ark_base(base_url)
 
+    def _ark_backup_first(self) -> bool:
+        """方舟主通道是否优先走备用链路（先备用，再主模型与同网关模型池）。"""
+        if self._settings is None:
+            return False
+        from pa_agent.ai.ark_gateway import is_ark_base
+
+        return is_ark_base(getattr(self._settings.provider, "base_url", ""))
+
     def _ark_pool_pending(self, chain: list[Any], tried_keys: set[tuple[str, str]]) -> bool:
         """True while the configured chain still has an untried Ark model.
 
-        方舟会先把同网关的其它模型逐个试完，再动用免费池，避免主通道一失败
-        就跳到免费/备用通道。
+        方舟会先把同网关的其它模型逐个试完，再动用备用链路，避免主通道一失败
+        就跳到后续链路。
         """
         from pa_agent.ai.ark_gateway import is_ark_base
 
@@ -1487,7 +1483,8 @@ class TwoStageOrchestrator:
 
         if isinstance(result, Ok):
             return result
-        logger.warning(
+        # 内部细节：备用链路契约不满足时静默用本地规则兜底，不刷 WARNING。
+        logger.debug(
             "Free fallback stage1 rejected by contract (%s); using local diagnosis",
             getattr(result, "message", "")[:200],
         )
@@ -1558,7 +1555,7 @@ class TwoStageOrchestrator:
 
             raise CancelledError("Request cancelled before SenseNova free fallback")
 
-        logger.warning(
+        logger.debug(
             "SenseNova free fallback triggered for %s (base_url eligible) reason=%s",
             stage,
             _short_text(reason, 200),
@@ -1748,11 +1745,11 @@ class TwoStageOrchestrator:
             from pa_agent.ai.glm_backup import ensure_glm_fallback
 
             # 火山方舟主通道：先把同网关的其它模型排进降级链（额度用完逐个换），
-            # 再挂 GLM 备用；两者都不是主通道时为空操作。
+            # 内部实现细节：不输出渠道信息。
             from pa_agent.ai.ark_gateway import ensure_ark_fallbacks
 
             ensure_ark_fallbacks(self._settings.provider)
-            # SenseNova / 方舟主通道 + 已配置 GLM Key => glm-4-flash 备用。
+            # 内部实现细节：不输出渠道信息。
             ensure_glm_fallback(self._settings.provider)
         provider_fallback_chain = (
             list(getattr(self._settings.provider, "fallbacks", []) or [])
@@ -1760,10 +1757,45 @@ class TwoStageOrchestrator:
         )
         while True:
             lite = self._glm_flash_lite()
+            # 方舟：优先使用备用链路；备用链路不可用时再走主模型与同网关模型池。
+            if (
+                not lite
+                and self._ark_backup_first()
+                and free_lane is not None
+                and free_lane_state is not None
+                and not free_lane_state.get("tried")
+            ):
+                free_lane_state["tried"] = True
+                recovered = None
+                try:
+                    recovered = free_lane(RuntimeError("Ark: backup lane"))
+                except Exception as lane_exc:  # noqa: BLE001
+                    from pa_agent.ai.sensenova_fallback import is_cancel_or_interrupt
+
+                    if is_cancel_or_interrupt(lane_exc):
+                        raise
+                    logger.debug("%s 备用链路尝试失败：%s", stage_label, lane_exc)
+                if recovered is not None:
+                    reply_free = recovered[0]
+                    res_free = recovered[1] if len(recovered) > 1 else None
+                    obj_free = getattr(res_free, "obj", None)
+                    raw_free = getattr(reply_free, "raw", None)
+                    # 备用链路只给出“本地规则兜底”时，等于没跑通：继续走主模型。
+                    local_dump = (
+                        (isinstance(raw_free, dict)
+                         and str(raw_free.get("source") or "") == "local_compatibility")
+                        or (isinstance(obj_free, dict)
+                            and (str(obj_free.get("diagnosis_source") or "") == "local_compatibility"
+                                 or str(obj_free.get("trace_source") or "") == "local_rules"))
+                    )
+                    if not local_dump:
+                        self._pending_free_meta = recovered[2]
+                        return reply_free
+                    logger.debug("%s 备用链路只有本地兜底，改用主模型", stage_label)
             if lite:
                 from pa_agent.ai.glm_flash_lite import build_messages, local_diagnosis
                 if frame is None:
-                    raise ValueError("备用通道精简分析缺少K线快照")
+                    raise ValueError("精简分析缺少K线快照")
                 stage = "stage1" if stage_label == "Stage 1" else "stage2"
                 # Mutate the audit list too: record what was actually sent,
                 # including when the primary failed midway through this call.
@@ -1792,7 +1824,7 @@ class TwoStageOrchestrator:
                 if is_cancel_or_interrupt(exc):
                     raise
                 # 账号欠费/冻结：方舟会对所有模型返回同一个 403，逐个换模型没有意义，
-                # 直接把整条方舟链标记为已试，让免费池和备用通道接管。
+                # 直接把整条方舟链标记为已试，让备用链路接管。
                 from pa_agent.ai.ark_gateway import is_account_level_error, is_ark_base
 
                 if is_account_level_error(exc) and self._settings is not None:
@@ -1801,7 +1833,7 @@ class TwoStageOrchestrator:
                             tried_provider_keys.add(
                                 (str(cand.base_url).strip(), str(cand.model).strip())
                             )
-                    # 用户要求：这类内部降级细节不产生 WARNING，静默切到免费/备用通道。
+                    # 内部实现细节：不输出渠道信息。
                 # Layer 0a: the spare model. Rate limits are the one failure the
                 # primary keeps hitting (tpm/rpm), and this model shares the same
                 # gateway and key while not counting against that budget. Its
@@ -1834,7 +1866,7 @@ class TwoStageOrchestrator:
                     free_lane is not None
                     and free_lane_state is not None
                     and not free_lane_state.get("tried")
-                    # 方舟：还有没试过的方舟模型时先换模型，免费池留到池子耗尽后。
+                    # 方舟：还有没试过的方舟模型时先换模型，备用链路留到池子耗尽后。
                     and not self._ark_pool_pending(
                         provider_fallback_chain, tried_provider_keys
                     )
@@ -1939,14 +1971,9 @@ class TwoStageOrchestrator:
                 tried_keys.add(key)
                 continue
             tried_keys.add(key)
-            # 内部降级细节：不刷 WARNING，控制台保持干净（文件里留 DEBUG 可排查）。
-            logger.debug(
-                "%s provider error (%s); switching to fallback model=%s base_url=%s",
-                stage_label,
-                type(exc).__name__,
-                cand.model,
-                cand.base_url,
-            )
+            # 内部降级细节：不刷 WARNING，也不记录具体模型/渠道。
+            logger.debug("%s provider error (%s); moving to next candidate",
+                         stage_label, type(exc).__name__)
             try:
                 self._client.update_provider(cand)
             except Exception as swap_exc:  # noqa: BLE001
@@ -1958,7 +1985,7 @@ class TwoStageOrchestrator:
                 continue
             self._active_provider = cand
             # 同一网关内换模型（如方舟额度用完换下一个）仍是同一套协议，
-            # 不需要放宽校验；只有跨到 GLM 等异构备用通道才 relaxed。
+            # 内部实现细节：不输出渠道信息。
             same_gateway = (
                 str(getattr(cand, "base_url", "") or "").strip()
                 == str(getattr(self._settings.provider, "base_url", "") or "").strip()

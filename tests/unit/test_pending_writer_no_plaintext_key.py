@@ -99,8 +99,11 @@ class TestSaveFullNoPlaIntextKey:
         data = json.loads(path.read_text(encoding="utf-8"))
 
         provider = data["meta"]["ai_provider"]
-        assert provider["api_key"] == mask_secret(API_KEY)
-        assert API_KEY not in provider["api_key"]
+        # 记录里不再写密钥，也不写模型/渠道信息。
+        assert "api_key" not in provider
+        assert "model" not in provider
+        assert "base_url" not in provider
+        assert API_KEY not in json.dumps(provider, ensure_ascii=False)
 
     def test_key_sanitized_in_stage1_messages(self, tmp_path: Path) -> None:
         """The API key embedded in stage1_messages content must be masked."""
@@ -164,8 +167,11 @@ class TestSavePartialNoPlaIntextKey:
         data = json.loads(path.read_text(encoding="utf-8"))
 
         provider = data["meta"]["ai_provider"]
-        assert provider["api_key"] == mask_secret(API_KEY)
-        assert API_KEY not in provider["api_key"]
+        # 记录里不再写密钥，也不写模型/渠道信息。
+        assert "api_key" not in provider
+        assert "model" not in provider
+        assert "base_url" not in provider
+        assert API_KEY not in json.dumps(provider, ensure_ascii=False)
 
     def test_key_sanitized_in_stage1_messages(self, tmp_path: Path) -> None:
         """The API key embedded in stage1_messages content must be masked in partial saves."""

@@ -76,7 +76,7 @@ class PendingWriter:
         basename = _build_basename(record)
         path = self._pending_dir / f"{basename}.json"
         data = record.model_dump()
-        data = self._sanitize(data, self._api_key)
+        data = self._strip_model_info(self._sanitize(data, self._api_key))
         self._write_json(path, data)
         try:
             from pa_agent.records.analysis_history import invalidate_latest_record_cache
@@ -102,7 +102,7 @@ class PendingWriter:
         data["_partial_reason"] = reason
         if isinstance(data.get("exception"), dict):
             data["exception"] = {**data["exception"], "partial_reason": reason}
-        data = self._sanitize(data, self._api_key)
+        data = self._strip_model_info(self._sanitize(data, self._api_key))
         self._write_json(path, data)
         try:
             from pa_agent.records.analysis_history import invalidate_latest_record_cache
@@ -129,6 +129,24 @@ class PendingWriter:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _strip_model_info(data: dict) -> dict:
+        """Remove any trace of which model/gateway answered this record."""
+        meta = data.get("meta")
+        if isinstance(meta, dict):
+            provider = meta.get("ai_provider")
+            if isinstance(provider, dict):
+                for key in ("model", "base_url", "api_key", "provider", "label"):
+                    provider.pop(key, None)
+        for key in ("stage1_response", "stage2_response"):
+            resp = data.get(key)
+            if isinstance(resp, dict):
+                for k in ("model", "base_url", "provider", "label",
+                          "fallback_provider", "fallback_model",
+                          "fallback_base_url", "fallback_attempts"):
+                    resp.pop(k, None)
+        return data
 
     @staticmethod
     def _sanitize(data: dict, api_key: str) -> dict:

@@ -1,16 +1,4 @@
-"""火山方舟 (Ark) 网关适配：模型别名、模型池与自动降级链。
-
-设计目标（与 SenseNova 主通道的处理方式保持一致）：
-
-* 用户只填 ``base_url`` + 一个习惯的模型名（例如 ``deepseek-flash``），
-  由本模块翻译成方舟真实的模型 ID；
-* 方舟只接受 ``reasoning_effort`` low/medium/high，项目统一用 ``low``；
-* 某个模型额度用完或未开通时，自动在方舟模型池里换下一个；
-* 方舟模型池全部不可用时，交给 ``glm_backup`` / 免费备用通道。
-
-本模块只做纯函数式的模型选择，不发网络请求；实际切换由
-``TwoStageOrchestrator._try_next_provider_fallback`` 完成。
-"""
+"""OpenAI-compatible gateway helpers: model aliases, rotation and candidate pools."""
 from __future__ import annotations
 
 import json
@@ -110,7 +98,7 @@ def is_account_level_error(exc: BaseException | str | None) -> bool:
     """True for账号级封禁（欠费/冻结），换同一网关的模型也没用。
 
     火山方舟欠费时对**所有**模型返回 403 ``AccountOverdueError``；此时逐个换
-    模型只会白跑十几秒，应直接跳到免费池 / 备用通道。
+    模型只会白跑十几秒，应直接跳到后续链路。
     """
     msg = (str(exc) if exc is not None else "").lower()
     return any(

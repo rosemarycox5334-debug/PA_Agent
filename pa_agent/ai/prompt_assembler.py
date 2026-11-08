@@ -1361,7 +1361,7 @@ class PromptAssembler:
             previous_record.stage2_decision or {}, new_count
         )
         previous_summary = {
-            "meta": previous_record.meta.model_dump(),
+            "meta": {k: v for k, v in previous_record.meta.model_dump().items() if k != "ai_provider"},
             "stage1_diagnosis": prev_stage1_shifted,
             "stage2_decision": prev_stage2_shifted,
             "strategy_files_used": previous_record.strategy_files_used or [],
@@ -1441,7 +1441,7 @@ class PromptAssembler:
             previous_record.stage2_decision or {}, shift_n
         )
         previous_summary = {
-            "meta": previous_record.meta.model_dump(),
+            "meta": {k: v for k, v in previous_record.meta.model_dump().items() if k != "ai_provider"},
             "stage1_diagnosis": prev_stage1_shifted,
             "stage2_decision": prev_stage2_shifted,
             "strategy_files_used": previous_record.strategy_files_used or [],

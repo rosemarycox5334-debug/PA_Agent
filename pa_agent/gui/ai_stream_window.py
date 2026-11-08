@@ -635,7 +635,7 @@ class AIStreamPanel(QWidget):
     def _on_chat_progress(self, text: str) -> None:
         """Show the latest progress line on the phase label while a spare channel works.
 
-        Wording stays neutral (see the "备用通道" convention); the raw upstream
+        Wording stays neutral; the raw upstream
         reason is only ever logged.
         """
         lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]

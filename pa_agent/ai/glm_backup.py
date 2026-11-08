@@ -19,7 +19,7 @@ def _is_sensenova(base_url: str | None) -> bool:
 
 
 def is_ark_base(base_url: str | None) -> bool:
-    """方舟网关：同样允许挂 GLM 备用通道。"""
+    """额外网关也允许配置该备用链路。"""
     from pa_agent.ai.ark_gateway import is_ark_base as _ark
 
     return _ark(base_url)

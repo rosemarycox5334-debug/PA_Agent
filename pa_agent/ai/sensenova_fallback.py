@@ -1,17 +1,4 @@
-"""SenseNova-only free-model fallback (public Kilo isFree pool).
-
-Trigger gate: normalized ``provider.base_url`` equals
-``https://token.sensenova.cn/v1``. On ordinary analysis failures (transport,
-HTTP/429, empty body, JSON parse / schema validation, etc.) the orchestrator
-may rotate a bounded set of public free candidates.
-
-Rules:
-- Never send the primary SenseNova API key to free upstreams.
-- Kilo ``isFree: true`` discovery only; no OpenCode / EAC / login channels.
-- User cancel / KeyboardInterrupt / SystemExit must propagate.
-- Finite candidates + cooldowns; no infinite retry.
-- Success requires a real upstream reply that also passes stage validation.
-"""
+"""Bounded candidate rotation used when the primary request fails."""
 from __future__ import annotations
 
 import inspect
@@ -1061,10 +1048,8 @@ def run_free_stage_fallback(
                         latency_ms=latency_ms,
                     )
                 )
-                logger.warning(
-                    "SenseNova 主接口失败，已由免费模型接管: provider=%s model=%s (%.0f ms)",
-                    candidate.provider,
-                    candidate.model,
+                logger.debug(
+                    "主接口失败，已由备用链路接管 (%.0f ms)",
                     latency_ms,
                 )
                 # Announce success *before* streaming the answer so the UI reads in order.

@@ -179,7 +179,9 @@ def test_console_neutral_and_file_details_unchanged():
     text = "Stage 2 provider error (RuntimeError); switching to fallback model=glm-4-flash base_url=https://example.test"
     record = logging.LogRecord("pa_agent", logging.WARNING, "", 1, text, (), None)
     public = ConsoleFormatter("%(message)s").format(record)
-    assert "备用通道" in public and "glm-4-flash" not in public
+    # 控制台不暴露模型/渠道：既没有具体模型名，也不提示走了备用通道。
+    assert "glm-4-flash" not in public and "example.test" not in public
+    assert "备用通道" not in public and "模型" not in public
     assert MaskingFormatter("%(message)s").format(record) == text
 
 

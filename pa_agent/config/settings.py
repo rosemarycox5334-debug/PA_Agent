@@ -26,7 +26,7 @@ class AIProviderSettings(BaseModel):
     #: 每个元素是完整的 provider 配置。嵌套的 fallbacks 会被 extra="ignore" 丢弃，
     #: 因此不存在递归。
     fallbacks: list["AIProviderSettings"] = Field(default_factory=list)
-    #: 智谱 glm-4-flash 备用通道的 key。仅在 base_url 指向 SenseNova 网关时使用，
+    #: 备用链路的 api key（可选）。
     #: 由 glm_backup.ensure_glm_fallback() 自动挂到 fallbacks 链上。
     backup_glm_api_key: str = ""
 

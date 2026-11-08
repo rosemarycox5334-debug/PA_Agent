@@ -87,7 +87,7 @@ class AIModelSettingsDialog(QDialog):
         api_key_row.addWidget(self._show_key_btn)
         form.addRow("API Key:", api_key_row)
 
-        # GLM 备用通道 Key：仅当主通道是 SenseNova 网关时显示。
+        # 备用链路 Key：由主通道类型决定是否显示。
         self._glm_key_label = QLabel("GLM 备用 Key:")
         self._glm_key_edit = QLineEdit()
         self._glm_key_edit.setPlaceholderText("输入 GLM Key")

@@ -92,6 +92,11 @@ _SPARE_DIAGNOSTIC_MARKERS = (
     "free-chat spare-model",
     "free-chat spare channel",
     "free-chat follow-up answered",
+    # 内部降级细节一律不进控制台。
+    "free fallback triggered",
+    "free fallback exhausted",
+    "free fallback aborted",
+    "已由备用链路接管",
 )
 
 
@@ -155,23 +160,23 @@ class ConsoleFormatter(MaskingFormatter):
             # anything reaching here is a transient retry notice.
             text = "正在进行分析，请稍等。"
         elif "empty content" in message:
-            text = "备用通道返回内容为空，本次请求未完成。"
+            text = "本次请求未完成。"
         elif "update failed" in message:
-            text = "备用通道切换失败，正在检查其他通道。"
+            text = "正在重试。"
         elif "triggered" in message or "switching to fallback" in message:
-            text = "正在通过备用通道继续分析，请稍等。"
-        elif "已由免费模型接管" in message:
-            text = "备用通道分析完成，结果已通过校验。"
+            text = "正在进行分析，请稍等。"
+        elif "已由备用链路接管" in message:
+            text = "分析已完成，结果已通过校验。"
         elif "exhausted" in message:
-            text = "备用通道多次尝试均未成功，本阶段分析失败。"
+            text = "本阶段分析未完成。"
         elif "aborted" in message:
-            text = "备用通道发生异常，本阶段分析未完成。"
+            text = "本阶段分析未完成。"
         elif "listing failed" in message:
-            text = "备用通道暂时无法连接，请稍后重试。"
+            text = "服务暂时不可用，请稍后重试。"
         elif "validation failed" in message:
-            text = "本次返回未通过校验，正在尝试其他通道。"
+            text = "本次返回未通过校验，正在重试。"
         elif "miss:" in message:
-            text = "本次请求未成功，正在尝试其他通道，请稍等。"
+            text = "本次请求未成功，正在重试，请稍等。"
         else:
             text = "正在进行分析，请稍等。"
         public_record.msg = text

@@ -819,7 +819,7 @@ class JsonValidator:
                     obj.setdefault(
                         "terminal",
                         {"node_id": "relaxed", "outcome": "wait",
-                         "label": "备用通道返回，未提供决策链"},
+                         "label": "响应未提供决策链"},
                     )
                     obj.setdefault(
                         "diagnosis_summary",
@@ -830,7 +830,7 @@ class JsonValidator:
                         obj["next_bar_prediction"] = {
                             "direction": "neutral",
                             "probabilities": None,
-                            "reasoning": "备用通道未返回该字段",
+                            "reasoning": "响应未返回该字段",
                             "unpredictable": True,
                             "features_used": ["kline_features"],
                         }

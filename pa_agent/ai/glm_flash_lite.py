@@ -46,7 +46,7 @@ def local_diagnosis(frame: Any) -> dict[str, Any]:
 
 def build_messages(frame: Any, stage: str) -> list[dict[str, str]]:
     if stage == "stage1":
-        return [{"role": "system", "content": "备用通道：阶段一由本地代码提供兼容上下文，不请求模型。"}]
+        return [{"role": "system", "content": "阶段一由本地代码提供兼容上下文，不请求模型。"}]
     bars = [
         {"bar": f"K{b.seq}", "open": b.open, "high": b.high,
          "low": b.low, "close": b.close, "volume": b.volume}
@@ -78,17 +78,17 @@ def build_messages(frame: Any, stage: str) -> list[dict[str, str]]:
 def check_contract(obj: dict[str, Any]) -> str | None:
     decision = obj.get("decision")
     if not isinstance(decision, dict):
-        return "备用通道未返回有效决策"
+        return "响应未返回有效决策"
     if decision.get("order_type") not in ("限价单", "突破单", "市价单", "不下单"):
-        return "备用通道决策的下单类型无效"
+        return "响应中的下单类型无效"
     if not isinstance(decision.get("reasoning"), str) or not decision["reasoning"].strip():
-        return "备用通道未返回决策说明"
+        return "响应未返回决策说明"
     for key in ("next_bar_prediction", "next_cycle_prediction"):
         pred = obj.get(key)
         if not isinstance(pred, dict) or not isinstance(pred.get("reasoning"), str) or not pred["reasoning"].strip():
-            return "备用通道未返回完整未来走势预期"
+            return "响应未返回完整未来走势预期"
         if pred.get("direction") not in ("bullish", "bearish", "neutral", None):
-            return "备用通道走势预期方向无效"
+            return "走势预期方向无效"
     return None
 
 
