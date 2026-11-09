@@ -1602,7 +1602,9 @@ class TwoStageOrchestrator:
                 on_reasoning_token=on_reasoning_token,
                 on_content_token=on_content_token,
                 on_progress=on_progress,
-                stream=True,
+                # 免费池走非流式：带思考的路由（cohere 等）在流式下常把预算
+                # 全花在思考上、正文为空（reasoning-only），非流式可正常返回。
+                stream=False,
                 attempts_per_candidate=2,
             )
         except Exception as exc:

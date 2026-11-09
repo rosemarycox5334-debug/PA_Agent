@@ -16,13 +16,21 @@ logger = logging.getLogger(__name__)
 SENSENOVA_CANONICAL_BASE = "https://token.sensenova.cn/v1"
 
 KILO_BASE = "https://api.kilo.ai/api/gateway"
+#: 第二免密来源：OpenCode Zen 网关（公开免密额度，按会话计费）。
+OPENCODE_BASE = "https://opencode.ai/inference/v1"
+OPENCODE_MODELS = (
+    "deepseek-v4.1-flash-free",
+    "glm-5.3-flash-free",
+    "mimo-v2.6-flash-free",
+)
+OPENCODE_UA = "opencode/0.15.2 (Windows; x64)"
 _KILO_UA = "PA-Agent/sensenova-fallback"
 
 _LISTING_TTL_S = 30 * 60
 _COOLDOWN_S = 5 * 60
 _MAX_CANDIDATES = 6
 _DEFAULT_TIMEOUT_S = 120.0
-_DEFAULT_MAX_TOKENS = 8192
+_DEFAULT_MAX_TOKENS = 16384  # 思考与正文共享额度，8192 会让带思考的模型截断
 #: How often the spare channel reports that it is still waiting. The UI shows a
 #: live counter so a slow route does not look like a frozen window.
 _HEARTBEAT_S = 5.0
@@ -453,13 +461,20 @@ def build_candidates(
     ordered_kilo.extend(sorted(m for m in kilo_set if m in _UNSTABLE_KILO))
 
     out: list[FreeCandidate] = []
+    kilo_budget = max(0, max_candidates - len(OPENCODE_MODELS))
     for mid in ordered_kilo:
         cand = FreeCandidate("kilo", mid, KILO_BASE)
         if _in_cooldown(cand):
             continue
         out.append(cand)
-        if len(out) >= max_candidates:
+        if len(out) >= kilo_budget:
             break
+    # 第二来源：Kilo 全挂后才会轮到；失败按普通候选处理。
+    for mid in OPENCODE_MODELS:
+        cand = FreeCandidate("opencode", mid, OPENCODE_BASE)
+        if _in_cooldown(cand):
+            continue
+        out.append(cand)
     return out
 
 
@@ -583,14 +598,26 @@ def call_free_candidate(
 
         raise CancelledError("Request cancelled before free-model call")
 
-    if candidate.provider != "kilo":
+    if candidate.provider not in ("kilo", "opencode"):
         raise RuntimeError(f"unsupported free provider: {candidate.provider}")
 
-    headers: dict[str, str] = {
-        "content-type": "application/json",
-        "accept": "text/event-stream" if stream else "application/json",
-        "user-agent": _KILO_UA,
-    }
+    if candidate.provider == "kilo":
+        headers: dict[str, str] = {
+            "content-type": "application/json",
+            "accept": "text/event-stream" if stream else "application/json",
+            "user-agent": _KILO_UA,
+        }
+    else:
+        import uuid as _uuid
+
+        headers = {
+            "content-type": "application/json",
+            "accept": "text/event-stream" if stream else "application/json",
+            "user-agent": OPENCODE_UA,
+            "authorization": "Bearer public",
+            "x-opencode-client": "opencode",
+            "x-opencode-session": f"ses_{_uuid.uuid4().hex[:24]}",
+        }
     url = f"{candidate.base_url.rstrip('/')}/chat/completions"
 
     emitted: dict[str, bool] = {"reasoning": False, "content": False}
