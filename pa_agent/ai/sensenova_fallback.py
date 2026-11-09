@@ -53,22 +53,15 @@ _REASONING_CJK_SHARE_KILO: dict[str, float] = {
     "nvidia/nemotron-3.5-lightning:free": 0.146,
     "nvidia/nemotron-3.5-super-vl:free": 0.000,
     # 不产生隐藏推理：没有中文可谈，排最后
-    "poolside/laguna-s-2.1:free": -1.0,
     "stealth/glyph-cluster": -1.0,
 }
 
 _PREFERRED_KILO = (
-    # -- 中文思考的 --
-    "reflection/beam-free",                              # 中文 97%   269 字   4.0 秒（effort=minimal）
+    # 2026-11-09 复核：以下模型仍在网关 isFree 清单内，且都有实测的中文思考占比。
     "cohere/north-mini-code:free",                       # 中文 93%  1843 字  14.6 秒
-    # -- 中英混杂 --
-    "recursive/flint-v1.0:free",                         # 中文 46%  9131 字  20.9 秒
-    # -- 基本英文思考 --
     "openrouter/free",                                   # 中文 29%  1803 字  18.8 秒
     "nvidia/nemotron-3.5-lightning:free",                # 中文 15%  1732 字  11.3 秒
     "nvidia/nemotron-3.5-super-vl:free",                 # 中文  0%  1528 字   6.5 秒
-    # -- 不思考的，只作垫底 --
-    "poolside/laguna-s-2.1:free",                        # 无推理     0 字   8.7 秒
     "stealth/glyph-cluster",                             # 无推理     0 字  36.5 秒
 )
 
@@ -83,7 +76,6 @@ _REASONING_CHARS_KILO: dict[str, int] = {
     "nvidia/nemotron-3.5-super-vl:free": 1528,
     "reflection/beam-free": 269,
     "dots-studio/dots-3-note-preview:free": 8903,
-    "poolside/laguna-s-2.1:free": 0,
     "stealth/glyph-cluster": 0,
 }
 #: 实测确实会产生隐藏推理的路由（由上面的字数表派生，不手工维护）。

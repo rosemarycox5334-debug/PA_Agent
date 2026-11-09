@@ -574,15 +574,15 @@ def test_build_candidates_kilo_requires_is_free() -> None:
             "data": [
                 {"id": "paid/model", "isFree": False},
                 {"id": "free/model", "isFree": True},
-                {"id": "poolside/laguna-s-2.1:free", "isFree": True},
+                {"id": "cohere/north-mini-code:free", "isFree": True},
             ]
         }
 
     cands = build_candidates(http_get=_get, max_candidates=6)
     ids = [c.model for c in cands]
     assert "paid/model" not in ids
-    assert "poolside/laguna-s-2.1:free" in ids
-    assert ids[0] == "poolside/laguna-s-2.1:free"
+    assert "cohere/north-mini-code:free" in ids
+    assert ids[0] == "cohere/north-mini-code:free"
 
 
 def test_call_free_rejects_empty_reasoning_only_and_truncated() -> None:
