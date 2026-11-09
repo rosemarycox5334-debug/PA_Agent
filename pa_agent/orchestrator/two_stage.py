@@ -384,6 +384,13 @@ class TwoStageOrchestrator:
 
         ensure_glm_fallback(active)
         self._active_provider = active
+        # 必须同步给请求客户端，否则真正发出去的仍是配置里那个模型名。
+        try:
+            updater = getattr(self._client, "update_provider", None)
+            if callable(updater):
+                updater(active.model_copy(deep=True))
+        except Exception as exc:  # noqa: BLE001 - 同步失败不阻塞分析
+            logger.debug("候选同步到客户端失败：%s", exc)
 
     def _provider(self) -> Any:
         """Provider for the current request: in-run fallback wins, else config."""

@@ -69,6 +69,17 @@ def test_orchestrator_rotates_each_analysis(state_file):
                     "doubao-seed-2-1-lite-260915"]
 
 
+def test_rotation_reaches_the_request_client(state_file):
+    """轮换必须同步给请求客户端，否则实际发出的仍是配置里的模型名。"""
+    provider = AIProviderSettings(model="deepseek-flash", base_url=ARK_BASE_URL,
+                                   api_key="ark-key", thinking=True, reasoning_effort="low")
+    orch = _orch(provider)
+    orch._apply_ark_rotation()
+    sent = orch._client.update_provider.call_args[0][0]
+    assert sent.model == "kimi-k3-1-pro-261024"
+    assert orch._settings.provider.model == "deepseek-flash"
+
+
 def test_rotation_rebuilds_fallback_chain(state_file):
     provider = AIProviderSettings(model="deepseek-flash", base_url=ARK_BASE_URL,
                                    api_key="ark-key", thinking=True, reasoning_effort="low")
