@@ -332,7 +332,20 @@ class AkShareSource(DataSource):
         assert last_exc is not None
         raise last_exc
 
+    @staticmethod
+    def _baostock_primary_enabled() -> bool:
+        """PA_AGENT_BAOSTOCK_PRIMARY=1 时优先走 baostock，不再每轮先撞东财风控。"""
+        flag = os.environ.get("PA_AGENT_BAOSTOCK_PRIMARY", "").strip().lower()
+        return flag in {"1", "true", "yes"}
+
     def _fetch_history(self, symbol: str, timeframe: str, n: int) -> list[dict[str, Any]]:
+        if self._baostock_ok and self._baostock_primary_enabled():
+            try:
+                return self._fetch_history_baostock(symbol, timeframe, n)
+            except Exception as exc:
+                logger.warning(
+                    "Baostock 首选源失败 (%s): %s，回退 AkShare 主源", symbol, exc
+                )
         try:
             if timeframe == "1d":
                 return self._fetch_daily_ak(symbol, n)
