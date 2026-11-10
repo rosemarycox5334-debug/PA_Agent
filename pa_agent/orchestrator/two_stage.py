@@ -1590,7 +1590,9 @@ class TwoStageOrchestrator:
                 getattr(reply, "reasoning_content", None) or "",
             )
             if stage == "stage1":
-                return self._accept_fallback_stage1(result, content)
+                # 契约不满足时不再立刻退成本地规则：那会让第一个候选"看起来成功"，
+                # 后面的候选根本没机会被尝试。返回失败让循环换下一个。
+                return result
             return self._accept_fallback_stage2_quality(result, content)
 
         try:
@@ -1602,9 +1604,7 @@ class TwoStageOrchestrator:
                 on_reasoning_token=on_reasoning_token,
                 on_content_token=on_content_token,
                 on_progress=on_progress,
-                # 免费池走非流式：带思考的路由（cohere 等）在流式下常把预算
-                # 全花在思考上、正文为空（reasoning-only），非流式可正常返回。
-                stream=False,
+                stream=True,
                 attempts_per_candidate=2,
             )
         except Exception as exc:
