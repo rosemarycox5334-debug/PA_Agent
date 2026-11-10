@@ -83,7 +83,7 @@ def test_ark_primary_used_after_backup_fails():
     orch, client = _build(_ark_provider())
 
     def free_lane(_exc):
-        raise RuntimeError("free pool down")
+        raise RuntimeError("spare lane down")
 
     reply = _call(orch, free_lane=free_lane, state={"tried": False})
     assert reply is not None
@@ -97,7 +97,7 @@ def test_ark_pool_exhausted_then_glm():
     orch, client = _build(p, client_side_effect=RuntimeError("HTTP 500 server error"))
 
     def free_lane(_exc):
-        raise RuntimeError("free pool down")
+        raise RuntimeError("spare lane down")
 
     with pytest.raises(Exception):
         _call(orch, free_lane=free_lane, state={"tried": False})
@@ -118,7 +118,7 @@ def test_account_overdue_skips_ark_pool_after_free_fails():
 
     def free_lane(_exc):
         calls.append("free")
-        raise RuntimeError("free pool down")
+        raise RuntimeError("spare lane down")
 
     with pytest.raises(Exception):
         _call(orch, free_lane=free_lane, state={"tried": False})

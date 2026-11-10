@@ -4,7 +4,7 @@ The follow-up ("分析完成后可继续追问") path used to talk to the primar
 provider only. These tests pin the layered behaviour it now shares with the
 two-stage pipeline:
 
-  Layer 0 — spare channel (free pool), SenseNova primary only.
+  Layer 0 — spare channel (spare lane), SenseNova primary only.
   Layer 1 — settings.provider.fallbacks, applied in memory only.
 
 Cancellation must never be swallowed by the spare channels.
@@ -107,12 +107,12 @@ def _free_success(reply: MagicMock) -> FreeStageSuccess:
 
 
 # ---------------------------------------------------------------------------
-# Layer 0 — free pool
+# Layer 0 — spare lane
 # ---------------------------------------------------------------------------
 
 class TestFreePoolLayer:
     def test_primary_failure_answers_from_free_pool(self, monkeypatch):
-        """A failing primary is answered by the free pool, not surfaced to the user."""
+        """A failing primary is answered by the spare lane, not surfaced to the user."""
         client = MagicMock()
         client.stream_chat.side_effect = RuntimeError("primary 429")
         session = _make_session(client, _make_settings())
@@ -175,7 +175,7 @@ class TestFreePoolLayer:
         assert client.update_provider.call_args[0][0] is glm_provider
 
     def test_non_sensenova_primary_skips_free_pool(self, monkeypatch):
-        """A non-SenseNova primary never touches the free pool."""
+        """A non-SenseNova primary never touches the spare lane."""
         client = MagicMock()
         glm_provider = AIProviderSettings(
             model="glm-4-flash", base_url=GLM, api_key="glm-key", thinking=False

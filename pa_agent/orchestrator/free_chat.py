@@ -299,7 +299,7 @@ class FreeChatSession:
     ) -> AIReply:
         """Ask the primary provider, then the layered spare channels.
 
-        Layer 0 — spare channel (free pool): only for an eligible SenseNova
+        Layer 0 — spare channel: only for an eligible primary gateway
                   primary, exactly like the two-stage pipeline.
         Layer 1 — ``settings.provider.fallbacks`` (e.g. glm-4-flash), applied in
                   memory only; settings.json is never rewritten.
@@ -424,7 +424,7 @@ class FreeChatSession:
         on_content_token: "Callable[[str], None] | None",
         on_progress: "Callable[[str], None] | None",
     ) -> AIReply | None:
-        """Layer 0: rotate the free pool and accept the first usable answer."""
+        """Layer 0: rotate the spare candidates and accept the first usable answer."""
         if self._settings is None:
             return None
         provider = getattr(self._settings, "provider", None)

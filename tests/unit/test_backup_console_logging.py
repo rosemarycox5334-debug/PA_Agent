@@ -6,7 +6,7 @@ from pa_agent.util.logging import ConsoleFormatter, MaskingFormatter, _LOG_FORMA
 
 
 @pytest.mark.parametrize('name,message', [
-    ('pa_agent.ai.sensenova_fallback', 'SenseNova 主接口失败，已由免费模型接管: provider=kilo model=inclusionai/ling-3.1-flash (30000 ms)'),
+    ('pa_agent.ai.sensenova_fallback', 'SenseNova 主接口失败，已由备用模型接管: provider=kilo model=inclusionai/ling-3.1-flash (30000 ms)'),
     ('pa_agent.ai.sensenova_fallback', 'SenseNova free fallback miss: kilo/nvidia/nemotron:free (https://api.kilo.ai 429)'),
     ('pa_agent.ai.sensenova_fallback', 'Kilo free listing failed: API unreachable'),
     ('pa_agent.ai.sensenova_fallback', 'SenseNova free fallback validation failed: kilo/model:free (schema)'),

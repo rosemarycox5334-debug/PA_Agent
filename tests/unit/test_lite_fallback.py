@@ -381,7 +381,7 @@ class TestFollowUpWiring:
             called.append(1)
             return MagicMock()
 
-        # Keep the free pool offline: this test is about the spare model being
+        # Keep the spare lane offline: this test is about the spare model being
         # skipped, not about which channel eventually answers.
         from pa_agent.ai.sensenova_fallback import FreeStageFailure
 

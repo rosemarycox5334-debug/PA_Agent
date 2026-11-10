@@ -20,7 +20,7 @@ Contract of this module:
 * ``max_tokens=16384``, ``reasoning_effort=low``, **streaming** — reasoning and
   answer reach the pane as they are produced, and a heartbeat line reports the
   wait every few seconds so the UI never looks frozen.
-* Returns ``None`` on any failure so the caller falls through to the free pool
+* Returns ``None`` on any failure so the caller falls through to the next layer
   and then to the configured provider chain. Cancellation always propagates.
 """
 from __future__ import annotations
@@ -262,7 +262,7 @@ def try_lite_stage(
     Reasoning and answer are streamed to the callbacks while the call runs, so
     the UI shows progress instead of a frozen pane. Cancellation is checked
     before the call and re-raised; everything else returns ``None`` so the
-    caller can fall through to the free pool unchanged.
+    caller can fall through to the next layer unchanged.
     """
     if not is_lite_eligible(base_url):
         return None
