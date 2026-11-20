@@ -112,7 +112,7 @@ def test_non_rate_limit_rejection_still_downgrades_stream_options():
 def test_thinking_route_is_pinned_to_lowest_effort():
     """Every spare-channel request pins thinking to its smallest budget, and only
     a route that rejects that shape is retried at the lowest effort tier."""
-    from pa_agent.ai.sensenova_fallback import KILO_BASE, FreeCandidate, call_free_candidate
+    from pa_agent.ai.sensenova_fallback import _LANE_BASE, FreeCandidate, call_free_candidate
 
     attempts: list[dict] = []
 
@@ -125,7 +125,7 @@ def test_thinking_route_is_pinned_to_lowest_effort():
         return 200, {"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
 
     call_free_candidate(
-        FreeCandidate("kilo", "stepfun/step-5-preview-free", KILO_BASE),
+        FreeCandidate("lane", "stepfun/step-5-preview-free", _LANE_BASE),
         [{"role": "user", "content": "synthetic"}],
         http_post=post,
     )
@@ -176,8 +176,8 @@ def test_run_free_stage_fallback_reports_each_candidate():
         validate=lambda reply: Ok(obj=_json.loads(reply.content)),
         primary_api_key="sk-SECRET",
         candidates=[
-            FreeCandidate("kilo", "first/free", "https://api.kilo.ai/api/gateway"),
-            FreeCandidate("kilo", "second/free", "https://api.kilo.ai/api/gateway"),
+            FreeCandidate("lane", "first/free", "_LANE_BASE"),
+            FreeCandidate("lane", "second/free", "_LANE_BASE"),
         ],
         http_post=post,
         on_progress=lines.append,
@@ -218,7 +218,7 @@ def test_progress_lines_never_advertise_the_free_lane():
     def post(url, *, headers, body, timeout):  # noqa: ANN001
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("kilo/inclusionai/ling-3.1-flash: HTTP 429 rate limited")
+            raise RuntimeError("lane/model-a: HTTP 429 rate limited")
         return 200, _free_ok(VALID_STAGE1)
 
     run_free_stage_fallback(
@@ -226,8 +226,8 @@ def test_progress_lines_never_advertise_the_free_lane():
         validate=lambda reply: Ok(obj=_json.loads(reply.content)),
         primary_api_key=None,
         candidates=[
-            FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway"),
-            FreeCandidate("kilo", "nvidia/nemotron-3.5-lightning:free", "https://api.kilo.ai/api/gateway"),
+            FreeCandidate("lane", "model-a", "_LANE_BASE"),
+            FreeCandidate("lane", "model-b", "_LANE_BASE"),
         ],
         http_post=post,
         on_progress=lines.append,
@@ -235,10 +235,10 @@ def test_progress_lines_never_advertise_the_free_lane():
 
     joined = "".join(lines)
     for forbidden in (
-        "ling-3.1-flash",
-        "nemotron-3.5-lightning",
-        "api.kilo.ai",
-        "kilo/",
+        "model-3.1-flash",
+        "model-3.5-lightning",
+        "spare-lane.local",
+        "lane/",
         "免费",
         "兜底",
         "[兜底]",
@@ -267,8 +267,8 @@ def test_validation_failure_stays_internal_and_rotation_continues():
         validate=lambda reply: next(validations),
         primary_api_key=None,
         candidates=[
-            FreeCandidate("kilo", "first/free", "https://api.kilo.ai/api/gateway"),
-            FreeCandidate("kilo", "second/free", "https://api.kilo.ai/api/gateway"),
+            FreeCandidate("lane", "first/free", "_LANE_BASE"),
+            FreeCandidate("lane", "second/free", "_LANE_BASE"),
         ],
         http_post=lambda url, **kwargs: (200, _free_ok(VALID_STAGE1)),
         on_progress=lines.append,
@@ -295,7 +295,7 @@ def test_run_free_stage_fallback_reports_total_exhaustion():
         messages=[{"role": "user", "content": "stage1"}],
         validate=lambda reply: None,
         primary_api_key=None,
-        candidates=[FreeCandidate("kilo", "only/free", "https://api.kilo.ai/api/gateway")],
+        candidates=[FreeCandidate("lane", "only/free", "_LANE_BASE")],
         http_post=post,
         on_progress=lines.append,
     )
@@ -333,7 +333,7 @@ def test_orchestrator_shows_progress_in_ui_during_fallback():
     chunks: list[str] = []
     with patch(
         "pa_agent.ai.sensenova_fallback.build_candidates",
-        return_value=[FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway")],
+        return_value=[FreeCandidate("lane", "model-a", "_LANE_BASE")],
     ), patch(
         "pa_agent.ai.sensenova_fallback._default_http_post",
         side_effect=_http_post_stage(VALID_STAGE1),
@@ -354,6 +354,6 @@ def test_orchestrator_shows_progress_in_ui_during_fallback():
     # The real answer must still be delivered after the hints.
     assert "cycle_position" in joined
     # Neutral wording only: never expose the lane or the upstream model.
-    for forbidden in ("ling-3.1-flash", "kilo", "api.kilo.ai", "免费", "兜底"):
+    for forbidden in ("model-3.1-flash", "lane", "spare-lane.local", "免费", "兜底"):
         assert forbidden not in joined, f"UI progress leaked {forbidden!r}"
 

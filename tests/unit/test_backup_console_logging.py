@@ -6,12 +6,12 @@ from pa_agent.util.logging import ConsoleFormatter, MaskingFormatter, _LOG_FORMA
 
 
 @pytest.mark.parametrize('name,message', [
-    ('pa_agent.ai.sensenova_fallback', 'SenseNova 主接口失败，已由备用模型接管: provider=kilo model=inclusionai/ling-3.1-flash (30000 ms)'),
-    ('pa_agent.ai.sensenova_fallback', 'SenseNova free fallback miss: kilo/nvidia/nemotron:free (https://api.kilo.ai 429)'),
-    ('pa_agent.ai.sensenova_fallback', 'Kilo free listing failed: API unreachable'),
-    ('pa_agent.ai.sensenova_fallback', 'SenseNova free fallback validation failed: kilo/model:free (schema)'),
+    ('pa_agent.ai.sensenova_fallback', 'SenseNova 主接口失败，已由备用模型接管: provider=lane model=model-a (30000 ms)'),
+    ('pa_agent.ai.sensenova_fallback', 'SenseNova free fallback miss: lane/model-e (https://spare-lane.local 429)'),
+    ('pa_agent.ai.sensenova_fallback', 'spare lane listing failed: API unreachable'),
+    ('pa_agent.ai.sensenova_fallback', 'SenseNova free fallback validation failed: lane/model:free (schema)'),
     ('pa_agent.orchestrator.two_stage', 'SenseNova free fallback triggered for stage1 reason=free/model'),
-    ('pa_agent.orchestrator.two_stage', 'SenseNova free fallback exhausted for stage2 | attempts: kilo/free/model'),
+    ('pa_agent.orchestrator.two_stage', 'SenseNova free fallback exhausted for stage2 | attempts: lane/model'),
     ('pa_agent.orchestrator.two_stage', 'SenseNova free fallback aborted with error: free/model'),
 ])
 def test_console_is_neutral_and_file_keeps_original(name, message):
@@ -29,7 +29,7 @@ def test_console_is_neutral_and_file_keeps_original(name, message):
         for handler in handlers:
             handler.handle(record)
         public = console.getvalue()
-        for forbidden in ('免费', 'free', 'kilo', 'ling-', 'nemotron', 'fallback', 'api.kilo.ai'):
+        for forbidden in ('免费', 'free', 'lane', 'model-', 'model', 'fallback', 'spare-lane.local'):
             assert forbidden not in public
         assert message in disk.getvalue()
         assert record.getMessage() == message

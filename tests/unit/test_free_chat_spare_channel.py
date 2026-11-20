@@ -100,7 +100,7 @@ def _make_session(client: MagicMock, settings: Settings | None = None) -> FreeCh
 def _free_success(reply: MagicMock) -> FreeStageSuccess:
     return FreeStageSuccess(
         reply=reply,
-        candidate=SimpleNamespace(provider="kilo", model="lightning"),
+        candidate=SimpleNamespace(provider="lane", model="lightning"),
         result=None,
         attempts=[],
     )

@@ -10,11 +10,12 @@ from pa_agent.ai.sensenova_fallback import (
     FreeCandidate,
     FreeStageFailure,
     FreeStageSuccess,
+    _LANE_BASE,
     reset_fallback_state_for_tests,
     run_free_stage_fallback,
 )
 
-BASE = "https://api.kilo.ai/api/gateway"
+BASE = _LANE_BASE
 MESSAGES = [{"role": "user", "content": "stage2"}]
 
 
@@ -26,7 +27,7 @@ def _clear_fallback_state() -> None:
 
 
 def _cand(name: str) -> FreeCandidate:
-    return FreeCandidate("kilo", name, BASE)
+    return FreeCandidate("lane", name, BASE)
 
 
 def _payload(model: str, content: str, *, reasoning: str = "") -> tuple[int, dict]:

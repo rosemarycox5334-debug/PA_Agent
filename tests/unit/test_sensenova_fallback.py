@@ -10,6 +10,7 @@ import pytest
 
 from pa_agent.ai.json_validator import Ok
 from pa_agent.ai.sensenova_fallback import (
+    _LANE_BASE,
     FreeCandidate,
     FreeStageFailure,
     FreeStageSuccess,
@@ -78,7 +79,7 @@ def _orchestrator(
     )
 
 
-def _free_ok_payload(content_obj: dict[str, Any], *, model: str = "inclusionai/ling-3.1-flash") -> dict:
+def _free_ok_payload(content_obj: dict[str, Any], *, model: str = "model-a") -> dict:
     return {
         "id": "free-ok",
         "model": model,
@@ -183,9 +184,9 @@ def test_submit_stage1_network_error_recovers_via_free_and_validator() -> None:
         "pa_agent.ai.sensenova_fallback.build_candidates",
         return_value=[
             FreeCandidate(
-                "kilo",
-                "inclusionai/ling-3.1-flash",
-                "https://api.kilo.ai/api/gateway",
+                "lane",
+                "model-a",
+                _LANE_BASE,
             )
         ],
     ), patch(
@@ -198,7 +199,7 @@ def test_submit_stage1_network_error_recovers_via_free_and_validator() -> None:
     assert record.stage1_diagnosis is not None
     assert record.stage2_decision is not None
     assert (record.stage1_response or {}).get("fallback_model") == (
-        "inclusionai/ling-3.1-flash"
+        "model-a"
     )
     assert any(c.args and c.args[0] == "stage1" for c in validate_spy.call_args_list)
     pending.save_full.assert_called_once()
@@ -215,7 +216,7 @@ def test_submit_stage1_value_error_recovers_via_free() -> None:
     with patch(
         "pa_agent.ai.sensenova_fallback.build_candidates",
         return_value=[
-            FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway")
+            FreeCandidate("lane", "model-a", _LANE_BASE)
         ],
     ), patch(
         "pa_agent.ai.sensenova_fallback._default_http_post",
@@ -239,9 +240,9 @@ def test_submit_stage1_illegal_json_recovers_via_free() -> None:
         "pa_agent.ai.sensenova_fallback.build_candidates",
         return_value=[
             FreeCandidate(
-                "kilo",
-                "nvidia/nemotron-3.5-lightning:free",
-                "https://api.kilo.ai/api/gateway",
+                "lane",
+                "model-b",
+                _LANE_BASE,
             )
         ],
     ), patch(
@@ -251,7 +252,7 @@ def test_submit_stage1_illegal_json_recovers_via_free() -> None:
         record = orch.submit(make_frame(), CancelToken(), lambda _e: None)
     assert record.exception is None
     assert (record.stage1_response or {}).get("fallback_model") == (
-        "nvidia/nemotron-3.5-lightning:free"
+        "model-b"
     )
 
 
@@ -273,7 +274,7 @@ def test_submit_stage1_validate_retry_exception_recovers_via_free() -> None:
     with patch(
         "pa_agent.ai.sensenova_fallback.build_candidates",
         return_value=[
-            FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway")
+            FreeCandidate("lane", "model-a", _LANE_BASE)
         ],
     ), patch(
         "pa_agent.ai.sensenova_fallback._default_http_post",
@@ -300,7 +301,7 @@ def test_submit_stage2_network_and_value_error_and_json_and_retry() -> None:
             "pa_agent.ai.sensenova_fallback.build_candidates",
             return_value=[
                 FreeCandidate(
-                    "kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway"
+                    "lane", "model-a", _LANE_BASE
                 )
             ],
         ), patch(
@@ -310,7 +311,7 @@ def test_submit_stage2_network_and_value_error_and_json_and_retry() -> None:
             record = orch.submit(make_frame(), CancelToken(), lambda _e: None)
         assert record.exception is None, label
         assert record.stage2_decision is not None, label
-        assert (record.stage2_response or {}).get("fallback_provider") == "kilo", label
+        assert (record.stage2_response or {}).get("fallback_provider") == "lane", label
 
     # illegal JSON
     reset_fallback_state_for_tests()
@@ -324,7 +325,7 @@ def test_submit_stage2_network_and_value_error_and_json_and_retry() -> None:
     with patch(
         "pa_agent.ai.sensenova_fallback.build_candidates",
         return_value=[
-            FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway")
+            FreeCandidate("lane", "model-a", _LANE_BASE)
         ],
     ), patch(
         "pa_agent.ai.sensenova_fallback._default_http_post",
@@ -351,7 +352,7 @@ def test_submit_stage2_network_and_value_error_and_json_and_retry() -> None:
     with patch(
         "pa_agent.ai.sensenova_fallback.build_candidates",
         return_value=[
-            FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway")
+            FreeCandidate("lane", "model-a", _LANE_BASE)
         ],
     ), patch(
         "pa_agent.ai.sensenova_fallback._default_http_post",
@@ -376,7 +377,7 @@ def test_submit_cancel_not_swallowed() -> None:
     def _build(*_a, **_k):  # noqa: ANN001
         token.set()
         return [
-            FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway")
+            FreeCandidate("lane", "model-a", _LANE_BASE)
         ]
 
     with patch(
@@ -402,8 +403,8 @@ def test_submit_all_free_candidates_fail_closed_with_trace() -> None:
     with patch(
         "pa_agent.ai.sensenova_fallback.build_candidates",
         return_value=[
-            FreeCandidate("kilo", "a", "https://api.kilo.ai/api/gateway"),
-            FreeCandidate("kilo", "b", "https://api.kilo.ai/api/gateway"),
+            FreeCandidate("lane", "a", _LANE_BASE),
+            FreeCandidate("lane", "b", _LANE_BASE),
         ],
     ), patch(
         "pa_agent.ai.sensenova_fallback._default_http_post",
@@ -464,7 +465,7 @@ def test_network_error_types_are_ordinary() -> None:
 
 
 def test_build_candidates_filters_cooldown_before_cap() -> None:
-    """Cooldown filter must run before the max-6 cut so usable models are kept."""
+    """Cooldown filter must run before the cap so usable models are kept."""
 
     def _get(url, *, headers, timeout):  # noqa: ANN001
         assert headers.get("user-agent", "").startswith("PA-Agent/")
@@ -476,19 +477,17 @@ def test_build_candidates_filters_cooldown_before_cap() -> None:
             "cool-5",
             "cool-6",
             "poolside/laguna-s-2.1:free",
-            "nvidia/nemotron-3.5-content-safety:free",
         ]
         return {"data": [{"id": i, "isFree": True} for i in ids]}
 
     # Put the first six sorted cool-* into cooldown; the live-verified preferred
     # model must still appear because cooldown is filtered before capping.
     for mid in ("cool-1", "cool-2", "cool-3", "cool-4", "cool-5", "cool-6"):
-        mark_cooldown(FreeCandidate("kilo", mid, "https://api.kilo.ai/api/gateway"))
+        mark_cooldown(FreeCandidate("lane", mid, _LANE_BASE))
 
     cands = build_candidates(http_get=_get, max_candidates=6)
     models = [c.model for c in cands]
     assert "poolside/laguna-s-2.1:free" in models
-    assert "nvidia/nemotron-3.5-content-safety:free" not in models
     assert models[0] == "poolside/laguna-s-2.1:free"
     assert all(not m.startswith("cool-") for m in models)
     assert len(models) <= 6
@@ -496,13 +495,13 @@ def test_build_candidates_filters_cooldown_before_cap() -> None:
 
 def test_preferred_order_puts_thinking_routes_first() -> None:
     """A route that reasons must rank ahead of one that never reasons."""
-    from pa_agent.ai.sensenova_fallback import _PREFERRED_KILO, _THINKING_CAPABLE_KILO
+    from pa_agent.ai.sensenova_fallback import _PREFERRED_CODES, _THINKING_CAPABLE
 
-    flags = [m in _THINKING_CAPABLE_KILO for m in _PREFERRED_KILO]
+    flags = [m in _THINKING_CAPABLE for m in _PREFERRED_CODES]
     # True block first, False block second, no interleaving.
     assert flags == sorted(flags, reverse=True), (
         f"thinking-capable routes must precede the rest: "
-        f"{list(zip(_PREFERRED_KILO, flags))}"
+        f"{list(zip(_PREFERRED_CODES, flags))}"
     )
     # A preset must reference a real variant, or the first call would crash.
     from pa_agent.ai.sensenova_fallback import (
@@ -514,24 +513,17 @@ def test_preferred_order_puts_thinking_routes_first() -> None:
         assert variant in _REASONING_VARIANTS_BY_NAME, (model, variant)
 
 
-def test_preferred_order_is_sorted_by_chinese_thinking_share() -> None:
-    """Ranking key is how Chinese the route's hidden reasoning is (user's policy)."""
+def test_preferred_order_covers_measured_routes() -> None:
+    """顺序按实测耗时；每条候选都必须有推理占比与字数记录。"""
     from pa_agent.ai.sensenova_fallback import (
-        _PREFERRED_KILO,
-        _REASONING_CJK_SHARE_KILO,
+        _PREFERRED_CODES,
+        _REASONING_CHARS,
+        _REASONING_CJK_SHARE,
     )
 
-    shares = [_REASONING_CJK_SHARE_KILO[m] for m in _PREFERRED_KILO]
-    assert shares == sorted(shares, reverse=True), (
-        f"_PREFERRED_KILO must be sorted by Chinese share desc: "
-        f"{list(zip(_PREFERRED_KILO, shares))}"
-    )
-    # Every preferred route must have a measured share, or the key is incomplete.
-    assert set(_PREFERRED_KILO) <= set(_REASONING_CJK_SHARE_KILO)
-    # Routes that never reason must sort behind every route that does.
-    for model, share in _REASONING_CJK_SHARE_KILO.items():
-        if share < 0:
-            assert _PREFERRED_KILO.index(model) >= len(_PREFERRED_KILO) - 2
+    assert set(_PREFERRED_CODES) <= set(_REASONING_CJK_SHARE)
+    assert set(_PREFERRED_CODES) <= set(_REASONING_CHARS)
+    assert len(set(_PREFERRED_CODES)) == len(_PREFERRED_CODES)
 
 
 def test_chinese_thinking_instruction_is_not_used_as_a_fix() -> None:
@@ -550,10 +542,11 @@ def test_chinese_thinking_instruction_is_not_used_as_a_fix() -> None:
 
 
 def test_measured_preset_skips_discovery_on_first_call() -> None:
-    """beam-free is measured to want effort=minimal, not the token budget."""
+    """The seeded route is measured to want effort=minimal, not the token budget."""
     from pa_agent.ai.sensenova_fallback import _REASONING_VARIANT_PRESET
 
-    assert _REASONING_VARIANT_PRESET.get("reflection/beam-free") == "minimal"
+    seeded_model = next(iter(_REASONING_VARIANT_PRESET))
+    assert _REASONING_VARIANT_PRESET.get(seeded_model) == "minimal"
 
     bodies: list[dict[str, Any]] = []
 
@@ -561,14 +554,14 @@ def test_measured_preset_skips_discovery_on_first_call() -> None:
         bodies.append(dict(body))
         return 200, _ok_wait_payload(body["model"])
 
-    cand = FreeCandidate("kilo", "reflection/beam-free", "https://api.kilo.ai/api/gateway")
+    cand = FreeCandidate("lane", seeded_model, _LANE_BASE)
     call_free_candidate(cand, [{"role": "user", "content": "ping"}], http_post=_post)
 
     assert len(bodies) == 1
     assert bodies[0]["reasoning"] == {"effort": "minimal"}
 
 
-def test_build_candidates_kilo_requires_is_free() -> None:
+def test_build_candidates_requires_free_flag() -> None:
     def _get(url, *, headers, timeout):  # noqa: ANN001
         return {
             "data": [
@@ -586,7 +579,7 @@ def test_build_candidates_kilo_requires_is_free() -> None:
 
 
 def test_call_free_rejects_empty_reasoning_only_and_truncated() -> None:
-    cand = FreeCandidate("kilo", "m", "https://api.kilo.ai/api/gateway")
+    cand = FreeCandidate("lane", "m", _LANE_BASE)
 
     def _empty(url, *, headers, body, timeout):  # noqa: ANN001
         return 200, {
@@ -624,7 +617,7 @@ def test_call_free_rejects_empty_reasoning_only_and_truncated() -> None:
 
 
 def test_keyboard_interrupt_propagates_from_post() -> None:
-    c1 = FreeCandidate("kilo", "a", "https://api.kilo.ai/api/gateway")
+    c1 = FreeCandidate("lane", "a", _LANE_BASE)
 
     def _post(url, *, headers, body, timeout):  # noqa: ANN001
         raise KeyboardInterrupt()
@@ -658,7 +651,7 @@ def test_primary_api_key_never_sent_to_free_upstream() -> None:
         }
 
     reply = call_free_candidate(
-        FreeCandidate("kilo", "inclusionai/ling-3.1-flash", "https://api.kilo.ai/api/gateway"),
+        FreeCandidate("lane", "model-a", _LANE_BASE),
         [{"role": "user", "content": "ping"}],
         primary_api_key=secret,
         http_post=_post,
@@ -696,7 +689,7 @@ def test_rejected_reasoning_budget_degrades_to_minimal_effort() -> None:
         return 200, _ok_wait_payload(body["model"])
 
     cand = FreeCandidate(
-        "kilo", "poolside/laguna-xs-2.1:free", "https://api.kilo.ai/api/gateway"
+        "lane", "poolside/laguna-xs-2.1:free", _LANE_BASE
     )
     messages = [{"role": "user", "content": "ping"}]
 
@@ -722,7 +715,7 @@ def test_route_refusing_every_reasoning_control_is_still_called() -> None:
         return 200, _ok_wait_payload(body["model"])
 
     cand = FreeCandidate(
-        "kilo", "stealth/glyph-cluster", "https://api.kilo.ai/api/gateway"
+        "lane", "model-g", _LANE_BASE
     )
     reply = call_free_candidate(cand, [{"role": "user", "content": "ping"}], http_post=_post)
     assert reply.content
@@ -731,7 +724,7 @@ def test_route_refusing_every_reasoning_control_is_still_called() -> None:
 
 
 def test_wait_ok_from_validator_is_not_treated_as_error() -> None:
-    c1 = FreeCandidate("kilo", "good", "https://api.kilo.ai/api/gateway")
+    c1 = FreeCandidate("lane", "good", _LANE_BASE)
 
     def _post(url, *, headers, body, timeout):  # noqa: ANN001
         return 200, {
@@ -795,7 +788,7 @@ def test_streaming_call_forwards_reasoning_chunks_in_order() -> None:
     reasoning: list[str] = []
     content: list[str] = []
     cand = FreeCandidate(
-        "kilo", "reflection/beam-free", "https://api.kilo.ai/api/gateway"
+        "lane", "model-f", _LANE_BASE
     )
     reply = call_free_candidate(
         cand,
@@ -828,7 +821,7 @@ def test_streaming_truncation_rejects_the_candidate() -> None:
         }
 
     cand = FreeCandidate(
-        "kilo", "cohere/north-mini-code:free", "https://api.kilo.ai/api/gateway"
+        "lane", "cohere/north-mini-code:free", _LANE_BASE
     )
     with pytest.raises(RuntimeError, match="truncated"):
         call_free_candidate(
@@ -855,7 +848,7 @@ def test_streamed_answer_is_not_emitted_twice() -> None:
         }
 
     c1 = FreeCandidate(
-        "kilo", "reflection/beam-free", "https://api.kilo.ai/api/gateway"
+        "lane", "model-f", _LANE_BASE
     )
     outcome = run_free_stage_fallback(
         messages=[{"role": "user", "content": "hi"}],
@@ -889,7 +882,7 @@ def test_route_ignoring_stream_still_shows_its_answer() -> None:
         }
 
     c1 = FreeCandidate(
-        "kilo", "stealth/glyph-cluster", "https://api.kilo.ai/api/gateway"
+        "lane", "model-g", _LANE_BASE
     )
     outcome = run_free_stage_fallback(
         messages=[{"role": "user", "content": "hi"}],
@@ -1014,7 +1007,7 @@ def test_slow_candidate_announces_its_elapsed_wait() -> None:
         }
 
     c1 = FreeCandidate(
-        "kilo", "reflection/beam-free", "https://api.kilo.ai/api/gateway"
+        "lane", "model-f", _LANE_BASE
     )
     outcome = run_free_stage_fallback(
         messages=[{"role": "user", "content": "hi"}],

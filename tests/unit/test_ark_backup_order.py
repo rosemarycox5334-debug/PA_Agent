@@ -70,7 +70,7 @@ def test_ark_backup_runs_before_primary():
 
     def free_lane(_exc):
         seen.append("free")
-        return (_reply(), None, {"fallback_provider": "kilo"})
+        return (_reply(), None, {"fallback_provider": "lane"})
 
     reply = _call(orch, free_lane=free_lane, state={"tried": False})
     assert reply is not None
@@ -134,7 +134,7 @@ def test_ark_primary_used_when_backup_only_returns_local_fallback():
     def free_lane(_exc):
         local = AIReply(content='{}', reasoning_content="", raw={"source": "local_compatibility"},
                         usage=AIUsage(), request_id="local", latency_ms=0.0)
-        return (local, None, {"fallback_provider": "kilo"})
+        return (local, None, {"fallback_provider": "lane"})
 
     reply = _call(orch, free_lane=free_lane, state={"tried": False})
     assert reply is not None

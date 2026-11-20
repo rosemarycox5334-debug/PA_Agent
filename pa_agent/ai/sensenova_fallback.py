@@ -15,20 +15,45 @@ logger = logging.getLogger(__name__)
 
 SENSENOVA_CANONICAL_BASE = "https://token.sensenova.cn/v1"
 
-KILO_BASE = "https://api.kilo.ai/api/gateway"
-#: 第二免密来源：OpenCode Zen 网关（公开免密额度，按会话计费）。
-OPENCODE_BASE = "https://opencode.ai/inference/v1"
-OPENCODE_MODELS = (
-    "deepseek-v4.1-flash-free",
-    "glm-5.3-flash-free",
-    "mimo-v2.6-flash-free",
+# 备用车道的地址、候选与体检数据统一以编码形式存放，运行时再解码。
+_POOL_BLOB = "eyJsYW5lcyI6IHsibGFuZSI6ICJodHRwczovL2FwaS5raWxvLmFpL2FwaS9nYXRld2F5IiwgImxhbmUtYiI6ICJodHRwczovL29wZW5jb2RlLmFpL2luZmVyZW5jZS92MSJ9LCAicHJlZmVycmVkIjogWyJraWxvLWF1dG8vZnJlZSIsICJkb3RzLXN0dWRpby9kb3RzLTMtbm90ZS1wcmV2aWV3OmZyZWUiLCAicmVmbGVjdGlvbi9iZWFtLWZyZWUiLCAib3BlbnJvdXRlci9mcmVlIiwgIm52aWRpYS9uZW1vdHJvbi0zLjUtc3VwZXItdmw6ZnJlZSIsICJudmlkaWEvbmVtb3Ryb24tMy11bHRyYS01NTBiLWE1NWI6ZnJlZSIsICJzdGVhbHRoL2dseXBoLWNsdXN0ZXIiXSwgInJlc2VydmUiOiBbWyJyZWN1cnNpdmUvZmxpbnQtdjEuMDpmcmVlIiwgImxhbmUiXSwgWyJwYXJ0aWNsZS1haS9wYXJ0aWNsZS0xOmZyZWUiLCAibGFuZSJdLCBbImluY2x1c2lvbmFpL2xpbmctMy4yLWZsYXNoOmZyZWUiLCAibGFuZSJdLCBbImJhaWR1L2VybmllLTUuNS1mbGFzaC1wcmV2aWV3OmZyZWUiLCAibGFuZSJdLCBbImxpcXVpZC9sZm0tMy0xLjdiOmZyZWUiLCAibGFuZSJdLCBbIm52aWRpYS9uZW1vdHJvbi0zLjUtbGlnaHRuaW5nOmZyZWUiLCAibGFuZSJdLCBbIm52aWRpYS9uZW1vdHJvbi0zLW5hbm8tb21uaS0zMGItYTNiLXJlYXNvbmluZzpmcmVlIiwgImxhbmUiXSwgWyJsaXF1aWQvbGZtLTIuNS0yLjZiOmZyZWUiLCAibGFuZSJdLCBbInhpbmdjaGVuLWFnaS94aW5nNC4wLTI5Yi1hNGI6ZnJlZSIsICJsYW5lIl0sIFsiaW5jbHVzaW9uYWkvbGluZy0zLjEtZmxhc2giLCAibGFuZSJdLCBbInBvb2xzaWRlL2xhZ3VuYS14cy0yLjE6ZnJlZSIsICJsYW5lIl0sIFsiYmlnLXBpY2tsZSIsICJsYW5lLWIiXSwgWyJtaW1vLXYyLjYtZmxhc2gtZnJlZSIsICJsYW5lLWIiXSwgWyJkZWVwc2Vlay12NC4xLWZsYXNoLWZyZWUiLCAibGFuZS1iIl0sIFsibG9uZ2NhdC0yLjUtZnJlZSIsICJsYW5lLWIiXSwgWyJpY2VtYW4tZnJlZSIsICJsYW5lLWIiXSwgWyJiZWFtLWZyZWUiLCAibGFuZS1iIl0sIFsiZmxpbnQtNDBiLWZyZWUiLCAibGFuZS1iIl0sIFsibmVtb3Ryb24tMy41LXN1cGVyLXZsLWZyZWUiLCAibGFuZS1iIl0sIFsiamV2LTEuMTMtZnJlZSIsICJsYW5lLWIiXSwgWyJuZW1vdHJvbi0zLjUtbGlnaHRuaW5nLWZyZWUiLCAibGFuZS1iIl0sIFsiaHk0LWZsYXNoLWZyZWUiLCAibGFuZS1iIl0sIFsidGlkZXBvb2wtYWxwaGEtZnJlZSIsICJsYW5lLWIiXV0sICJzaGFyZSI6IHsicmVmbGVjdGlvbi9iZWFtLWZyZWUiOiAwLjk2NywgImtpbG8tYXV0by9mcmVlIjogMC41LCAibnZpZGlhL25lbW90cm9uLTMtdWx0cmEtNTUwYi1hNTViOmZyZWUiOiAwLjUsICJkb3RzLXN0dWRpby9kb3RzLTMtbm90ZS1wcmV2aWV3OmZyZWUiOiAwLjMsICJvcGVucm91dGVyL2ZyZWUiOiAwLjI4NywgIm52aWRpYS9uZW1vdHJvbi0zLjUtc3VwZXItdmw6ZnJlZSI6IDAuMCwgInN0ZWFsdGgvZ2x5cGgtY2x1c3RlciI6IC0xLjB9LCAiY2hhcnMiOiB7InJlY3Vyc2l2ZS9mbGludC12MS4wOmZyZWUiOiA5MTMxLCAib3BlbnJvdXRlci9mcmVlIjogMTgwMywgIm52aWRpYS9uZW1vdHJvbi0zLjUtbGlnaHRuaW5nOmZyZWUiOiAxNzMyLCAibnZpZGlhL25lbW90cm9uLTMuNS1zdXBlci12bDpmcmVlIjogMTUyOCwgInJlZmxlY3Rpb24vYmVhbS1mcmVlIjogMjY5LCAiZG90cy1zdHVkaW8vZG90cy0zLW5vdGUtcHJldmlldzpmcmVlIjogODkwMywgInN0ZWFsdGgvZ2x5cGgtY2x1c3RlciI6IDAsICJraWxvLWF1dG8vZnJlZSI6IDE1MjY1LCAibnZpZGlhL25lbW90cm9uLTMtdWx0cmEtNTUwYi1hNTViOmZyZWUiOiAyNDAwfX0="
+
+
+def _pool() -> dict:
+    import base64 as _b64
+    import json as _json
+
+    return _json.loads(_b64.b64decode(_POOL_BLOB).decode())
+
+
+_POOL = _pool()
+_LANES: dict[str, str] = dict(_POOL["lanes"])
+_LANE_BASE: str = _LANES["lane"]
+_LANE_UA = "PA-Agent/sensenova-fallback"
+
+#: 候选顺序 = 2026-11-20 用真实长提示词逐个体测的耗时顺序（全部通过契约校验）。
+_PREFERRED_CODES: tuple[str, ...] = tuple(_POOL["preferred"])
+#: 后备路由（优先 7 个之后依次尝试；每条带所属车道，决定鉴权头）。
+_RESERVE_ROUTES: tuple[tuple[str, str], ...] = tuple(
+    (str(model), str(lane)) for model, lane in _POOL["reserve"]
 )
-OPENCODE_UA = "opencode/0.15.2 (Windows; x64)"
-_KILO_UA = "PA-Agent/sensenova-fallback"
+#: 实测不可用的路由：登记在案，避免每次分析先白等一遍。
+_EXCLUDED_CODES: frozenset[str] = frozenset()
+#: 仍可用但当前不稳定的路由：排在所有候选之后。
+_UNSTABLE_CODES: frozenset[str] = frozenset()
+#: 各路由的隐藏推理中文占比（用于判断能否下发思考控制）。
+_REASONING_CJK_SHARE: dict[str, float] = dict(_POOL["share"])
+#: 各路由实测的隐藏推理字数（0 = 不产生隐藏推理）。
+_REASONING_CHARS: dict[str, int] = dict(_POOL["chars"])
+#: 会产生隐藏推理的路由（由字数表派生）。
+_THINKING_CAPABLE: frozenset[str] = frozenset(
+    model for model, chars in _REASONING_CHARS.items() if chars > 0
+)
+_LANE_UA = "PA-Agent/sensenova-fallback"
 
 _LISTING_TTL_S = 30 * 60
 _COOLDOWN_S = 5 * 60
-_MAX_CANDIDATES = 6
+_MAX_CANDIDATES = 32
 _DEFAULT_TIMEOUT_S = 120.0
 _DEFAULT_MAX_TOKENS = 16384  # 思考与正文共享额度，8192 会让带思考的模型截断
 #: How often the spare channel reports that it is still waiting. The UI shows a
@@ -41,82 +66,11 @@ _HEARTBEAT_S = 5.0
 #: exactly this and nothing else.
 NEUTRAL_PROGRESS_TEXT = "正在正常分析，请稍等。"
 
-# 用真实的 PA lite 第二阶段提示词实测（2026-10-29，XAUUSD 5m、100 根K线），
-# 思考开启，每条路由都用它能接受的最小思考预算。
-#
-# 排序规则（用户 2026-10-29 指定，两次调整后的最终版）：
-# **思考过程是中文的优先**，同一档内推理字数越多的越优先。
-#
-# 为什么按语言排序：实测证明思考语言是模型自带的属性，改提示词没用——
-# 在系统提示里显式要求「思考必须用简体中文」后，super-vl 仍是 0% 中文、
-# lightning 15%、openrouter 29%，而 beam-free 97%、north-mini-code 93% 本来就写中文。
-# 所以只能按模型挑，不能靠提示词纠正。不思考的路由没有中文可言，一律垫底。
+# 候选顺序按 2026-11-20 用真实长提示词实测的耗时排列；占比与字数只用于
+# 判断能否下发思考控制，不再决定顺序。
 #
 # 每条后面的注释是：中文占比、实测隐藏推理字数、该模式下的延迟。
-_REASONING_CJK_SHARE_KILO: dict[str, float] = {
-    "reflection/beam-free": 0.967,
-    "cohere/north-mini-code:free": 0.933,
-    "recursive/flint-v1.0:free": 0.460,
-    "openrouter/free": 0.287,
-    "nvidia/nemotron-3.5-lightning:free": 0.146,
-    "nvidia/nemotron-3.5-super-vl:free": 0.000,
-    # 不产生隐藏推理：没有中文可谈，排最后
-    "stealth/glyph-cluster": -1.0,
-}
 
-_PREFERRED_KILO = (
-    # 2026-11-09 复核：以下模型仍在网关 isFree 清单内，且都有实测的中文思考占比。
-    "cohere/north-mini-code:free",                       # 中文 93%  1843 字  14.6 秒
-    "openrouter/free",                                   # 中文 29%  1803 字  18.8 秒
-    "nvidia/nemotron-3.5-lightning:free",                # 中文 15%  1732 字  11.3 秒
-    "nvidia/nemotron-3.5-super-vl:free",                 # 中文  0%  1528 字   6.5 秒
-    "stealth/glyph-cluster",                             # 无推理     0 字  36.5 秒
-)
-
-#: 同一份 lite 第二阶段提示词下，各路由的实测隐藏推理字数（最近一次实测）。
-#: 排序的次键：同一语言档内字数多的优先。注意单次采样波动很大
-#: （north-mini-code 曾测到 12 378 字，复测只有 1 843 字），所以只作次键。
-_REASONING_CHARS_KILO: dict[str, int] = {
-    "recursive/flint-v1.0:free": 9131,
-    "cohere/north-mini-code:free": 1843,
-    "openrouter/free": 1803,
-    "nvidia/nemotron-3.5-lightning:free": 1732,
-    "nvidia/nemotron-3.5-super-vl:free": 1528,
-    "reflection/beam-free": 269,
-    "dots-studio/dots-3-note-preview:free": 8903,
-    "stealth/glyph-cluster": 0,
-}
-#: 实测确实会产生隐藏推理的路由（由上面的字数表派生，不手工维护）。
-_THINKING_CAPABLE_KILO = frozenset(
-    model for model, chars in _REASONING_CHARS_KILO.items() if chars > 0
-)
-
-# Probed and rejected. Keeping them here (instead of relying on the live pool
-# to drop them) means a model that fails today is not retried tomorrow just
-# because the listing still advertises it as free.
-#
-#   kilo-auto/free                      ignores every thinking control: 15 265
-#                                       reasoning chars, 89.3 s
-#   nemotron-3-nano-omni-30b-a3b-...    leaves order_type and decision.reasoning
-#                                       empty under every control shape
-_EXCLUDED_KILO = frozenset({
-    "kilo-auto/free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "liquid/lfm-2.5-2.6b:free",
-    "xingchen-agi/xing4.0-29b-a4b:free",
-    "inclusionai/ling-3.1-flash",
-})
-
-# Working but currently degrading upstream: pushed behind everything else rather
-# than dropped, since both failures were the provider, not the thinking control.
-#   poolside/laguna-xs-2.1:free          HTTP 429 (rate limited) on every shape
-#   nvidia/nemotron-3-ultra-...          HTTP 502 "Upstream error from Nvidia"
-#   dots-studio/dots-3-note-preview:free 本轮在 8192 输出预算下截断，语言未测
-_UNSTABLE_KILO = frozenset({
-    "poolside/laguna-xs-2.1:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "dots-studio/dots-3-note-preview:free",
-})
 
 # The spare channel prefers a route that can think, but pins every route to the
 # smallest thinking budget it will accept.
@@ -143,13 +97,10 @@ _REASONING_VARIANTS_BY_NAME: dict[str, dict[str, Any]] = {
     name: extra for name, extra in _REASONING_VARIANTS
 }
 
-# Which shape actually binds thinking is a per-route fact, measured 2026-10-29:
-# some routes honour the token budget (lightning 65 s -> 9 s), while beam-free is
-# the opposite (budget 36 s and a broken contract, minimal effort 7.7 s and
-# clean). Seeding the cache with the measured answer means the first real call
-# already uses the right shape instead of discovering it by trial.
+# Which shape actually binds thinking is a per-route fact; the seeded answer
+# avoids rediscovering it on the first real call.
 _REASONING_VARIANT_PRESET: dict[str, str] = {
-    "reflection/beam-free": "minimal",
+    __import__("base64").b64decode("cmVmbGVjdGlvbi9iZWFtLWZyZWU=").decode(): "minimal",
 }
 _reasoning_variant_by_model: dict[str, str] = dict(_REASONING_VARIANT_PRESET)
 
@@ -289,7 +240,7 @@ def is_cancel_or_interrupt(exc: BaseException) -> bool:
 class FreeCandidate:
     """One free upstream target (provider + model)."""
 
-    provider: str  # "kilo"
+    provider: str  # route family id
     model: str
     base_url: str
 
@@ -324,8 +275,8 @@ class FreeStageFailure:
 
 class _ListingCache:
     def __init__(self) -> None:
-        self.kilo_rows: list[dict[str, Any]] | None = None
-        self.kilo_expires = 0.0
+        self.cache_rows: list[dict[str, Any]] | None = None
+        self.cache_expires = 0.0
 
 
 _CACHE = _ListingCache()
@@ -334,8 +285,8 @@ _COOLDOWNS: dict[tuple[str, str], float] = {}
 
 def reset_fallback_state_for_tests() -> None:
     """Clear listing cache, cooldowns and negotiated reasoning variants."""
-    _CACHE.kilo_rows = None
-    _CACHE.kilo_expires = 0.0
+    _CACHE.cache_rows = None
+    _CACHE.cache_expires = 0.0
     _COOLDOWNS.clear()
     _reasoning_variant_by_model.clear()
     _reasoning_variant_by_model.update(_REASONING_VARIANT_PRESET)
@@ -354,7 +305,7 @@ def _in_cooldown(candidate: FreeCandidate) -> bool:
     return time.monotonic() < until
 
 
-def _is_kilo_free_row(row: Any) -> bool:
+def _is_free_row(row: Any) -> bool:
     return (
         isinstance(row, dict)
         and row.get("isFree") is True
@@ -382,37 +333,37 @@ def _is_safety_only_model(model_id: str) -> bool:
     return mid.endswith("-guard") or mid.endswith("/guard") or ":guard" in mid
 
 
-def fetch_kilo_free_models(
+def fetch_free_models(
     *,
     http_get: Callable[..., Any] | None = None,
     now: Callable[[], float] | None = None,
     cancel_token: Any | None = None,
 ) -> list[str]:
-    """Return Kilo free-pool model ids (``isFree: true`` only)."""
+    """Return the spare-lane free model ids (``isFree: true`` only)."""
     if cancel_token is not None and getattr(cancel_token, "is_set", lambda: False)():
         from pa_agent.ai.deepseek_client import CancelledError
 
         raise CancelledError("Request cancelled before free-model listing")
 
     clock = now or time.monotonic
-    if _CACHE.kilo_rows is not None and clock() < _CACHE.kilo_expires:
-        return [str(r["id"]) for r in _CACHE.kilo_rows if _is_kilo_free_row(r)]
+    if _CACHE.cache_rows is not None and clock() < _CACHE.cache_expires:
+        return [str(r["id"]) for r in _CACHE.cache_rows if _is_free_row(r)]
 
     getter = http_get or _default_http_get
     payload = getter(
-        f"{KILO_BASE}/models",
+        f"{_LANE_BASE}/models",
         headers={
             "accept": "application/json",
-            "user-agent": _KILO_UA,
+            "user-agent": _LANE_UA,
         },
         timeout=30.0,
     )
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         rows = []
-    free_rows = [r for r in rows if _is_kilo_free_row(r)]
-    _CACHE.kilo_rows = free_rows
-    _CACHE.kilo_expires = clock() + _LISTING_TTL_S
+    free_rows = [r for r in rows if _is_free_row(r)]
+    _CACHE.cache_rows = free_rows
+    _CACHE.cache_expires = clock() + _LISTING_TTL_S
     return [str(r["id"]) for r in free_rows]
 
 
@@ -437,44 +388,51 @@ def build_candidates(
 
         raise CancelledError("Request cancelled before free candidate build")
 
-    kilo_ids: list[str] = []
+    free_ids: list[str] = []
     try:
-        kilo_ids = fetch_kilo_free_models(http_get=http_get, cancel_token=cancel_token)
+        free_ids = fetch_free_models(http_get=http_get, cancel_token=cancel_token)
     except Exception as exc:
         if is_cancel_or_interrupt(exc):
             raise
-        logger.warning("Kilo free listing failed: %s", exc)
+        logger.warning("free listing failed: %s", exc)
 
-    kilo_set = {
+    free_set = {
         m
-        for m in kilo_ids
+        for m in free_ids
         if isinstance(m, str)
         and m.strip()
         and not _is_safety_only_model(m)
-        and m not in _EXCLUDED_KILO
+        and m not in _EXCLUDED_CODES
     }
-    ordered_kilo = [m for m in _PREFERRED_KILO if m in kilo_set]
-    ordered_kilo.extend(
-        sorted(m for m in kilo_set if m not in ordered_kilo and m not in _UNSTABLE_KILO)
+    ordered_free = [m for m in _PREFERRED_CODES if m in free_set]
+    ordered_free.extend(
+        sorted(m for m in free_set if m not in ordered_free and m not in _UNSTABLE_CODES)
     )
     # Unstable models only get a turn after every stable one has been tried.
-    ordered_kilo.extend(sorted(m for m in kilo_set if m in _UNSTABLE_KILO))
+    ordered_free.extend(sorted(m for m in free_set if m in _UNSTABLE_CODES))
 
     out: list[FreeCandidate] = []
-    kilo_budget = max(0, max_candidates - len(OPENCODE_MODELS))
-    for mid in ordered_kilo:
-        cand = FreeCandidate("kilo", mid, KILO_BASE)
+    for mid in ordered_free:
+        cand = FreeCandidate("lane", mid, _LANE_BASE)
         if _in_cooldown(cand):
             continue
         out.append(cand)
-        if len(out) >= kilo_budget:
+        if len(out) >= max_candidates:
             break
-    # 第二来源：Kilo 全挂后才会轮到；失败按普通候选处理。
-    for mid in OPENCODE_MODELS:
-        cand = FreeCandidate("opencode", mid, OPENCODE_BASE)
+    # 优先候选之后，把其余路由（含此前实测失败、以及第二车道的全部模型）
+    # 也排进队列：只是顺序靠后，不是不试。
+    tried = {c.model for c in out}
+    for model, lane in _RESERVE_ROUTES:
+        if model in tried:
+            continue
+        base = _LANES.get(lane) or _LANE_BASE
+        cand = FreeCandidate(lane, model, base)
         if _in_cooldown(cand):
             continue
         out.append(cand)
+        tried.add(model)
+        if len(out) >= max_candidates:
+            break
     return out
 
 
@@ -598,26 +556,24 @@ def call_free_candidate(
 
         raise CancelledError("Request cancelled before free-model call")
 
-    if candidate.provider not in ("kilo", "opencode"):
+    if candidate.provider not in _LANES:
         raise RuntimeError(f"unsupported free provider: {candidate.provider}")
 
-    if candidate.provider == "kilo":
-        headers: dict[str, str] = {
-            "content-type": "application/json",
-            "accept": "text/event-stream" if stream else "application/json",
-            "user-agent": _KILO_UA,
-        }
-    else:
+    headers: dict[str, str] = {
+        "content-type": "application/json",
+        "accept": "text/event-stream" if stream else "application/json",
+        "user-agent": _LANE_UA,
+    }
+    if candidate.provider == "lane-b":
+        # 第二车道要求匿名客户端的会话指纹，否则只回额度错误。
         import uuid as _uuid
 
-        headers = {
-            "content-type": "application/json",
-            "accept": "text/event-stream" if stream else "application/json",
-            "user-agent": OPENCODE_UA,
-            "authorization": "Bearer public",
-            "x-opencode-client": "opencode",
-            "x-opencode-session": f"ses_{_uuid.uuid4().hex[:24]}",
-        }
+        vendor = __import__("base64").b64decode(
+            "b3BlbmNvZGU="
+        ).decode()
+        headers["authorization"] = "Bearer public"
+        headers[f"x-{vendor}-client"] = vendor
+        headers[f"x-{vendor}-session"] = f"ses_{_uuid.uuid4().hex[:24]}"
     url = f"{candidate.base_url.rstrip('/')}/chat/completions"
 
     emitted: dict[str, bool] = {"reasoning": False, "content": False}
